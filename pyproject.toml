@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hotnerd"
+version = "0.1.0"
+description = "HOT-NERD core library"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+authors = [ { name = "imlong4real" } ]
+keywords = ["spatial", "tiling", "bioinformatics"]
+classifiers = [
+	"Programming Language :: Python :: 3",
+	"Programming Language :: Python :: 3.9",
+	"License :: OSI Approved :: MIT License",
+	"Operating System :: OS Independent",
+]
+dependencies = [
+	"numpy>=1.21",
+	"pandas>=1.3",
+	"geopandas>=0.12",
+	"shapely>=2.0",
+	"scikit-learn>=1.0",
+	"pymetis>=0.2",
+	"matplotlib>=3.5",
+	"pyarrow>=8.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "black", "flake8"]
+docs = ["sphinx"]
+
+[project.urls]
+Homepage = "https://github.com/imlong4real/HOT-NERD"
+Source = "https://github.com/imlong4real/HOT-NERD"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
