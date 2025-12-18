@@ -17,6 +17,14 @@ __all__ = [
 	"compute_cell_purity",
 	"compute_cell_conflict",
 	"compute_purity_and_conflict",
+	"calculate_rankings",
+	"calculate_thresholds",
+	"build_graph",
+	"add_edge_prob_stats",
+	"to_networkx",
+	"build_gene_threshold_maps_from_ranked_df",
+	"prune_graph",
+	"plot_cc",
 ]
 
 __version__ = "0.1.0"
@@ -40,5 +48,19 @@ from .metrics import (
 	compute_cell_purity,
 	compute_cell_conflict,
 	compute_purity_and_conflict,
+)
+
+from .core import (
+    calculate_rankings,
+    calculate_thresholds,
+    build_graph,
+    add_edge_prob_stats,
+    to_networkx,
+    build_gene_threshold_maps_from_ranked_df,
+    prune_graph,
+)
+
+from .plot import (
+    plot_cc,
 )
 
