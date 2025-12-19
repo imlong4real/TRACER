@@ -5,6 +5,8 @@ import torch
 from torch_geometric.data import Data
 import networkx as nx
 from collections import Counter
+from scipy.spatial import Delaunay
+from scipy.spatial.distance import euclidean
 
 def calculate_rankings(
     df,
@@ -254,8 +256,21 @@ def to_networkx(
     remove_isolated=True,
 ):
     """
-    Convert PyG Data → NetworkX graph and compute node connectivity.
+    Convert PyG Data → NetworkX graph.
+
+    Node attributes
+    ---------------
+    feature_name : str
+    pos          : np.ndarray shape (3,)
+    connectivity : int
+
+    Edge attributes
+    ---------------
+    length
+    npmi
+    cond_prob
     """
+
     src, tgt = data.edge_index.numpy()
 
     if not directed:
@@ -264,15 +279,20 @@ def to_networkx(
 
     G = nx.DiGraph() if directed else nx.Graph()
 
-    # add nodes
-    for i, g in enumerate(data.gene_name):
-        G.add_node(i, feature_name=g)
-
-    # edge lengths
+    # Add nodes
     pos = data.pos.numpy()
+
+    for i, g in enumerate(data.gene_name):
+        G.add_node(
+            i,
+            feature_name=str(g),
+            pos=pos[i],           
+        )
+
+    # Edge lengths
     lengths = np.linalg.norm(pos[src] - pos[tgt], axis=1)
 
-    # edge attributes
+    # Add edges
     for i, (s, t) in enumerate(zip(src, tgt)):
         G.add_edge(
             int(s),
@@ -282,7 +302,7 @@ def to_networkx(
             cond_prob=float(data.cond_prob[i]) if hasattr(data, "cond_prob") else 0.0,
         )
 
-    # connectivity = degree
+    # Connectivity (degree)
     connectivity = dict(G.degree())
     nx.set_node_attributes(G, connectivity, "connectivity")
 
@@ -614,4 +634,207 @@ def purity_conflict_from_cc(
 
     return tuple(outputs) if len(outputs) > 1 else summary_df
 
+#
+def build_cc_delaunay_graph(
+    summary_df,
+    *,
+    use_3d=True,
+):
+    """
+    Build a CC-level Delaunay graph from centroid coordinates.
 
+    Nodes
+    -----
+    component_id
+
+    Edges
+    -----
+    Delaunay adjacency edges with:
+      - length (µm) [metadata only]
+
+    NOTE:
+    - No distance thresholding.
+    - Geometry defines adjacency only, not scoring.
+    """
+
+    # Extract centroids
+    if use_3d:
+        pts = summary_df[["centroid_x", "centroid_y", "centroid_z"]].to_numpy()
+    else:
+        pts = summary_df[["centroid_x", "centroid_y"]].to_numpy()
+
+    comp_ids = summary_df["component_id"].to_numpy()
+
+    # Delaunay triangulation
+    if len(pts) < (4 if use_3d else 3):
+        G_cc = nx.Graph()
+        G_cc.add_nodes_from(comp_ids.astype(int))
+        return G_cc
+
+    delaunay = Delaunay(pts)
+
+    # Build graph
+    G_cc = nx.Graph()
+    G_cc.add_nodes_from(comp_ids.astype(int))
+
+    for simplex in delaunay.simplices:
+        for i in range(len(simplex)):
+            for j in range(i + 1, len(simplex)):
+                u_idx = simplex[i]
+                v_idx = simplex[j]
+
+                u = int(comp_ids[u_idx])
+                v = int(comp_ids[v_idx])
+
+                if u == v:
+                    continue
+
+                d = float(euclidean(pts[u_idx], pts[v_idx]))
+                G_cc.add_edge(u, v, length=d)
+
+    return G_cc
+
+#
+def compute_deltaC_stitch(
+    G_frag,
+    M,
+    npmi_mat,
+    col_idx,
+    *,
+    purity_threshold=0.05,
+    penalize_simplicity=True,
+):
+    """
+    Computes ΔC for stitching using gene coherence only.
+
+    ΔC = C_union - max(C_u, C_v)          (no simplicity)
+    ΔC = C_union - 1/n_union - max(C_u - 1/n_u, C_v - 1/n_v)  (with simplicity)
+
+    IMPORTANT:
+    - Singlet–singlet stitching is forbidden.
+    """
+
+    purity, conflict = compute_purity_conflict_per_cc(
+        M, npmi_mat, col_idx, purity_threshold
+    )
+    C_cell = purity - conflict
+
+    n_genes = np.sum(M == 1, axis=1)
+    dC = {}
+
+    for u, v, data in G_frag.edges(data=True):
+
+
+        # Missing guard
+        if np.isnan(C_cell[u]) or np.isnan(C_cell[v]):
+            data["deltaC"] = np.nan
+            dC[(u, v)] = np.nan
+            continue
+
+
+        # Prevent singlet–singlet
+        if n_genes[u] == 1 and n_genes[v] == 1:
+            data["deltaC"] = -np.inf
+            dC[(u, v)] = -np.inf
+            continue
+
+        # Union coherence
+        present_union = np.where((M[u] == 1) | (M[v] == 1))[0]
+        k = len(present_union)
+
+        if k < 2:
+            C_union = 0.0
+        else:
+            gi = col_idx[present_union]
+            sub = npmi_mat[np.ix_(gi, gi)]
+            vals = sub[np.triu_indices_from(sub, k=1)]
+
+            if len(vals) == 0:
+                C_union = 0.0
+            else:
+                purity_union = np.mean(vals > purity_threshold)
+                neg = -vals[vals < 0]
+                conflict_union = neg.mean() if len(neg) > 0 else 0.0
+                C_union = purity_union - conflict_union
+
+        # Separation / penalty
+        if penalize_simplicity:
+            nu = max(n_genes[u], 1)
+            nv = max(n_genes[v], 1)
+            n_union = nu + nv
+
+            C_u_adj = C_cell[u] - 1.0 / nu
+            C_v_adj = C_cell[v] - 1.0 / nv
+            C_sep = max(C_u_adj, C_v_adj)
+
+            deltaC = C_union - (1.0 / n_union) - C_sep
+        else:
+            C_sep = max(C_cell[u], C_cell[v])
+            deltaC = C_union - C_sep
+
+        data["deltaC"] = float(deltaC)
+        dC[(u, v)] = float(deltaC)
+
+    return dC, C_cell, purity, conflict
+
+#
+def stitch_connected_components(
+    summary_df,
+    M_cc,
+    npmi_mat,
+    col_idx,
+    *,
+    purity_threshold=0.05,
+    penalize_simplicity=True,
+    use_3d=True,
+):
+    """
+    Perform ΔC-based greedy stitching on CC-level graph
+    using gene coherence only.
+    """
+
+    # Build CC-level Delaunay graph
+    G_cc = build_cc_delaunay_graph(summary_df, use_3d=use_3d)
+
+    # Compute ΔC on CC graph
+    dC, C_cell, purity, conflict = compute_deltaC_stitch(
+        G_frag=G_cc,
+        M=M_cc,
+        npmi_mat=npmi_mat,
+        col_idx=col_idx,
+        purity_threshold=purity_threshold,
+        penalize_simplicity=penalize_simplicity,
+    )
+
+    # Keep only stitchable edges
+    G_pos = nx.Graph()
+    for u, v, data in G_cc.edges(data=True):
+        if data.get("deltaC", -np.inf) >= 0:
+            G_pos.add_edge(u, v, deltaC=data["deltaC"])
+
+    # Assign stitched CC IDs
+    stitched_cc_id = {}
+    deltaC_max = {}
+    next_id = 0
+
+    for comp in nx.connected_components(G_pos):
+        comp = list(comp)
+        for u in comp:
+            stitched_cc_id[u] = next_id
+            vals = [G_pos[u][v]["deltaC"] for v in G_pos.neighbors(u)]
+            deltaC_max[u] = max(vals) if vals else np.nan
+        next_id += 1
+
+    # isolated CCs
+    for u in G_cc.nodes():
+        if u not in stitched_cc_id:
+            stitched_cc_id[u] = next_id
+            deltaC_max[u] = np.nan
+            next_id += 1
+
+    # Attach back
+    summary_df_out = summary_df.copy()
+    summary_df_out["stitched_cc_id"] = summary_df_out["component_id"].map(stitched_cc_id)
+    summary_df_out["deltaC_max"] = summary_df_out["component_id"].map(deltaC_max)
+
+    return summary_df_out, G_cc

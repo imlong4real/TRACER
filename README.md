@@ -8,7 +8,7 @@ HOT-NERD provides lightweight utilities for imaging-based spatial transcriptomic
 
 - Partition large tissue spatially using Metis on a kNN graph built from cell centroids.
 - Compute gene co-occurrence statistics (PMI / NPMI) and derive per-cell purity and conflict metrics.
-- Utilities for refine cell segmentation using 3D cell transcript graph and identify 3D partial (pseudo) cells.
+- Utilities to refine cell segmentation using a 3D transcript graph and identify 3D partial (pseudo) cells.
 
 Quick start
 -----------
@@ -24,6 +24,25 @@ Import and inspect available functions:
 import hotnerd
 print(hotnerd.__version__)
 print(sorted(hotnerd.__all__))
+```
+
+Example
+-------
+The `examples/` folder contains a runnable demonstration that shows how HOT-NERD can refine an initial segmentation produced by the 10X Xenium V1 platform.
+
+- Original segmentation (10X Xenium V1):
+
+![Original segmentation](examples/output/10X_transcripts.png)
+
+- After refining segmentation with HOT-NERD:
+
+![Refined segmentation (HOT-NERD)](examples/output/v1_example.png)
+
+Run the example locally:
+
+```bash
+pip install -e .
+python examples/refine_segmentation.py
 ```
 
 Design notes
@@ -43,5 +62,6 @@ https://github.com/imlong4real/HOT-NERD
 
 License
 -------
-MIT (see `LICENSE`)
+MIT (see LICENSE)
+
 
