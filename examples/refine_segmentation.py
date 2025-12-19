@@ -192,7 +192,7 @@ def main():
         npmi_long=pair_counts_df,
         df_local=df_local,
         purity_threshold=0.05,
-        min_cc_size=5,
+        min_cc_size=15,
         return_matrix=True,
         return_node_mapping=True,
     )
