@@ -34,9 +34,9 @@ The `examples/` folder contains a runnable demonstration that shows how HOT-NERD
 
 ![Original segmentation](examples/output/10X_transcripts.png)
 
-- After refining segmentation with HOT-NERD:
+- After refining segmentation with HOT-NERD, we can identify Z-axis overlap at single-cell level:
 
-![Refined segmentation (HOT-NERD)](examples/output/v1_example.png)
+![Refined segmentation (HOT-NERD)](examples/output/cell_124838_concave_refinement.png)
 
 Run the example locally:
 
@@ -48,7 +48,7 @@ python examples/refine_segmentation.py
 Design notes
 ------------
 - Source layout: `src/` package layout.
-- Runtime dependencies include `numpy`, `pandas`, `geopandas`, `shapely`, `scikit-learn`, `pymetis`, and `matplotlib`.
+- Runtime dependencies include `numpy`, `pandas`, `geopandas`, `shapely`, `scikit-learn`, `pymetis`, `open3d`, and `matplotlib`.
 
 Contact
 -------

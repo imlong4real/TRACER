@@ -1,0 +1,17 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Packaging
+*.egg-info/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Generated outputs
+examples/output/
