@@ -1456,21 +1456,26 @@ def apply_stitching_to_transcripts_fast(
         pbar.update(1)
         pbar.close()
 
-    # map back to transcripts
+    # map back to transcripts using vectorized numpy lookup (much faster than pandas.map())
     df_out = df_final.copy()
     ent = df_out[entity_col].astype(str)
     df_out[out_col] = ent
 
     mask = ent.notna() & (ent != "DROP") & (ent != "nan")
-    if show_progress:
-        # chunked mapping with progress
-        keys = ent[mask].index.to_numpy()
-        for i in tqdm(range(0, len(keys), 1000), desc="apply_labels"):
-            batch = keys[i : i + 1000]
-            df_out.loc[batch, out_col] = ent.loc[batch].map(entity_to_stitched).fillna(ent.loc[batch])
-    else:
-        df_out.loc[mask, out_col] = ent[mask].map(entity_to_stitched).fillna(ent[mask])
-
+    
+    if mask.sum() > 0:
+        # Fully vectorized mapping using pandas.Series.map() (much faster than loop)
+        ent_values = ent[mask]
+        
+        # Convert dict to pandas Series for vectorized .map()
+        mapping_series = pd.Series(entity_to_stitched)
+        
+        # Vectorized map with fillna for unmapped values (keeps original)
+        stitched_values = ent_values.map(mapping_series).fillna(ent_values)
+        
+        # Single assignment
+        df_out.loc[mask, out_col] = stitched_values
+    
     return df_out, entity_to_stitched
 
 # ---------- Phase 5: Finetune assignment based on spatial coherence ----------
@@ -1641,20 +1646,27 @@ def enforce_spatial_coherence_fast(
             df = df.drop(columns=["__node_idx"])  # not used in this path
             return df
 
-    # Fallback: original per-label subgraph approach with progress bar
+    # Fallback: original per-label subgraph approach with progress bar (optimized)
     G = to_networkx(data_all, to_undirected=True)
 
     labels = base_labels.unique()
     iterable = labels
     if show_progress:
         iterable = tqdm(labels, desc="spatial_labels")
+    
+    # Pre-compute for faster indexing
+    node_idx_arr = df["__node_idx"].to_numpy()
+    base_labels_arr = base_labels.to_numpy()
+    out_arr = df[out_col].to_numpy(dtype=object)
 
     for label in iterable:
         if label == "DROP" or label == "nan":
             continue
 
-        mask = (base_labels == label)
-        node_idx = df.loc[mask, "__node_idx"].to_numpy()
+        # Use numpy boolean indexing (faster than pandas)
+        label_mask = (base_labels_arr == label)
+        node_idx = node_idx_arr[label_mask]
+        label_positions = np.where(label_mask)[0]
 
         if node_idx.size <= 1:
             continue
@@ -1666,14 +1678,23 @@ def enforce_spatial_coherence_fast(
             continue
 
         comps_sorted = sorted(comps, key=len, reverse=True)
+        
+        # Build node -> position mapping for fast lookup
+        node_to_pos = {node: label_positions[i] for i, node in enumerate(node_idx)}
+        
+        # Vectorized assignment: collect all updates then apply once
         for i, comp_nodes in enumerate(comps_sorted):
             if i == 0:
                 new_label = label
             else:
                 new_label = f"{label}-{i+1}"
-
-            comp_nodes = np.array(list(comp_nodes), dtype=int)
-            df.loc[df["__node_idx"].isin(comp_nodes), out_col] = new_label
+            
+            # Get positions for all nodes in this component
+            positions = [node_to_pos[node] for node in comp_nodes if node in node_to_pos]
+            if positions:
+                out_arr[positions] = new_label
+    
+    df[out_col] = out_arr
 
     df = df.drop(columns=["__node_idx"])
     return df

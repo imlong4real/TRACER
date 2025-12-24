@@ -1,5 +1,8 @@
 # Example: refine segmentation
 
+**Author:** Long Yuan  
+**Email:** lyuan13@jhmi.edu
+
 This folder contains a runnable example that demonstrates how to refine
 an initial segmentation visualization into a clustered/stitched result
 using the `hotnerd` API.
