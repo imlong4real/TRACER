@@ -33,18 +33,23 @@ __all__ = [
     "stitch_connected_components",
     "build_dense_npmi_matrix",
     "prune_transcripts",
+    "prune_transcripts_fast",
     "annotate_unassigned_components",
+    "annotate_unassigned_components_fast",
     "apply_stitching_to_transcripts",
+    "apply_stitching_to_transcripts_fast",
     "build_entity_table",
     "stitch_entities_hierarchical",
     "delaunay_edges",
     "prune_genes_by_npmi_greedy",
+    "enforce_spatial_coherence",
+    "enforce_spatial_coherence_fast",
     "plot_cc",
     "plot_3d_concave_cell",
     "plot_3d_convex_cell",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 __author__ = "Long Yuan <lyuan13@jhmi.edu>"
 __license__ = "MIT"
 
@@ -84,16 +89,26 @@ from .core import (
     stitch_connected_components,
     build_dense_npmi_matrix,
     prune_transcripts,
+    prune_transcripts_fast,
     annotate_unassigned_components,
+    annotate_unassigned_components_fast,
     apply_stitching_to_transcripts,
+    apply_stitching_to_transcripts_fast,
     build_entity_table,
     stitch_entities_hierarchical,
     delaunay_edges,
     prune_genes_by_npmi_greedy,
+    enforce_spatial_coherence,
+    enforce_spatial_coherence_fast,
 )
 
-from .plot import (
-    plot_cc,
-    plot_3d_concave_cell,
-    plot_3d_convex_cell,
-)
+# Optional plot module (requires open3d)
+try:
+    from .plot import (
+        plot_cc,
+        plot_3d_concave_cell,
+        plot_3d_convex_cell,
+    )
+except ImportError:
+    # open3d not installed; plotting functions unavailable
+    pass

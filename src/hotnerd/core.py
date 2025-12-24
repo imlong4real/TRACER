@@ -7,9 +7,37 @@ import networkx as nx
 from collections import Counter
 from scipy.spatial import Delaunay
 from scipy.spatial.distance import euclidean
+from scipy.sparse import csr_matrix
+from scipy.sparse.csgraph import connected_components as scipy_cc
 from torch_geometric.utils import to_networkx
 import heapq
 from collections import defaultdict
+from tqdm.auto import tqdm
+import concurrent.futures
+
+# Cython accelerator for pruning
+try:
+    from . import _cy_prune as _cy_prune
+except Exception:
+    _cy_prune = None
+    try:
+        import pyximport
+        pyximport.install(setup_args={"include_dirs": [np.get_include()]}, language_level=3)
+        from . import _cy_prune as _cy_prune
+    except Exception:
+        _cy_prune = None
+
+# Cython accelerator for spatial label-constrained components
+try:
+    from . import _cy_spatial as _cy_spatial
+except Exception:
+    _cy_spatial = None
+    try:
+        import pyximport
+        pyximport.install(setup_args={"include_dirs": [np.get_include()]}, language_level=3)
+        from . import _cy_spatial as _cy_spatial
+    except Exception:
+        _cy_spatial = None
 
 # ---------- Phase 1/2: Conservative NPMI pruning ----------
 # Denoise cell and create partial cell IDs based on NPMI gene coherence (Phase 1)
@@ -88,6 +116,25 @@ def prune_genes_by_npmi_greedy(
 
     return active
 
+
+# Attempt to replace the Python implementation with a Cython-compiled one
+# If Cython and a compiler are available, this will import a compiled
+# _cy_prune module; otherwise the pure-Python function above remains in use.
+try:
+    import importlib
+    _cy = importlib.import_module("hotnerd._cy_prune")
+    prune_genes_by_npmi_greedy = _cy.prune_genes_by_npmi_greedy
+except Exception:
+    try:
+        import pyximport
+        pyximport.install(language_level=3)
+        import importlib
+        _cy = importlib.import_module("hotnerd._cy_prune")
+        prune_genes_by_npmi_greedy = _cy.prune_genes_by_npmi_greedy
+    except Exception:
+        # Leave the pure-Python implementation as a fallback
+        pass
+
 #
 def prune_transcripts(
     df,
@@ -160,6 +207,266 @@ def prune_transcripts(
         df.loc[~mask & (df["cell_id_npmi_cons_p1"] == pid), "npmi_cons_p2_status"] = "partial_p2"
         df.loc[mask, "cell_id_npmi_cons_p2"] = unassigned_id
         df.loc[mask, "npmi_cons_p2_status"] = "unassigned_from_partial"
+
+    df.drop(columns=["_cell_str", "_gene_idx"], inplace=True)
+
+    aux = {
+        "genes": genes,
+        "gene_to_idx": gene_to_idx,
+        "W": W,
+        "partial_map": partial_map,
+        "threshold": threshold,
+    }
+    return df, aux
+
+
+def prune_transcripts_fast(
+    df,
+    npmi_df,
+    cell_id_col="cell_id",
+    gene_col="feature_name",
+    threshold=-0.1,
+    unassigned_id="-1",
+    n_jobs: int = 1,
+    show_progress: bool = True,
+):
+    """
+    Parallelized version of `prune_transcripts` with progress bars.
+
+    - `n_jobs` controls number of worker threads (use -1 for all cores).
+    - Uses thread-based parallelism to avoid copying large `W` matrix between processes.
+
+    Behavior and returned columns match `prune_transcripts`.
+    """
+    df = df.copy()
+    # Work directly with cell_id_col to avoid expensive conversion on 28M rows
+    # Only convert cell IDs if they're not already strings
+    if df[cell_id_col].dtype != 'object':
+        df["_cell_str"] = df[cell_id_col].astype(str)
+    else:
+        df["_cell_str"] = df[cell_id_col]
+    
+    # Optimize gene conversion: avoid double .astype(str).str.strip() on 28M rows
+    if df[gene_col].dtype != 'object':
+        df[gene_col] = df[gene_col].astype(str)
+    # Skip .str.strip() for performance; assume input is already clean or build_dense_npmi_matrix handles it
+    # If needed, only strip during npmi_df processing, not on df
+
+    genes, gene_to_idx, W = build_dense_npmi_matrix(npmi_df)
+    df["_gene_idx"] = df[gene_col].map(gene_to_idx)
+
+    # ---------- PASS 1 (parallelizable) ----------
+    df["cell_id_npmi_cons_p1"] = df["_cell_str"]
+    df["npmi_cons_p1_status"] = np.where(
+        df["_cell_str"] == unassigned_id,
+        "unassigned_input",
+        "core",
+    )
+
+    partial_map = {}
+
+    # Prepare per-cell unique gene lists (only cells that are not unassigned)
+    grp = df[df["_cell_str"] != unassigned_id].groupby("_cell_str")["_gene_idx"].apply(
+        lambda s: np.asarray(pd.Index(s.dropna().astype(int)).unique(), dtype=np.int32)
+    )
+
+    cell_items = list(grp.items())
+    total_cells = len(cell_items)
+
+    # normalize n_jobs
+    if n_jobs is None or n_jobs == 0:
+        n_jobs = 1
+    if n_jobs < 0:
+        try:
+            import os
+
+            n_jobs = max(1, os.cpu_count() or 1)
+        except Exception:
+            n_jobs = 1
+
+    results = []
+
+    # If compiled Cython accelerator is available, use it to process all cells
+    if _cy_prune is not None:
+        cell_ids = [cid for cid, _ in cell_items]
+        g_arrays = [gl if (gl is not None and gl.size > 0) else None for _, gl in cell_items]
+        try:
+            removed_lists = _cy_prune.prune_cells(g_arrays, W, float(threshold))
+        except Exception:
+            removed_lists = None
+
+        if removed_lists is not None:
+            for cid, removed in zip(cell_ids, removed_lists):
+                if removed:
+                    partial_map[cid] = f"{cid}-1"
+                    results.append((cid, removed))
+
+        if show_progress:
+            pbar = tqdm(total=total_cells, desc="prune_pass1")
+            pbar.update(total_cells)
+            pbar.close()
+        else:
+            pbar = None
+    else:
+        def _process_cell(item):
+            cid, g_local = item
+            if g_local.size <= 1:
+                return cid, None
+            keep_mask = prune_genes_by_npmi_greedy(g_local, W, threshold)
+            removed = g_local[~keep_mask]
+            if removed.size == 0:
+                return cid, None
+            return cid, removed.tolist()
+
+        if show_progress:
+            pbar = tqdm(total=total_cells, desc="prune_pass1")
+        else:
+            pbar = None
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=n_jobs) as ex:
+            futures = {ex.submit(_process_cell, it): it[0] for it in cell_items}
+            for fut in concurrent.futures.as_completed(futures):
+                cid, removed = fut.result()
+                if removed is not None:
+                    partial_map[cid] = f"{cid}-1"
+                    results.append((cid, removed))
+                if pbar is not None:
+                    pbar.update(1)
+        if pbar is not None:
+            pbar.close()
+
+    # Apply pass1 removals to df in a vectorized batch
+    if results:
+        # build mapping table of (cell_str, gene_idx) -> pid
+        rows = []
+        for cid, removed in results:
+            pid = partial_map[cid]
+            for g in removed:
+                rows.append((cid, int(g), pid))
+
+        if rows:
+            map_df = pd.DataFrame(rows, columns=["_cell_str_map", "_gene_idx_map", "_pid"])
+
+            # prepare indexed view of original df for efficient merging
+            df_idx = df.reset_index().rename(columns={"index": "_orig_index"})[["_orig_index", "_cell_str", "_gene_idx"]]
+            # coerce gene idx to pandas nullable Int to allow exact matching
+            df_idx["_gene_idx"] = df_idx["_gene_idx"].astype("Int64")
+            map_df["_gene_idx_map"] = map_df["_gene_idx_map"].astype("Int64")
+
+            merged = pd.merge(
+                df_idx,
+                map_df,
+                left_on=["_cell_str", "_gene_idx"],
+                right_on=["_cell_str_map", "_gene_idx_map"],
+                how="inner",
+            )
+
+            if not merged.empty:
+                # assign in one vectorized operation
+                df.loc[merged["_orig_index"], "cell_id_npmi_cons_p1"] = merged["_pid"].values
+                df.loc[merged["_orig_index"], "npmi_cons_p1_status"] = "partial_p1"
+
+    # show that pass1 application is complete
+    if show_progress:
+        tqdm(desc="apply_pass1", total=1).update(1)
+
+    # ---------- PASS 2 (parallelizable over partials) ----------
+    df["cell_id_npmi_cons_p2"] = df["cell_id_npmi_cons_p1"]
+    df["npmi_cons_p2_status"] = "unchanged"
+
+    pids = list(set(partial_map.values()))
+    if pids:
+        # prepare per-partial unique gene lists
+        grp_p = df[df["cell_id_npmi_cons_p1"].isin(pids)].groupby("cell_id_npmi_cons_p1")["_gene_idx"].apply(
+            lambda s: np.asarray(pd.Index(s.dropna().astype(int)).unique(), dtype=np.int32)
+        )
+
+        partial_items = list(grp_p.items())
+        total_partials = len(partial_items)
+
+        if show_progress:
+            pbar2 = tqdm(total=total_partials, desc="prune_pass2")
+        else:
+            pbar2 = None
+
+        results2 = []
+
+        # If cython accelerator is available, use it for partials
+        if _cy_prune is not None:
+            pids = [pid for pid, _ in partial_items]
+            g_arrays = [gl if (gl is not None and gl.size > 0) else None for _, gl in partial_items]
+            try:
+                removed_lists = _cy_prune.prune_cells(g_arrays, W, float(threshold))
+            except Exception:
+                removed_lists = None
+
+            if removed_lists is not None:
+                # update progress incrementally so the bar reflects work being applied
+                for pid, removed in zip(pids, removed_lists):
+                    if removed:
+                        results2.append((pid, removed))
+                    if pbar2 is not None:
+                        pbar2.update(1)
+                if pbar2 is not None:
+                    pbar2.close()
+        else:
+            def _process_partial(item):
+                pid, g_local = item
+                if g_local.size <= 1:
+                    return pid, None
+                keep_mask = prune_genes_by_npmi_greedy(g_local, W, threshold)
+                removed = g_local[~keep_mask]
+                if removed.size == 0:
+                    return pid, None
+                return pid, removed.tolist()
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=n_jobs) as ex:
+                futures = {ex.submit(_process_partial, it): it[0] for it in partial_items}
+                for fut in concurrent.futures.as_completed(futures):
+                    pid, removed = fut.result()
+                    if removed is not None:
+                        results2.append((pid, removed))
+                    if pbar2 is not None:
+                        pbar2.update(1)
+            if pbar2 is not None:
+                pbar2.close()
+
+        # Apply pass2 changes in a vectorized fashion
+        # results2: list of (pid, removed)
+        rows2 = []
+        removed_pids = set()
+        for pid, removed in results2:
+            removed_pids.add(pid)
+            for g in removed:
+                rows2.append((pid, int(g)))
+
+        # prepare df index view
+        df_idx2 = df.reset_index().rename(columns={"index": "_orig_index"})[["_orig_index", "cell_id_npmi_cons_p1", "_gene_idx"]]
+        df_idx2["_gene_idx"] = df_idx2["_gene_idx"].astype("Int64")
+
+        if rows2:
+            map2 = pd.DataFrame(rows2, columns=["_pid_map", "_gene_idx_map"]).astype({"_gene_idx_map": "Int64"})
+            merged2 = pd.merge(
+                df_idx2,
+                map2,
+                left_on=["cell_id_npmi_cons_p1", "_gene_idx"],
+                right_on=["_pid_map", "_gene_idx_map"],
+                how="inner",
+            )
+
+            if not merged2.empty:
+                # these rows should be unassigned_from_partial
+                df.loc[merged2["_orig_index"], "cell_id_npmi_cons_p2"] = unassigned_id
+                df.loc[merged2["_orig_index"], "npmi_cons_p2_status"] = "unassigned_from_partial"
+
+        # Mark remaining rows for all partial pids as partial_p2 in one vectorized operation
+        if pids:
+            pids_set = set(pids)
+            mask_pid_any = df["cell_id_npmi_cons_p1"].isin(pids_set)
+            mask_unassigned = df["npmi_cons_p2_status"] == "unassigned_from_partial"
+            mask_keep_any = mask_pid_any & (~mask_unassigned)
+            if mask_keep_any.any():
+                df.loc[mask_keep_any, "npmi_cons_p2_status"] = "partial_p2"
 
     df.drop(columns=["_cell_str", "_gene_idx"], inplace=True)
 
@@ -439,6 +746,261 @@ def annotate_unassigned_components(
     cell_id_final.loc[kept_unassigned] = df.loc[kept_unassigned, "unassigned_comp_id"].astype(str)
 
     # for dropped
+    dropped = is_unassigned & df["unassigned_qc_status"].isin(["drop_small_comp", "drop_npmi_pruned_gene"])
+    cell_id_final.loc[dropped] = "DROP"
+
+    df["cell_id_final"] = cell_id_final
+
+    return df
+
+
+def _prune_one_component(comp_id, g_local, prune_fn, W, npmi_threshold):
+    """
+    Prune genes for a single component.
+    Returns: (comp_id, removed_gene_ids)
+    """
+    if g_local.size <= 1:
+        return (comp_id, np.array([], dtype=np.int32))
+    
+    kept_mask = prune_fn(g_local, W, threshold=npmi_threshold)
+    removed_gene_ids = g_local[~kept_mask]
+    return (comp_id, removed_gene_ids)
+
+
+def _prune_components_parallel(comp_gene_map, df, keep_candidate, comp_mask_template, 
+                                prune_fn, W, npmi_threshold, gene_idx_all, show_progress=True,
+                                n_workers=4):
+    """
+    Prune components in parallel using ThreadPoolExecutor.
+    Updates df in-place with pruning results.
+    """
+    comp_items = list(comp_gene_map.items())
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as executor:
+        futures = {
+            executor.submit(_prune_one_component, comp_id, g_local, prune_fn, W, npmi_threshold): comp_id
+            for comp_id, g_local in comp_items
+        }
+        
+        iterator = concurrent.futures.as_completed(futures)
+        if show_progress:
+            iterator = tqdm(iterator, total=len(futures), desc="prune_comps")
+        
+        for future in iterator:
+            try:
+                comp_id, removed_gene_ids = future.result()
+                
+                comp_mask = (df["unassigned_comp_id"] == comp_id) & keep_candidate
+                
+                if removed_gene_ids.size == 0:
+                    df.loc[comp_mask, "unassigned_qc_status"] = "keep_unassigned_comp"
+                else:
+                    removed_set = set(map(int, removed_gene_ids.tolist()))
+                    drop_gene_mask = comp_mask & gene_idx_all.isin(removed_set)
+                    df.loc[comp_mask & (~drop_gene_mask), "unassigned_qc_status"] = "keep_unassigned_comp"
+                    df.loc[drop_gene_mask, "unassigned_qc_status"] = "drop_npmi_pruned_gene"
+            except Exception as e:
+                if show_progress:
+                    print(f"[ERROR] Component pruning failed: {e}")
+                continue
+
+
+def annotate_unassigned_components_fast(
+    df_pruned: pd.DataFrame,
+    aux: dict,
+    *,
+    build_graph_fn,
+    prune_fn,
+    coord_cols=("x", "y", "z"),
+    k=8,
+    dist_threshold=1.5,
+    min_comp_size=50,
+    npmi_threshold=-0.1,
+    unassigned_final_col="cell_id_npmi_cons_p2",
+    cell_id_col="cell_id",
+    gene_col="feature_name",
+    transcript_id_col="transcript_id",
+    show_progress: bool = True,
+):
+    """
+    Faster variant of `annotate_unassigned_components`.
+    - Uses `_cy_prune.prune_cells` when available to prune per-component gene lists in bulk.
+    - Shows a progress bar if `show_progress` is True.
+    """
+    df = df_pruned.copy()
+
+    if transcript_id_col not in df.columns:
+        df[transcript_id_col] = df.index.astype(str)
+
+    df[gene_col] = df[gene_col].astype(str).str.strip()
+
+    if unassigned_final_col in df.columns:
+        is_unassigned = df[unassigned_final_col].astype(str) == "-1"
+        assigned_id_series = df[unassigned_final_col].astype(str)
+    else:
+        is_unassigned = df[cell_id_col].astype(str) == "-1"
+        assigned_id_series = df[cell_id_col].astype(str)
+
+    df["unassigned_comp_id"] = pd.Series(index=df.index, dtype="object")
+    df["unassigned_qc_status"] = pd.Series(index=df.index, dtype="object")
+    df.loc[is_unassigned, "unassigned_qc_status"] = "unassigned_raw"
+
+    if is_unassigned.sum() == 0:
+        df["cell_id_final"] = assigned_id_series
+        return df
+
+    df_u = df.loc[is_unassigned].copy()
+
+    data_u = build_graph_fn(
+        df_u,
+        k=k,
+        dist_threshold=dist_threshold,
+        coord_cols=coord_cols,
+    )
+
+    # Use scipy's faster connected components detection
+    if show_progress:
+        pbar_cc = tqdm(total=3, desc="unassigned_analysis")
+    
+    num_nodes = data_u.num_nodes
+    edge_index = data_u.edge_index.numpy()
+    
+    if show_progress:
+        pbar_cc.update(1)
+        pbar_cc.set_description("building_cc_matrix")
+    
+    # Build sparse adjacency matrix (undirected, so add both directions)
+    rows = np.concatenate([edge_index[0], edge_index[1]])
+    cols = np.concatenate([edge_index[1], edge_index[0]])
+    data_sp = np.ones(len(rows), dtype=np.float32)
+    adj_matrix = csr_matrix((data_sp, (rows, cols)), shape=(num_nodes, num_nodes))
+    
+    if show_progress:
+        pbar_cc.update(1)
+        pbar_cc.set_description("computing_cc")
+    
+    n_comps, comp_labels = scipy_cc(adj_matrix, directed=False, return_labels=True)
+    
+    if show_progress:
+        pbar_cc.update(1)
+        pbar_cc.set_description("post_cc_mapping")
+    
+    # Efficiently convert comp_labels directly to comp_idx (skip intermediate set creation)
+    num_nodes = df_u.shape[0]
+    comp_idx = comp_labels.astype(np.int32)  # comp_labels already assigns each node to a component
+    
+    if show_progress:
+        pbar_cc.update(1)
+        pbar_cc.close()
+
+    comp_ids_str = np.array([f"UNASSIGNED_{i}" for i in comp_idx], dtype=object)
+    df.loc[df_u.index, "unassigned_comp_id"] = comp_ids_str
+
+    comp_sizes = pd.Series(comp_idx).value_counts().sort_index()
+    comp_size_map = {f"UNASSIGNED_{i}": int(sz) for i, sz in comp_sizes.items()}
+    df["unassigned_comp_size"] = df["unassigned_comp_id"].map(comp_size_map)
+
+    drop_small = is_unassigned & df["unassigned_comp_size"].notna() & (df["unassigned_comp_size"] < min_comp_size)
+    df.loc[drop_small, "unassigned_qc_status"] = "drop_small_comp"
+
+    W = aux["W"]
+    gene_to_idx = aux["gene_to_idx"]
+    gene_idx_all = df[gene_col].map(gene_to_idx)
+
+    keep_candidate = is_unassigned & (~drop_small) & df["unassigned_comp_id"].notna()
+    large_comp_ids = df.loc[keep_candidate, "unassigned_comp_id"].unique()
+
+    # Prepare per-component gene lists using vectorized groupby (much faster than per-component filtering)
+    if show_progress:
+        pbar_groupby = tqdm(total=2, desc="grouping_genes")
+    
+    comp_gene_map = {}
+    df_candidate = df.loc[keep_candidate].copy()
+    df_candidate["_gene_idx_local"] = gene_idx_all.loc[keep_candidate]
+    
+    if show_progress:
+        pbar_groupby.update(1)
+        pbar_groupby.set_description("grouping")
+    
+    # Group by component and get unique gene indices per component
+    for comp_id, group in df_candidate.groupby("unassigned_comp_id"):
+        g_local = group["_gene_idx_local"].dropna().astype(int).unique()
+        if g_local.size > 0:
+            comp_gene_map[comp_id] = np.asarray(g_local, dtype=np.int32)
+    
+    if show_progress:
+        pbar_groupby.update(1)
+        pbar_groupby.close()
+
+    # If cython prune available, do bulk pruning
+    if _cy_prune is not None and len(comp_gene_map) > 0:
+        if show_progress:
+            print(f"[INFO] Using Cython-accelerated pruning ({len(comp_gene_map)} components)")
+        comp_keys = list(comp_gene_map.keys())
+        g_arrays = [comp_gene_map[k] if comp_gene_map[k].size > 0 else None for k in comp_keys]
+        removed_lists = None
+        try:
+            removed_lists = _cy_prune.prune_cells(g_arrays, W, float(npmi_threshold))
+        except Exception as e:
+            if show_progress:
+                print(f"[WARNING] Cython pruning failed: {e}, falling back to Python")
+            removed_lists = None
+
+        if removed_lists is not None:
+            iterator = zip(comp_keys, removed_lists)
+            if show_progress:
+                iterator = tqdm(list(iterator), desc="prune_comps")
+            
+            # Vectorized approach: build a mask for genes to drop, then apply once
+            drop_gene_mask_all = np.zeros(len(df), dtype=bool)
+            
+            for comp_id, removed in iterator:
+                if removed is None or len(removed) == 0:
+                    # Mark all transcripts in this component as kept
+                    comp_mask = (df["unassigned_comp_id"] == comp_id) & keep_candidate
+                    df.loc[comp_mask, "unassigned_qc_status"] = "keep_unassigned_comp"
+                    continue
+                
+                # Get indices of transcripts in this component
+                comp_indices = np.where((df["unassigned_comp_id"] == comp_id) & keep_candidate)[0]
+                
+                if len(comp_indices) == 0:
+                    continue
+                
+                # Check which of these transcripts have genes in the removed set (faster)
+                removed_set = set(map(int, removed))
+                comp_gene_mask = gene_idx_all.iloc[comp_indices].isin(removed_set).to_numpy()
+                drop_gene_mask_all[comp_indices[comp_gene_mask]] = True
+                
+                # Mark kept ones
+                df.loc[comp_indices[~comp_gene_mask], "unassigned_qc_status"] = "keep_unassigned_comp"
+            
+            # Apply all drops at once
+            df.loc[drop_gene_mask_all, "unassigned_qc_status"] = "drop_npmi_pruned_gene"
+        else:
+            # fallback to Python pruning per component with progress (parallelized)
+            if show_progress:
+                print(f"[WARNING] Cython not available, using Python pruning ({len(comp_gene_map)} components)")
+            _prune_components_parallel(
+                comp_gene_map, df, keep_candidate, comp_mask_template=(df["unassigned_comp_id"], df.index),
+                prune_fn=prune_fn, W=W, npmi_threshold=npmi_threshold, 
+                gene_idx_all=gene_idx_all, show_progress=show_progress
+            )
+    else:
+        # No cython or no comps: fallback to Python loop with optional progress
+        if len(comp_gene_map) > 0:
+            if show_progress:
+                print(f"[WARNING] Cython not available, using Python pruning ({len(comp_gene_map)} components)")
+            _prune_components_parallel(
+                comp_gene_map, df, keep_candidate, comp_mask_template=(df["unassigned_comp_id"], df.index),
+                prune_fn=prune_fn, W=W, npmi_threshold=npmi_threshold,
+                gene_idx_all=gene_idx_all, show_progress=show_progress
+            )
+
+    cell_id_final = assigned_id_series.copy()
+    kept_unassigned = is_unassigned & (df["unassigned_qc_status"] == "keep_unassigned_comp")
+    cell_id_final.loc[kept_unassigned] = df.loc[kept_unassigned, "unassigned_comp_id"].astype(str)
+
     dropped = is_unassigned & df["unassigned_qc_status"].isin(["drop_small_comp", "drop_npmi_pruned_gene"])
     cell_id_final.loc[dropped] = "DROP"
 
@@ -837,6 +1399,284 @@ def apply_stitching_to_transcripts(
     df_out.loc[mask, out_col] = ent[mask].map(entity_to_stitched).fillna(ent[mask])
 
     return df_out, entity_to_stitched
+
+
+def apply_stitching_to_transcripts_fast(
+    df_final: pd.DataFrame,
+    aux: dict,
+    *,
+    entity_col="cell_id_final",
+    gene_col="feature_name",
+    coord_cols=("x", "y", "z"),
+    purity_threshold=0.05,
+    penalize_simplicity=True,
+    deltaC_min=0.0,
+    use_3d=True,
+    out_col="cell_id_stitched",
+    show_progress: bool = True,
+):
+    """
+    Fast wrapper around `apply_stitching_to_transcripts`.
+    - Builds entity table and runs hierarchical stitching, with optional progress bars.
+    - Returns same outputs as original function.
+    """
+    # build entity table (centroids + genes)
+    if show_progress:
+        # small progress step for entity build
+        pbar = tqdm(total=2, desc="stitching")
+    else:
+        pbar = None
+
+    summary = build_entity_table(
+        df_final,
+        entity_col=entity_col,
+        gene_col=gene_col,
+        coord_cols=coord_cols,
+    )
+    if pbar is not None:
+        pbar.update(1)
+
+    # rename centroid cols if necessary
+    if tuple(coord_cols) == ("x", "y", "z"):
+        summary = summary.rename(columns={"x": "x", "y": "y", "z": "z"})
+    else:
+        summary = summary.rename(columns={coord_cols[0]: "x", coord_cols[1]: "y", coord_cols[2]: "z"})
+
+    # stitch entities (this is the heavy op - reuse existing implementation)
+    entity_to_stitched, info = stitch_entities_hierarchical(
+        summary_df=summary.rename(columns={"entity_id": "entity_id"}),
+        aux=aux,
+        purity_threshold=purity_threshold,
+        penalize_simplicity=penalize_simplicity,
+        deltaC_min=deltaC_min,
+        use_3d=use_3d,
+    )
+
+    if pbar is not None:
+        pbar.update(1)
+        pbar.close()
+
+    # map back to transcripts
+    df_out = df_final.copy()
+    ent = df_out[entity_col].astype(str)
+    df_out[out_col] = ent
+
+    mask = ent.notna() & (ent != "DROP") & (ent != "nan")
+    if show_progress:
+        # chunked mapping with progress
+        keys = ent[mask].index.to_numpy()
+        for i in tqdm(range(0, len(keys), 1000), desc="apply_labels"):
+            batch = keys[i : i + 1000]
+            df_out.loc[batch, out_col] = ent.loc[batch].map(entity_to_stitched).fillna(ent.loc[batch])
+    else:
+        df_out.loc[mask, out_col] = ent[mask].map(entity_to_stitched).fillna(ent[mask])
+
+    return df_out, entity_to_stitched
+
+# ---------- Phase 5: Finetune assignment based on spatial coherence ----------
+def enforce_spatial_coherence(
+    df_stitched: pd.DataFrame,
+    build_graph_fn,
+    *,
+    entity_col: str = "cell_id_stitched",
+    coord_cols=("x", "y", "z"),
+    k: int = 5,
+    dist_threshold: float = 3.0,
+    out_col: str = "cell_id_spatial",
+):
+    """
+    For each entity in `entity_col` (cell / partial / pseudo-cell),
+    check if its transcripts are spatially connected in a kNN graph.
+
+    - Build ONE global kNN graph over all transcripts with k=5, dist_threshold=3.
+    - For each entity label (excluding DROP / NaN), restrict to transcripts
+      with that label and compute connected components on the induced subgraph.
+    - If >1 component:
+         * largest component keeps original label
+         * others get new labels: f"{label}-2", f"{label}-3", ...
+    - Returns a new df with an added column `out_col` containing
+      the split-aware labels.
+    """
+    df = df_stitched.copy()
+
+    # base labels we are checking
+    base_labels = df[entity_col].astype(str)
+
+    # Initialize spatial label as the stitched label
+    df[out_col] = base_labels
+
+    # Build graph once on ALL transcripts
+    # (we assume df has x,y,z and transcript_id as required by build_graph_fn)
+    df = df.reset_index(drop=True)
+    df["__node_idx"] = np.arange(len(df), dtype=int)
+
+    data_all = build_graph_fn(
+        df,
+        k=k,
+        dist_threshold=dist_threshold,
+        coord_cols=coord_cols,
+    )
+    G = to_networkx(data_all, to_undirected=True)
+
+    # For each label, check connectivity in induced subgraph
+    labels = base_labels.unique()
+    for label in labels:
+        if label == "DROP" or label == "nan":
+            continue
+
+        mask = (base_labels == label)
+        node_idx = df.loc[mask, "__node_idx"].to_numpy()
+
+        if node_idx.size <= 1:
+            continue
+
+        # induced subgraph on these nodes only
+        subG = G.subgraph(node_idx)
+        comps = list(nx.connected_components(subG))
+
+        if len(comps) <= 1:
+            continue  # spatially coherent
+
+        # sort by size descending
+        comps_sorted = sorted(comps, key=len, reverse=True)
+
+        # largest keeps original label; others get label-2, label-3, ...
+        for i, comp_nodes in enumerate(comps_sorted):
+            if i == 0:
+                new_label = label
+            else:
+                new_label = f"{label}-{i+1}"
+
+            comp_nodes = np.array(list(comp_nodes), dtype=int)
+            # mark these transcripts with new_label
+            df.loc[df["__node_idx"].isin(comp_nodes), out_col] = new_label
+
+    # cleanup
+    df = df.drop(columns=["__node_idx"])
+    return df
+
+
+def enforce_spatial_coherence_fast(
+    df_stitched: pd.DataFrame,
+    build_graph_fn,
+    *,
+    entity_col: str = "cell_id_stitched",
+    coord_cols=("x", "y", "z"),
+    k: int = 5,
+    dist_threshold: float = 3.0,
+    out_col: str = "cell_id_spatial",
+    show_progress: bool = True,
+):
+    """
+    Fast variant of `enforce_spatial_coherence` with a progress bar.
+    """
+    df = df_stitched.copy()
+    base_labels = df[entity_col].astype(str)
+    df[out_col] = base_labels
+    df = df.reset_index(drop=True)
+    n = len(df)
+    df["__node_idx"] = np.arange(n, dtype=np.int32)
+
+    # Build transcript graph once
+    data_all = build_graph_fn(
+        df,
+        k=k,
+        dist_threshold=dist_threshold,
+        coord_cols=coord_cols,
+    )
+
+    # Try the Cython path: compute label-constrained components in one pass
+    if _cy_spatial is not None and hasattr(data_all, "edge_index") and data_all.edge_index.numel() > 0:
+        edge_index = data_all.edge_index.numpy()
+        src = edge_index[0].astype(np.int32)
+        dst = edge_index[1].astype(np.int32)
+
+        labels_arr = base_labels.to_numpy()
+        # map labels to integer codes; treat DROP/nan as invalid (-1)
+        lab_codes = pd.Categorical(labels_arr)
+        codes = lab_codes.codes.astype(np.int64)
+        # mark invalids
+        invalid = (labels_arr == "DROP") | (labels_arr == "nan")
+        if invalid.any():
+            codes = codes.copy()
+            codes[invalid] = -1
+
+        # compute components constrained by labels
+        try:
+            roots = _cy_spatial.label_constrained_components(int(n), src, dst, codes, -1)
+        except Exception:
+            roots = None
+
+        if roots is not None:
+            # For each label code, split by root and assign suffixes for non-largest comps
+            out = df[out_col].to_numpy(dtype=object)
+            # iterate unique valid codes
+            uniq_codes = np.unique(codes)
+            uniq_codes = uniq_codes[uniq_codes >= 0]
+            iterator = uniq_codes
+            if show_progress:
+                iterator = tqdm(uniq_codes, desc="spatial_labels")
+            for c in iterator:
+                idx = np.where(codes == c)[0]
+                if idx.size <= 1:
+                    continue
+                roots_c = roots[idx]
+                uniq_r, counts = np.unique(roots_c, return_counts=True)
+                if uniq_r.size <= 1:
+                    continue
+                order = np.argsort(counts)[::-1]
+                lab = str(lab_codes.categories[c])
+                for i, oi in enumerate(order):
+                    r = uniq_r[oi]
+                    if i == 0:
+                        new_lab = lab
+                    else:
+                        new_lab = f"{lab}-{i+1}"
+                    sel = (roots_c == r)
+                    if i == 0:
+                        # ensure main stays as original (optional, already default)
+                        continue
+                    out[idx[sel]] = new_lab
+            df[out_col] = out
+            df = df.drop(columns=["__node_idx"])  # not used in this path
+            return df
+
+    # Fallback: original per-label subgraph approach with progress bar
+    G = to_networkx(data_all, to_undirected=True)
+
+    labels = base_labels.unique()
+    iterable = labels
+    if show_progress:
+        iterable = tqdm(labels, desc="spatial_labels")
+
+    for label in iterable:
+        if label == "DROP" or label == "nan":
+            continue
+
+        mask = (base_labels == label)
+        node_idx = df.loc[mask, "__node_idx"].to_numpy()
+
+        if node_idx.size <= 1:
+            continue
+
+        subG = G.subgraph(node_idx)
+        comps = list(nx.connected_components(subG))
+
+        if len(comps) <= 1:
+            continue
+
+        comps_sorted = sorted(comps, key=len, reverse=True)
+        for i, comp_nodes in enumerate(comps_sorted):
+            if i == 0:
+                new_label = label
+            else:
+                new_label = f"{label}-{i+1}"
+
+            comp_nodes = np.array(list(comp_nodes), dtype=int)
+            df.loc[df["__node_idx"].isin(comp_nodes), out_col] = new_label
+
+    df = df.drop(columns=["__node_idx"])
+    return df
 
 #
 def calculate_rankings(

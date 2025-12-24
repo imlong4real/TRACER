@@ -6,12 +6,32 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+*.so
+*.c
 
 # Packaging
 *.egg-info/
+build/
+dist/
 
 # Jupyter
 .ipynb_checkpoints/
 
-# Generated outputs
-examples/output/
+# Cython build artifacts
+.pyxbld/
+*.c
+*.html
+
+# Large data files (>100MB)
+tutorials/breast_cancer/data/*.parquet
+tutorials/lung_cancer/data/*.parquet
+**/data/*.parquet
+
+# Output files (optional - remove these lines if you want to commit outputs)
+tutorials/*/output/*.parquet
+output/*.parquet
+
+# Logs and temporary files
+*.log
+/tmp/
+
