@@ -19,6 +19,7 @@ def get_confident_nuclei_transcripts(
     high_pct: float = 80,
     save_qv_filtered: bool = False,
     parquet_path: str = "qv_filtered_transcripts.parquet",
+    exclude_ids: set | None = None,
 ):
     """
     From a SpatialData object, extract high-quality nucleus transcripts and
@@ -38,6 +39,9 @@ def get_confident_nuclei_transcripts(
         If True, save the QV-filtered transcripts to a Parquet file.
     parquet_path : str
         Path to save QV-filtered transcripts if requested.
+    exclude_ids : set | None, optional (default=None)
+        Set of cell IDs to exclude, e.g. {"-1", "DROP", "nan", "UNASSIGNED"}.
+        If None, defaults to {"UNASSIGNED"}.
 
     Returns
     -------
@@ -67,10 +71,16 @@ def get_confident_nuclei_transcripts(
         qv_out = None
 
     # Extract nucleus-overlapping transcripts with a valid cell_id
-    nuc_df = df[
-        (df["cell_id"] != "UNASSIGNED") &
-        (df["overlaps_nucleus"] == 1)
-    ].copy()
+    if exclude_ids is None:
+        exclude_ids = {"UNASSIGNED"}
+    
+    if exclude_ids:
+        nuc_df = df[
+            (~df["cell_id"].isin(exclude_ids)) &
+            (df["overlaps_nucleus"] == 1)
+        ].copy()
+    else:
+        nuc_df = df[df["overlaps_nucleus"] == 1].copy()
 
     # Compute transcript-count thresholds per nucleus
     nuc_counts = nuc_df.groupby("cell_id").size()
@@ -197,7 +207,7 @@ def compute_npmi(
     return long_df
 
 #
-def build_cell_gene_matrix(filtered_df, min_transcripts=10, genes_npm=None):
+def build_cell_gene_matrix(filtered_df, min_transcripts=10, genes_npm=None, cell_col="cell_id", exclude_ids=None):
     """
     Construct a binary (presence/absence) cell × gene matrix from a filtered
     transcript-level DataFrame and align it to the NPMI gene universe.
@@ -210,13 +220,20 @@ def build_cell_gene_matrix(filtered_df, min_transcripts=10, genes_npm=None):
     ----------
     filtered_df : pandas.DataFrame
         A transcript-level table containing at least:
-        "cell_id" and "feature_name"
+        cell_col and "feature_name"
 
     min_transcripts : int, optional (default=10)
         Minimum number of transcripts required for a cell to be retained.
 
     genes_npm : pandas.DataFrame
         The long-format NPMI table containing columns "gene_i", "gene_j", "NPMI".
+        
+    cell_col : str, optional (default="cell_id")
+        The column name containing cell identifiers.
+        
+    exclude_ids : set | None, optional (default=None)
+        Set of cell IDs to exclude, e.g. {"-1", "DROP", "nan", "UNASSIGNED"}.
+        If None, defaults to {"UNASSIGNED"}.
 
     Returns
     -------
@@ -247,26 +264,34 @@ def build_cell_gene_matrix(filtered_df, min_transcripts=10, genes_npm=None):
       NPMI matrix use consistent gene indexing.
     """
     
-    # Remove unassigned cells
-    df = filtered_df[filtered_df["cell_id"] != "UNASSIGNED"].copy()
+    # Convert cell IDs to string for consistency with AnnData
+    df = filtered_df.copy()
+    df[cell_col] = df[cell_col].astype(str)
+    
+    # Remove excluded cell IDs
+    if exclude_ids is None:
+        exclude_ids = {"UNASSIGNED"}
+    if exclude_ids:
+        df = df[~df[cell_col].isin(exclude_ids)].copy()
 
     # Filter by minimum transcript count per cell
-    cell_counts = df.groupby("cell_id").size()
+    cell_counts = df.groupby(cell_col).size()
     good_ids = cell_counts[cell_counts >= min_transcripts].index
-    df = df[df["cell_id"].isin(good_ids)].copy()
+    df = df[df[cell_col].isin(good_ids)].copy()
 
     df["value"] = 1
 
     # Pivot to cell × gene
     cell_gene = df.pivot_table(
-        index="cell_id",
+        index=cell_col,
         columns="feature_name",
         values="value",
         aggfunc=lambda x: 1,
         fill_value=0,
     )
 
-    cell_ids = cell_gene.index.to_numpy()
+    # Ensure cell_ids are strings to match AnnData obs_names
+    cell_ids = cell_gene.index.astype(str).to_numpy()
     genes_cell = cell_gene.columns.to_numpy()
     M = cell_gene.to_numpy().astype(np.int8)
 
@@ -345,8 +370,8 @@ def attach_metrics_to_adata(adata, purity_df, conflict_df):
 
     This function takes an AnnData object and two DataFrames containing per-cell
     purity and conflict metrics derived from NPMI analysis. It then maps these 
-    scores onto `adata.obs` using each cell's unique `cell_id`. Four new columns 
-    are added to the AnnData object:
+    scores onto `adata.obs` using each cell's unique cell ID from `adata.obs_names`. 
+    Four new columns are added to the AnnData object:
 
         - `cell_purity`        : continuous purity score (float)
         - `cell_purity_bool`   : boolean flag indicating whether the cell meets 
@@ -358,12 +383,14 @@ def attach_metrics_to_adata(adata, purity_df, conflict_df):
     Parameters
     ----------
     adata : AnnData
-        The AnnData object whose `.obs` dataframe will be updated. It must contain 
-        a column `cell_id` uniquely identifying each cell.
+        The AnnData object whose `.obs` dataframe will be updated. Cell IDs 
+        are taken from `adata.obs_names`.
 
     purity_df : pandas.DataFrame
+        DataFrame with columns: cell_id, cell_purity, is_pure
 
     conflict_df : pandas.DataFrame
+        DataFrame with columns: cell_id, conflict_score, is_conflict
 
     Returns
     -------
@@ -371,21 +398,17 @@ def attach_metrics_to_adata(adata, purity_df, conflict_df):
         The function modifies `adata` in place by adding the new columns to 
         `adata.obs`. Nothing is explicitly returned.
     """
-    # Purity
-    adata.obs["cell_purity"] = adata.obs["cell_id"].map(
-        dict(zip(purity_df["cell_id"], purity_df["cell_purity"]))
-    )
-    adata.obs["cell_purity_bool"] = adata.obs["cell_id"].map(
-        dict(zip(purity_df["cell_id"], purity_df["is_pure"]))
-    )
-
-    # Conflict
-    adata.obs["conflict_score"] = adata.obs["cell_id"].map(
-        dict(zip(conflict_df["cell_id"], conflict_df["conflict_score"]))
-    )
-    adata.obs["is_conflict"] = adata.obs["cell_id"].map(
-        dict(zip(conflict_df["cell_id"], conflict_df["is_conflict"]))
-    )
+    # Create mapping dictionaries
+    purity_map = dict(zip(purity_df["cell_id"], purity_df["cell_purity"]))
+    purity_bool_map = dict(zip(purity_df["cell_id"], purity_df["is_pure"]))
+    conflict_map = dict(zip(conflict_df["cell_id"], conflict_df["conflict_score"]))
+    conflict_bool_map = dict(zip(conflict_df["cell_id"], conflict_df["is_conflict"]))
+    
+    # Map using obs_names (cell IDs as index)
+    adata.obs["cell_purity"] = adata.obs_names.map(purity_map)
+    adata.obs["cell_purity_bool"] = adata.obs_names.map(purity_bool_map)
+    adata.obs["conflict_score"] = adata.obs_names.map(conflict_map)
+    adata.obs["is_conflict"] = adata.obs_names.map(conflict_bool_map)
 
 #
 def compute_cell_purity(
@@ -511,7 +534,9 @@ def compute_purity_and_conflict(
     nucleus_npmi_long,
     adata,
     *,
+    cell_col="cell_id",
     min_transcripts_per_cell=10,
+    exclude_ids=None,
     npmi_threshold=0.05,
     purity_percentile=80.0,
     conflict_percentile=80.0,
@@ -523,6 +548,27 @@ def compute_purity_and_conflict(
       - cell conflict score
     and attach them to adata.obs
 
+    Parameters
+    ----------
+    filtered_df : DataFrame
+        Transcript-level data
+    nucleus_npmi_long : DataFrame
+        Pre-computed NPMI matrix in long format
+    adata : AnnData
+        AnnData object to attach metrics to
+    cell_col : str
+        Column name containing cell IDs in filtered_df
+    min_transcripts_per_cell : int
+        Minimum transcripts required per cell
+    npmi_threshold : float
+        NPMI threshold for purity calculation
+    purity_percentile : float
+        Percentile for purity threshold
+    conflict_percentile : float
+        Percentile for conflict threshold
+    exclude_ids : set | None
+        Set of cell IDs to exclude, e.g. {"-1", "DROP", "nan", "UNASSIGNED"}
+
     Returns:
         purity_df, conflict_df
     """
@@ -531,6 +577,8 @@ def compute_purity_and_conflict(
         filtered_df,
         min_transcripts=min_transcripts_per_cell,
         genes_npm=nucleus_npmi_long,
+        cell_col=cell_col,
+        exclude_ids=exclude_ids,
     )
 
     # -------- Build NPMI matrix --------

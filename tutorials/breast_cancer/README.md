@@ -66,11 +66,11 @@ apply_labels: 100%|███| 24689/24689 [45:02<00:00,  9.14it/s]
 Stage 3 done: rows= 28059774 took 3434.49645113945 s
 Saving df_stitched to /Users/lyuan13/Desktop/HOT-NERD/tutorials/breast_cancer/output/df_stitched.parquet
 Stage 4: enforce_spatial_coherence_fast (split spatially disjoint labels)
+Constructed 136,495,854 edges among 28,059,774 transcripts (k≤5, d≤3.0 µm)
 spatial_labels: 100%|██████████████████████████████████████████████████████████████████████████████████| 264722/264722 [56:18<00:00, 78.36it/s]
 Stage 4 done: rows= 28059774 took 3544.750870704651 s
 Stage 5: apply_stitching_to_transcripts_fast (final stitching on split labels)
 stitching: 100%|█████████████████████████████████████████████████████████████████████████████████████████████| 2/2 [1:30:06<00:00, 2703.38s/it]
-
 ```
 
 **Total Runtime**: ~2.5 hours on this dataset with Cython acceleration enabled

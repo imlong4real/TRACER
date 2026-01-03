@@ -76,6 +76,8 @@ Example
 -------
 The `examples/` and `tutorials/` folders contain runnable demonstrations that show how HOT-NERD can refine an initial segmentation produced by the 10X Xenium platform.
 
+### Breast Cancer Example (3D Refinement)
+
 - Original segmentation (10X Xenium V1, breast cancer):
 
 ![Original segmentation](examples/output/10X_transcripts.png)
@@ -90,6 +92,24 @@ Run the example locally:
 pip install -e .
 python examples/refine_segmentation.py
 ```
+
+### Lung Cancer Tutorial (Quality Metrics & UMAP Enhancement)
+
+HOT-NERD significantly improves cell segmentation quality, as demonstrated on a lung cancer biopsy sample using NPMI-based purity and conflict scores:
+
+![Purity and Conflict Scores](tutorials/lung_cancer/plot/lung_cancer_mean_purity_conflict_transcript_scores.png)
+
+**Quantitative Improvements:**
+- **Purity Score** (gene co-expression consistency): 0.292 → 0.356 (HOT-NERD Stitched) → **0.373** (HOT-NERD Stitched + Fine-tuned) — **+28% improvement**
+- **Conflict Score** (incompatible gene signatures): 0.032 → 0.009 (HOT-NERD Stitched) → **0.008** (HOT-NERD Stitched + Fine-tuned) — **-75% reduction**
+
+**Enhanced UMAP Interpretability:**
+
+The improved segmentation quality translates to clearer, more biologically interpretable UMAP embeddings with better-defined cell clusters:
+
+![UMAP Comparison](tutorials/lung_cancer/plot/lung_cancer_umap_whole_cell.png)
+
+See the [lung cancer tutorial](tutorials/lung_cancer/) for detailed analysis.
 
 Design notes
 ------------

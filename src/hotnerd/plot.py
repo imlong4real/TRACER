@@ -7,6 +7,8 @@ from matplotlib.lines import Line2D
 from scipy.spatial import ConvexHull
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 import open3d as o3d
+import scipy.sparse as sp
+import scanpy as sc
 
 def convex_hull_faces_3d(points):
     """
@@ -464,3 +466,88 @@ def plot_cc(
 
     plt.tight_layout()
     return fig, ax
+#
+def make_adata(
+    df_in: pd.DataFrame,
+    *,
+    cell_col: str,
+    gene_col: str = "feature_name",
+    name: str = "",
+    exclude_ids: set | None = None,      # e.g. {"-1", "DROP", "nan"}
+    binary: bool = False,                # set True for presence/absence
+) -> sc.AnnData:
+    """
+    Build a CELL x GENE count (or binary) matrix from transcript-level df.
+
+    Returns AnnData with:
+      - adata.obs_names = cell IDs
+      - adata.var_names = gene names
+      - adata.obs["n_transcripts"] = total transcript counts per cell
+      - adata.obs["n_genes"] = detected genes per cell (nonzero genes)
+    """
+    df = df_in[[cell_col, gene_col]].copy()
+    df[cell_col] = df[cell_col].astype(str)
+    df[gene_col] = df[gene_col].astype(str).str.strip()
+
+    if exclude_ids is None:
+        exclude_ids = set()
+
+    if exclude_ids:
+        df = df[~df[cell_col].isin(exclude_ids)].copy()
+
+    # count transcripts per (cell, gene)
+    cg = df.groupby([cell_col, gene_col], sort=False).size().reset_index(name="count")
+
+    # categorical codes -> sparse COO
+    cell_cat = pd.Categorical(cg[cell_col])
+    gene_cat = pd.Categorical(cg[gene_col])
+
+    rows = cell_cat.codes.astype(np.int32)
+    cols = gene_cat.codes.astype(np.int32)
+    data = cg["count"].to_numpy(dtype=np.int32)
+
+    X = sp.coo_matrix(
+        (data, (rows, cols)),
+        shape=(len(cell_cat.categories), len(gene_cat.categories)),
+    ).tocsr()
+
+    if binary:
+        X.data[:] = 1  # keep structure, set all nonzeros to 1
+
+    # build AnnData with correct axes
+    adata = sc.AnnData(X=X)
+    adata.obs_names = cell_cat.categories.astype(str)
+    adata.var_names = gene_cat.categories.astype(str)
+    if name:
+        adata.uns["name"] = name
+
+    # per-cell metadata
+    # total transcripts per cell
+    adata.obs["n_transcripts"] = np.asarray(X.sum(axis=1)).ravel().astype(int)
+    # number of detected genes per cell (nonzero genes)
+    adata.obs["n_genes"] = np.asarray((X > 0).sum(axis=1)).ravel().astype(int)
+
+    return adata
+#
+def is_whole_cell_id(s: pd.Series) -> pd.Series:
+    """
+    Whole cell: NOT UNASSIGNED_*, NOT DROP, NOT -1, and no '-' in the string.
+    Example: "123" is whole; "123-1" is partial; "UNASSIGNED_7" is pseudocell.
+    """
+    s = s.astype(str)
+    return (
+        (s != "-1")
+        & (s != "DROP")
+        & (~s.str.startswith("UNASSIGNED_"))
+        & (~s.str.contains("-", regex=False))
+        & (s != "nan")
+    )
+#
+def is_partial_or_pseudocell_id(s: pd.Series) -> pd.Series:
+    s = s.astype(str)
+    return (
+        (s != "-1")
+        & (s != "DROP")
+        & (s != "nan")
+        & (s.str.startswith("UNASSIGNED_") | s.str.contains("-", regex=False))
+    )
