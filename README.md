@@ -1,5 +1,9 @@
 # HOT-NERD
 
+<p align="center">
+  <img src="assets/images/logo.png" alt="HOT-NERD Logo" width="300"/>
+</p>
+
 High-Order Transcriptomic with NPMI-Enhanced Reconstruction & Delaunay-stitching (HOT-NERD)
 
 Overview
@@ -119,8 +123,8 @@ Design notes
 Contact
 -------
 For questions or collaboration, please contact:
-- Long Yuan — lyuan13@jhmi.edu
-- Atul Deshpande — adeshpande@jhu.edu
+- Long Yuan — lyuan13[at]jhmi.edu
+- Atul Deshpande — adeshpande[at]jhu.edu
 
 Repository
 ----------
