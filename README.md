@@ -1,14 +1,16 @@
-# HOT-NERD
+# TRACER (HOT-NERD)
 
 <p align="center">
   <img src="assets/images/logo.png" alt="HOT-NERD Logo" width="300"/>
 </p>
-
-High-Order Transcriptomic with NPMI-Enhanced Reconstruction & Delaunay-stitching (HOT-NERD)
+Tissue Reconstruction via Associative Clique Extraction and Relation-mapping (TRACER)
+(internally developed as HOT-NERD — High-Order Transcriptomic with NPMI-Enhanced Reconstruction & Delaunay-stitching)
 
 Overview
 --------
-HOT-NERD provides lightweight utilities for imaging-based spatial transcriptomics 3D segmentation and partial pseudo cell construction. The package includes tools to:
+TRACER is a Python package for imaging-based spatial transcriptomics, enabling 3D tissue reconstruction, segmentation refinement, and partial pseudo-cell inference.
+
+The software is implemented and distributed under the internal package name HOT-NERD, which reflects the underlying high-order transcriptomic reconstruction methodology.
 
 - Partition large tissue spatially using Metis on a kNN graph built from cell centroids.
 - Compute gene co-occurrence statistics (PMI / NPMI) and derive per-cell purity and conflict metrics.
