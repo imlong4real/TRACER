@@ -116,7 +116,7 @@ def main():
         entity_col="cell_id_stitched",
         coord_cols=("x", "y", "z"),
         k=5,
-        dist_threshold=10.0,
+        dist_threshold=25.0,
         out_col="cell_id_spatial",
         show_progress=True,
     )

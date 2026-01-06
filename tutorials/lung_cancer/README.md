@@ -1,7 +1,7 @@
 # Lung Cancer Tutorial
 
 **Author:** Long Yuan  
-**Email:** lyuan13@jhmi.edu
+**Email:** lyuan13[at]jhmi.edu
 
 This tutorial demonstrates how HOT-NERD improves cell segmentation quality and enhances downstream analysis for spatial transcriptomics data from a lung cancer biopsy sample.
 

@@ -161,7 +161,7 @@ def main():
         npmi_df=df_npmi,
         cell_id_col="cell_id",
         gene_col="feature_name",
-        threshold=-0.2,
+        threshold=-0.1,
         unassigned_id="-1",
         n_jobs=-1,
         show_progress=True,
@@ -217,11 +217,11 @@ def main():
     t0 = time.time()
     df_split = enforce_spatial_coherence_fast(
         df_stitched=df_stitched,
-        build_graph_fn=build_graph,
+        build_graph_fn=build_graph_fast,
         entity_col="cell_id_stitched",
         coord_cols=("x", "y", "z"),
         k=5,
-        dist_threshold=3.0,
+        dist_threshold=10.0,
         out_col="cell_id_spatial",
         show_progress=True,
     )
