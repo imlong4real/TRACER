@@ -1,7 +1,7 @@
 # Breast Cancer Tissue Analysis with HOT-NERD
 
 **Author:** Long Yuan  
-**Email:** lyuan13@jhmi.edu
+**Email:** lyuan13[at]jhmi.edu
 
 This tutorial demonstrates the HOT-NERD pipeline on a large-scale Xenium v1 breast cancer dataset containing ~28M transcripts.
 
@@ -45,35 +45,39 @@ The script executes the full HOT-NERD pipeline:
 $ python tutorials/breast_cancer/run_breast_cancer.py
 Starting HOT-NERD run on breast cancer tissue
 Reading transcripts from: /Users/lyuan13/Desktop/HOT-NERD/tutorials/breast_cancer/data/breast_cancer_df.parquet
-Loaded transcripts rows: 28059774 took 0.4473731517791748 s
+Loaded transcripts rows: 28059774 took 0.43671131134033203 s
 Reading NPMI table from: /Users/lyuan13/Desktop/HOT-NERD/tutorials/breast_cancer/data/breast_cancer_npmi.csv
-Loaded npmi rows: 96721 took 0.1528923511505127 s
+Loaded npmi rows: 96721 took 0.07839298248291016 s
 Stage 1: prune_transcripts_fast (conservative NPMI)
-prune_pass1: 100%|████████████████████████████████████████████████████████████████████████████████| 166217/166217 [00:00<00:00, 5202721104.24it/s]
-apply_pass1: 100%|███████████████████████████████████████████████████████████████████████████████████████████████| 1/1 [00:00<00:00, 52428.80it/s]
-prune_pass2: 100%|████████████████████████████████████████████████████████████████████████████████████| 162149/162149 [00:01<00:00, 112007.88it/s]
-Stage 1 done: rows= 28059774 took 122.33935189247131 s
+prune_pass1: 100%|█████████████████████████████████████████| 166217/166217 [00:00<00:00, 2106237546.73it/s]
+apply_pass1: 100%|████████████████████████████████████████████████████████| 1/1 [00:00<00:00, 43240.25it/s]
+prune_pass2: 100%|██████████████████████████████████████████████| 164337/164337 [00:02<00:00, 77547.89it/s]
+Stage 1 done: rows= 28059774 took 127.9855329990387 s
 Stage 2: annotate_unassigned_components_fast (build graph + CCs)
-Constructed 4,725,401 edges among 3,566,280 transcripts (k≤5, d≤1.5 µm)
-post_cc_mapping: : 4it [00:00, 11.47it/s]                                                                                                         
-grouping: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████| 2/2 [00:02<00:00,  1.12s/it]
-[INFO] Using Cython-accelerated pruning (6519 components)
-prune_comps: 100%|████████████████████████████████████████████████████████████████████████████████████████████| 6519/6519 [37:44<00:00,  2.88it/s]
-Stage 2 done: rows= 28059774 took 2302.975259780884 s
+Constructed 6,518,980 edges among 5,251,713 transcripts (k≤5, d≤1.5 µm)
+post_cc_mapping: : 4it [00:00,  8.54it/s]                                                                  
+grouping: 100%|██████████████████████████████████████████████████████████████| 2/2 [00:03<00:00,  1.56s/it]
+[INFO] Using Cython-accelerated pruning (7732 components)
+prune_comps: 100%|█████████████████████████████████████████████████████| 7732/7732 [50:58<00:00,  2.53it/s]
+Stage 2 done: rows= 28059774 took 3103.3299539089203 s
 Stage 3: apply_stitching_to_transcripts_fast (initial stitching)
-stitching: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████| 2/2 [11:41<00:00, 350.93s/it]
-apply_labels: 100%|███| 24689/24689 [45:02<00:00,  9.14it/s]
-Stage 3 done: rows= 28059774 took 3434.49645113945 s
+stitching: 100%|████████████████████████████████████████████████████████████| 2/2 [09:38<00:00, 289.04s/it]
+Stage 3 done: rows= 28059774 took 601.4606521129608 s
 Saving df_stitched to /Users/lyuan13/Desktop/HOT-NERD/tutorials/breast_cancer/output/df_stitched.parquet
 Stage 4: enforce_spatial_coherence_fast (split spatially disjoint labels)
-Constructed 136,495,854 edges among 28,059,774 transcripts (k≤5, d≤3.0 µm)
-spatial_labels: 100%|██████████████████████████████████████████████████████████████████████████████████| 264722/264722 [56:18<00:00, 78.36it/s]
-Stage 4 done: rows= 28059774 took 3544.750870704651 s
+Constructed 140,289,974 edges among 28,059,774 transcripts (k≤5, d≤25.0 µm)
+spatial_labels: 100%|████████████████████████████████████████████| 290077/290077 [1:00:50<00:00, 79.46it/s]
+Stage 4 done: rows= 28059774 took 3824.076679944992 s
 Stage 5: apply_stitching_to_transcripts_fast (final stitching on split labels)
-stitching: 100%|█████████████████████████████████████████████████████████████████████████████████████████████| 2/2 [1:30:06<00:00, 2703.38s/it]
+stitching: 100%|█████████████████████████████████████████████████████████| 2/2 [1:27:52<00:00, 2636.20s/it]
+Stage 5 done: rows= 28059774 took 5313.000539064407 s
+Saving df_finetuned to /Users/lyuan13/Desktop/HOT-NERD/tutorials/breast_cancer/output/df_finetuned.parquet
+Pipeline complete. Outputs:
+ - /Users/lyuan13/Desktop/HOT-NERD/tutorials/breast_cancer/output/df_stitched.parquet
+ - /Users/lyuan13/Desktop/HOT-NERD/tutorials/breast_cancer/output/df_finetuned.parquet
 ```
 
-**Total Runtime**: ~2.5 hours on this dataset with Cython acceleration enabled
+**Total Runtime**: ~3.5 hours on this dataset with Cython acceleration enabled on Apple M1
 
 ## Output Files
 
@@ -93,6 +97,28 @@ Without Cython acceleration, runtime may be 2-5× longer. To compile Cython modu
 ```bash
 pip install -e .
 ```
+
+## Quality Metrics & UMAP Enhancement
+
+HOT-NERD significantly improves cell segmentation quality using NPMI-based purity and conflict scores:
+
+![Purity and Conflict Scores](plot/breast_cancer_mean_purity_conflict_transcript_scores.png)
+
+**Quantitative Improvements:**
+- **Purity Score** (gene co-expression consistency): 0.457 (Original Xenium) → 0.686 (HOT-NERD Stitched) → **0.708** (HOT-NERD Stitched + Fine-tuned) — **+55% improvement**
+- **Conflict Score** (incompatible gene signatures): 0.055 (Original Xenium) → 0.005 (HOT-NERD Stitched) → **0.004** (HOT-NERD Stitched + Fine-tuned) — **-93% reduction**
+
+**Enhanced UMAP with Author-Annotated Cell Types:**
+
+The improved segmentation produces clearer cell type clustering with better within-lineage cohesion and between-lineage separation:
+
+![UMAP with Cell Type Overlay](plot/breast_cancer_umap_whole_cell_supervised_overlay.png)
+
+The enhanced UMAP demonstrates:
+- **Better-defined cell type clusters** reflecting true biological identity
+- **Improved lineage separation** between distinct cell populations
+- **Reduced contamination** within cell type clusters
+- **More accurate downstream annotation** and biological interpretation
 
 ## Downstream Analysis
 
