@@ -1121,6 +1121,67 @@ def coherence_C_from_genes(
     C = purity - conflict
     return float(C), purity, conflict
 
+def coherence_C_from_genes_relu(
+    gene_ids: np.ndarray,
+    npmi_mat: np.ndarray,
+    *,
+    tau=0.05,
+):
+    """
+    ReLU-based coherence score: C = purity - conflict
+    
+    Uses symmetric ReLU to suppress weak associations and weight
+    stronger evidence more heavily.
+    
+    purity = sum(positive ReLU) / total_pairs (absolute)
+    conflict = sum(negative ReLU) / total_pairs (absolute)
+    C = purity - conflict
+    
+    If <2 genes or no observed pairs -> return 0.0
+    
+    Parameters
+    ----------
+    gene_ids : np.ndarray
+        Array of gene indices
+    npmi_mat : np.ndarray
+        NPMI matrix
+    tau : float
+        Dead-zone threshold for symmetric ReLU
+        
+    Returns
+    -------
+    C : float
+        Coherence score (purity - conflict)
+    purity : float
+        Absolute purity score
+    conflict : float
+        Absolute conflict score
+    """
+    k = int(gene_ids.size)
+    if k < 2:
+        return 0.0, 0.0, 0.0
+
+    sub = npmi_mat[np.ix_(gene_ids, gene_ids)]
+    iu = np.triu_indices(k, k=1)
+    vals = sub[iu]
+    vals = vals[np.isfinite(vals)]
+    
+    if vals.size == 0:
+        return 0.0, 0.0, 0.0
+
+    # Apply symmetric ReLU
+    rvals = relu_symmetric(vals, tau)
+    
+    K = vals.size
+    pos_sum = np.sum(np.maximum(rvals, 0.0))
+    neg_sum = np.sum(np.maximum(-rvals, 0.0))
+    
+    purity = float(pos_sum / K)
+    conflict = float(neg_sum / K)
+    C = purity - conflict
+    
+    return float(C), purity, conflict
+
 
 def deltaC_between_clusters(
     genes_u: np.ndarray,
@@ -1140,6 +1201,41 @@ def deltaC_between_clusters(
     # union
     union = np.unique(np.concatenate([genes_u, genes_v]))
     C_union, _, _ = coherence_C_from_genes(union, npmi_mat, purity_threshold=purity_threshold)
+
+    if not penalize_simplicity:
+        return C_union - max(C_u, C_v)
+
+    nu = max(int(genes_u.size), 1)
+    nv = max(int(genes_v.size), 1)
+    n_union = nu + nv
+
+    C_u_adj = C_u - 1.0 / nu
+    C_v_adj = C_v - 1.0 / nv
+    C_sep = max(C_u_adj, C_v_adj)
+
+    deltaC = C_union - (1.0 / n_union) - C_sep
+    return float(deltaC)
+
+def deltaC_between_clusters_relu(
+    genes_u: np.ndarray,
+    genes_v: np.ndarray,
+    npmi_mat: np.ndarray,
+    *,
+    tau=0.05,
+    penalize_simplicity=True,
+):
+    """
+    ReLU-based ΔC = C_union - max(C_u, C_v) (if not penalize_simplicity)
+    
+    Uses ReLU-based coherence scoring for more robust cluster merging.
+    """
+    # individual
+    C_u, _, _ = coherence_C_from_genes_relu(genes_u, npmi_mat, tau=tau)
+    C_v, _, _ = coherence_C_from_genes_relu(genes_v, npmi_mat, tau=tau)
+
+    # union
+    union = np.unique(np.concatenate([genes_u, genes_v]))
+    C_union, _, _ = coherence_C_from_genes_relu(union, npmi_mat, tau=tau)
 
     if not penalize_simplicity:
         return C_union - max(C_u, C_v)
@@ -1190,6 +1286,8 @@ def stitch_entities_hierarchical(
     aux: dict,
     *,
     purity_threshold=0.05,
+    tau=0.05,
+    use_relu=True,
     penalize_simplicity=True,
     deltaC_min=0.0,
     use_3d=True,
@@ -1200,6 +1298,25 @@ def stitch_entities_hierarchical(
       - x,y,z (or x,y if use_3d=False)
       - genes (np.ndarray[str])
       - etype in {'cell','partial','component'}
+
+    Parameters
+    ----------
+    summary_df : pd.DataFrame
+        Entity summary with required columns
+    aux : dict
+        Contains NPMI matrix ("W") and gene mapping ("gene_to_idx")
+    purity_threshold : float
+        Threshold for original scoring (used if use_relu=False)
+    tau : float
+        Dead-zone threshold for ReLU (used if use_relu=True)
+    use_relu : bool
+        If True, use ReLU-based coherence scoring (default)
+    penalize_simplicity : bool
+        If True, penalize smaller gene sets in deltaC
+    deltaC_min : float
+        Minimum deltaC threshold for merging
+    use_3d : bool
+        Use 3D or 2D coordinates
 
     Returns:
       - mapping entity_id -> stitched_entity_id (string)
@@ -1260,14 +1377,24 @@ def stitch_entities_hierarchical(
         return True
 
     # compute deltaC between current roots
-    def compute_deltaC_roots(ra, rb):
-        return deltaC_between_clusters(
-            root_genes[ra],
-            root_genes[rb],
-            npmi_mat,
-            purity_threshold=purity_threshold,
-            penalize_simplicity=penalize_simplicity,
-        )
+    if use_relu:
+        def compute_deltaC_roots(ra, rb):
+            return deltaC_between_clusters_relu(
+                root_genes[ra],
+                root_genes[rb],
+                npmi_mat,
+                tau=tau,
+                penalize_simplicity=penalize_simplicity,
+            )
+    else:
+        def compute_deltaC_roots(ra, rb):
+            return deltaC_between_clusters(
+                root_genes[ra],
+                root_genes[rb],
+                npmi_mat,
+                purity_threshold=purity_threshold,
+                penalize_simplicity=penalize_simplicity,
+            )
 
     # max-heap of candidate edges by deltaC (lazy updates)
     heap = []
@@ -1356,6 +1483,8 @@ def apply_stitching_to_transcripts(
     gene_col="feature_name",
     coord_cols=("x", "y", "z"),
     purity_threshold=0.05,
+    tau=0.05,
+    use_relu=True,
     penalize_simplicity=True,
     deltaC_min=0.0,
     use_3d=True,
@@ -1382,6 +1511,8 @@ def apply_stitching_to_transcripts(
         summary_df=summary.rename(columns={"entity_id": "entity_id"}),
         aux=aux,
         purity_threshold=purity_threshold,
+        tau=tau,
+        use_relu=use_relu,
         penalize_simplicity=penalize_simplicity,
         deltaC_min=deltaC_min,
         use_3d=use_3d,
@@ -1409,6 +1540,8 @@ def apply_stitching_to_transcripts_fast(
     gene_col="feature_name",
     coord_cols=("x", "y", "z"),
     purity_threshold=0.05,
+    tau=0.05,
+    use_relu=True,
     penalize_simplicity=True,
     deltaC_min=0.0,
     use_3d=True,
@@ -1418,7 +1551,44 @@ def apply_stitching_to_transcripts_fast(
     """
     Fast wrapper around `apply_stitching_to_transcripts`.
     - Builds entity table and runs hierarchical stitching, with optional progress bars.
+    - Uses ReLU-based coherence scoring by default for robust cluster merging.
     - Returns same outputs as original function.
+    
+    Parameters
+    ----------
+    df_final : pd.DataFrame
+        Transcript-level data with entity assignments
+    aux : dict
+        Contains NPMI matrix ("W") and gene mapping ("gene_to_idx")
+    entity_col : str
+        Column with current entity labels
+    gene_col : str
+        Column with gene names
+    coord_cols : tuple
+        Coordinate column names
+    purity_threshold : float
+        Threshold for original scoring (used if use_relu=False)
+    tau : float
+        Dead-zone threshold for ReLU (used if use_relu=True, default)
+    use_relu : bool
+        If True, use ReLU-based coherence (default, faster and more robust)
+    penalize_simplicity : bool
+        Penalize smaller gene sets in deltaC
+    deltaC_min : float
+        Minimum deltaC for merging
+    use_3d : bool
+        Use 3D coordinates
+    out_col : str
+        Output column name
+    show_progress : bool
+        Show progress bar
+        
+    Returns
+    -------
+    df_out : pd.DataFrame
+        DataFrame with stitched labels
+    entity_to_stitched : dict
+        Mapping from original to stitched entity IDs
     """
     # build entity table (centroids + genes)
     if show_progress:
@@ -1442,11 +1612,13 @@ def apply_stitching_to_transcripts_fast(
     else:
         summary = summary.rename(columns={coord_cols[0]: "x", coord_cols[1]: "y", coord_cols[2]: "z"})
 
-    # stitch entities (this is the heavy op - reuse existing implementation)
+    # stitch entities (this is the heavy op - uses ReLU by default)
     entity_to_stitched, info = stitch_entities_hierarchical(
         summary_df=summary.rename(columns={"entity_id": "entity_id"}),
         aux=aux,
         purity_threshold=purity_threshold,
+        tau=tau,
+        use_relu=use_relu,
         penalize_simplicity=penalize_simplicity,
         deltaC_min=deltaC_min,
         use_3d=use_3d,
@@ -1698,6 +1870,235 @@ def enforce_spatial_coherence_fast(
 
     df = df.drop(columns=["__node_idx"])
     return df
+
+# ---------- Phase 6: Reassign unassigned transcripts to nearby partials/components ----------
+def reassign_unassigned_to_nearby_entities(
+    df_spatial: pd.DataFrame,
+    entity_summary: pd.DataFrame,
+    *,
+    entity_col: str = "cell_id_spatial",
+    out_col: str = "cell_id_finetuned",
+    coord_cols=("x", "y", "z"),
+    dist_threshold: float = 20.0,
+    unassigned_labels=None,
+    only_partial_component: bool = True,
+    show_progress: bool = True,
+):
+    """
+    Phase 6: Reassign unassigned transcripts to the nearest "partial" or "component" entity
+    if they are within a distance threshold.
+    
+    This function takes transcripts with unassigned labels (DROP, -1, UNASSIGNED, etc.) and
+    finds the nearest spatial entity of type "partial" or "component", assigning them if
+    within the distance threshold. This helps capture transcripts that are spatially close
+    to partial/component clusters but were not assigned during earlier phases.
+    
+    Parameters
+    ----------
+    df_spatial : pd.DataFrame
+        Transcript-level DataFrame with entity assignments (from Phase 5).
+        Must contain `entity_col` and `coord_cols`.
+    entity_summary : pd.DataFrame
+        Entity summary table (output from build_entity_table).
+        Must contain columns: entity_id, x, y, z, etype.
+        If not provided, will be built from df_spatial.
+    entity_col : str
+        Input column with current entity labels (e.g., "cell_id_spatial").
+    out_col : str
+        Output column name for reassigned labels (e.g., "cell_id_finetuned").
+    coord_cols : tuple
+        Coordinate column names.
+    dist_threshold : float
+        Maximum Euclidean distance for reassignment (default 20).
+    unassigned_labels : set or None
+        Labels to consider as "unassigned" (e.g., {"DROP", "-1", "UNASSIGNED"}).
+        If None, defaults to {"DROP", "-1", "UNASSIGNED", "nan"}.
+    only_partial_component : bool
+        If True, only assign to "partial" or "component" entities (not "cell").
+        If False, assign to any entity type.
+    show_progress : bool
+        Show progress bar during processing.
+    
+    Returns
+    -------
+    df_out : pd.DataFrame
+        DataFrame with new `out_col` containing reassigned labels.
+        Unassigned transcripts within threshold are reassigned.
+        Unassigned transcripts beyond threshold keep original labels.
+        Assigned transcripts keep their original labels.
+    n_reassigned : int
+        Number of transcripts that were reassigned.
+    reassignment_stats : dict
+        Statistics about the reassignment process:
+        - total_unassigned: total unassigned transcripts found
+        - total_reassigned: transcripts successfully reassigned
+        - mean_distance: mean distance of reassigned transcripts
+        - max_distance: maximum distance of reassigned transcripts
+    
+    Notes
+    -----
+    - Uses KNN with k=1 for fast nearest-entity lookup
+    - Euclidean distance in coordinate space
+    - Original assigned transcripts are never modified
+    """
+    if unassigned_labels is None:
+        unassigned_labels = {"DROP", "-1", "UNASSIGNED", "nan"}
+    
+    df = df_spatial.copy()
+    df[out_col] = df[entity_col].astype(str)
+    
+    # Identify unassigned transcripts
+    labels = df[entity_col].astype(str)
+    unassigned_mask = labels.isin(unassigned_labels)
+    
+    n_unassigned = unassigned_mask.sum()
+    if n_unassigned == 0:
+        return df, 0, {
+            "total_unassigned": 0,
+            "total_reassigned": 0,
+            "mean_distance": np.nan,
+            "max_distance": np.nan,
+        }
+    
+    # Extract unassigned transcript coordinates
+    unassigned_idx = np.where(unassigned_mask)[0]
+    unassigned_coords = df.loc[unassigned_idx, list(coord_cols)].to_numpy(dtype=np.float32)
+    
+    # Filter entity summary
+    if only_partial_component:
+        entity_mask = entity_summary["etype"].isin(["partial", "component"])
+        entities = entity_summary[entity_mask].copy()
+    else:
+        entities = entity_summary.copy()
+    
+    if len(entities) == 0:
+        return df, 0, {
+            "total_unassigned": n_unassigned,
+            "total_reassigned": 0,
+            "mean_distance": np.nan,
+            "max_distance": np.nan,
+        }
+    
+    # Entity coordinates and IDs
+    entity_coords = entities[list(coord_cols)].to_numpy(dtype=np.float32)
+    entity_ids = entities["entity_id"].to_numpy(dtype=object)
+    
+    # Build KNN index for fast nearest-neighbor lookup
+    knn = NearestNeighbors(n_neighbors=1, algorithm="kd_tree", metric="euclidean")
+    knn.fit(entity_coords)
+    
+    # Find nearest entity for each unassigned transcript
+    distances, indices = knn.kneighbors(unassigned_coords)
+    distances = distances.ravel()
+    indices = indices.ravel()
+    
+    # Determine which unassigned transcripts should be reassigned
+    within_threshold = distances <= dist_threshold
+    n_reassigned = within_threshold.sum()
+    
+    # Reassign transcripts within threshold
+    for i, unassigned_pos in enumerate(unassigned_idx):
+        if within_threshold[i]:
+            entity_idx = indices[i]
+            new_label = entity_ids[entity_idx]
+            df.loc[unassigned_pos, out_col] = new_label
+    
+    # Compute statistics
+    if n_reassigned > 0:
+        reassigned_distances = distances[within_threshold]
+        mean_distance = float(np.mean(reassigned_distances))
+        max_distance = float(np.max(reassigned_distances))
+    else:
+        mean_distance = np.nan
+        max_distance = np.nan
+    
+    stats = {
+        "total_unassigned": int(n_unassigned),
+        "total_reassigned": int(n_reassigned),
+        "mean_distance": mean_distance,
+        "max_distance": max_distance,
+    }
+    
+    if show_progress:
+        print(f"Phase 6: Reassigned {n_reassigned}/{n_unassigned} unassigned transcripts "
+              f"(threshold={dist_threshold})")
+        if n_reassigned > 0:
+            print(f"  Mean distance: {mean_distance:.2f}, Max distance: {max_distance:.2f}")
+    
+    return df, n_reassigned, stats
+
+def reassign_unassigned_to_nearby_entities_fast(
+    df_spatial: pd.DataFrame,
+    entity_summary: pd.DataFrame = None,
+    *,
+    entity_col: str = "cell_id_spatial",
+    gene_col: str = "feature_name",
+    coord_cols=("x", "y", "z"),
+    out_col: str = "cell_id_finetuned",
+    dist_threshold: float = 20.0,
+    unassigned_labels=None,
+    only_partial_component: bool = True,
+    show_progress: bool = True,
+):
+    """
+    Fast wrapper around reassign_unassigned_to_nearby_entities.
+    
+    Builds entity summary if not provided, then performs reassignment with progress bar.
+    
+    Parameters
+    ----------
+    df_spatial : pd.DataFrame
+        Transcript-level DataFrame from Phase 5.
+    entity_summary : pd.DataFrame, optional
+        Pre-computed entity summary (from build_entity_table).
+        If None, will be built from df_spatial automatically.
+    entity_col : str
+        Input entity column.
+    gene_col : str
+        Gene/feature column name.
+    coord_cols : tuple
+        Coordinate columns.
+    out_col : str
+        Output column name.
+    dist_threshold : float
+        Maximum distance for reassignment.
+    unassigned_labels : set or None
+        Unassigned labels to identify.
+    only_partial_component : bool
+        Only assign to partial/component.
+    show_progress : bool
+        Show progress.
+    
+    Returns
+    -------
+    df_out : pd.DataFrame
+        Reassigned transcript data.
+    n_reassigned : int
+        Number of reassigned transcripts.
+    stats : dict
+        Reassignment statistics.
+    """
+    if entity_summary is None:
+        if show_progress:
+            print("Building entity summary...")
+        entity_summary = build_entity_table(
+            df_spatial,
+            entity_col=entity_col,
+            gene_col=gene_col,
+            coord_cols=coord_cols,
+        )
+    
+    return reassign_unassigned_to_nearby_entities(
+        df_spatial,
+        entity_summary,
+        entity_col=entity_col,
+        out_col=out_col,
+        coord_cols=coord_cols,
+        dist_threshold=dist_threshold,
+        unassigned_labels=unassigned_labels,
+        only_partial_component=only_partial_component,
+        show_progress=show_progress,
+    )
 
 #
 def calculate_rankings(
@@ -2077,6 +2478,31 @@ def build_npmi_matrix_from_long(npmi_long):
     return genes, gene_to_idx, npmi_mat, col_idx
 
 #
+def relu_symmetric(x, tau):
+    """
+    Two-sided ReLU with dead zone [-tau, tau].
+    
+    Values in [-tau, tau] are zeroed out.
+    Values above tau are shifted down by tau.
+    Values below -tau are shifted up by tau.
+    
+    Parameters
+    ----------
+    x : array_like
+        Input values
+    tau : float
+        Dead zone threshold
+        
+    Returns
+    -------
+    out : np.ndarray
+        ReLU-transformed values
+    """
+    out = np.zeros_like(x)
+    out[x > tau] = x[x > tau] - tau
+    out[x < -tau] = x[x < -tau] + tau
+    return out
+
 def compute_purity_conflict_per_cc(M, npmi_mat, col_idx, purity_threshold=0.05):
     """
     Compute purity & conflict per row of M (each row = connected component).
@@ -2118,6 +2544,90 @@ def compute_purity_conflict_per_cc(M, npmi_mat, col_idx, purity_threshold=0.05):
 
     return purity, conflict
 
+def compute_purity_conflict_per_cc_relu(M, npmi_mat, col_idx, tau=0.05, eps=1e-8):
+    """
+    ReLU-based purity & conflict computation per connected component.
+    
+    Uses symmetric ReLU to suppress weak associations and weight
+    stronger evidence more heavily.
+    
+    For k = 1:
+        All metrics = 0
+    For k >= 2:
+        - absolute_purity = sum(positive ReLU) / total_pairs
+        - absolute_conflict = sum(negative ReLU) / total_pairs  
+        - relative_purity = positive_signal / total_signal
+        - relative_conflict = negative_signal / total_signal
+        - signal_strength = total magnitude of non-zero ReLU values
+        
+    Parameters
+    ----------
+    M : np.ndarray, shape (n_cc, n_genes)
+        Binary presence/absence matrix per connected component
+    npmi_mat : np.ndarray
+        Full NPMI matrix
+    col_idx : np.ndarray
+        Gene indices mapping to NPMI matrix columns
+    tau : float
+        Dead-zone threshold for symmetric ReLU
+    eps : float
+        Minimum signal strength for computing relative metrics
+        
+    Returns
+    -------
+    purity : np.ndarray
+        Absolute purity scores per CC
+    conflict : np.ndarray
+        Absolute conflict scores per CC
+    relative_purity : np.ndarray
+        Relative purity (fraction of total signal) per CC
+    relative_conflict : np.ndarray
+        Relative conflict (fraction of total signal) per CC
+    signal_strength : np.ndarray
+        Total signal magnitude per CC
+    """
+    n_cells = M.shape[0]
+    purity = np.zeros(n_cells, dtype=np.float32)
+    conflict = np.zeros(n_cells, dtype=np.float32)
+    relative_purity = np.zeros(n_cells, dtype=np.float32)
+    relative_conflict = np.zeros(n_cells, dtype=np.float32)
+    signal_strength = np.zeros(n_cells, dtype=np.float32)
+
+    for i in range(n_cells):
+        present = np.where(M[i] == 1)[0]
+        k = len(present)
+
+        if k < 2:
+            # All metrics remain 0
+            continue
+
+        gi = col_idx[present]
+        sub = npmi_mat[np.ix_(gi, gi)]
+        vals = sub[np.triu_indices_from(sub, k=1)]
+
+        if vals.size == 0:
+            continue
+
+        # Apply symmetric ReLU
+        rvals = relu_symmetric(vals, tau)
+
+        K = k * (k - 1) / 2
+        pos_sum = np.sum(np.maximum(rvals, 0.0))
+        neg_sum = np.sum(np.maximum(-rvals, 0.0))
+        total_abs = pos_sum + neg_sum
+
+        # Absolute metrics (normalized by number of pairs)
+        purity[i] = float(pos_sum / K)
+        conflict[i] = float(neg_sum / K)
+        signal_strength[i] = float(total_abs)
+
+        # Relative metrics (normalized by total signal)
+        if total_abs > eps:
+            relative_purity[i] = float(pos_sum / total_abs)
+            relative_conflict[i] = float(neg_sum / total_abs)
+
+    return purity, conflict, relative_purity, relative_conflict, signal_strength
+
 #
 def purity_conflict_from_cc(
     G_pruned,
@@ -2125,6 +2635,9 @@ def purity_conflict_from_cc(
     df_local,
     *,
     purity_threshold=0.05,
+    tau=0.05,
+    use_relu=True,
+    eps=1e-8,
     return_matrix=False,
     min_cc_size=1,
     return_node_mapping=True,   
@@ -2148,7 +2661,14 @@ def purity_conflict_from_cc(
         Transcript-level DataFrame with columns:
         ['x', 'y', 'z', 'cell_id', 'feature_name'].
     purity_threshold : float
-        Threshold used for purity scoring.
+        Threshold used for purity scoring (only used if use_relu=False).
+    tau : float
+        Dead-zone threshold for symmetric ReLU (only used if use_relu=True).
+    use_relu : bool
+        If True, use ReLU-based scoring with relative metrics.
+        If False, use original threshold-based scoring.
+    eps : float
+        Minimum signal strength for computing relative metrics (only used if use_relu=True).
     return_matrix : bool
         If True, also return (M_cc, genes).
     min_cc_size : int
@@ -2160,6 +2680,9 @@ def purity_conflict_from_cc(
     -------
     summary_df : pd.DataFrame
         Per-CC metrics including centroid and assigned cell_id.
+        If use_relu=True, includes: purity, conflict, relative_purity, 
+        relative_conflict, signal_strength.
+        If use_relu=False, includes: purity, conflict (original metrics).
     M_cc : np.ndarray (optional)
         CC × gene presence matrix.
     genes : np.ndarray (optional)
@@ -2237,29 +2760,58 @@ def purity_conflict_from_cc(
 
 
     # Purity / conflict scoring
-    purity, conflict = compute_purity_conflict_per_cc(
-        M=M_cc,
-        npmi_mat=npmi_mat,
-        col_idx=col_idx,
-        purity_threshold=purity_threshold,
-    )
+    if use_relu:
+        purity, conflict, relative_purity, relative_conflict, signal_strength = compute_purity_conflict_per_cc_relu(
+            M=M_cc,
+            npmi_mat=npmi_mat,
+            col_idx=col_idx,
+            tau=tau,
+            eps=eps,
+        )
+        
+        # Build summary table with ReLU metrics
+        summary_df = pd.DataFrame({
+            "component_id": np.arange(n_cc, dtype=int),
+            "n_nodes": n_nodes,
+            "n_unique_genes": n_unique_genes,
+            "purity": purity,
+            "conflict": conflict,
+            "relative_purity": relative_purity,
+            "relative_conflict": relative_conflict,
+            "signal_strength": signal_strength,
+            "centroid_x": centroid[:, 0],
+            "centroid_y": centroid[:, 1],
+            "centroid_z": centroid[:, 2],
+            "assigned_cell_id": assigned_cell,
+            "cell_id_purity": cell_id_purity,
+        }).sort_values(
+            ["n_nodes", "purity"],
+            ascending=[False, False],
+        ).reset_index(drop=True)
+    else:
+        purity, conflict = compute_purity_conflict_per_cc(
+            M=M_cc,
+            npmi_mat=npmi_mat,
+            col_idx=col_idx,
+            purity_threshold=purity_threshold,
+        )
 
-    # Build summary table
-    summary_df = pd.DataFrame({
-        "component_id": np.arange(n_cc, dtype=int),
-        "n_nodes": n_nodes,
-        "n_unique_genes": n_unique_genes,
-        "purity": purity,
-        "conflict": conflict,
-        "centroid_x": centroid[:, 0],
-        "centroid_y": centroid[:, 1],
-        "centroid_z": centroid[:, 2],
-        "assigned_cell_id": assigned_cell,
-        "cell_id_purity": cell_id_purity,
-    }).sort_values(
-        ["n_nodes", "purity"],
-        ascending=[False, False],
-    ).reset_index(drop=True)
+        # Build summary table with original metrics
+        summary_df = pd.DataFrame({
+            "component_id": np.arange(n_cc, dtype=int),
+            "n_nodes": n_nodes,
+            "n_unique_genes": n_unique_genes,
+            "purity": purity,
+            "conflict": conflict,
+            "centroid_x": centroid[:, 0],
+            "centroid_y": centroid[:, 1],
+            "centroid_z": centroid[:, 2],
+            "assigned_cell_id": assigned_cell,
+            "cell_id_purity": cell_id_purity,
+        }).sort_values(
+            ["n_nodes", "purity"],
+            ascending=[False, False],
+        ).reset_index(drop=True)
 
 
     # Return logic

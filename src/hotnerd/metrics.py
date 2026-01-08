@@ -611,3 +611,401 @@ def compute_purity_and_conflict(
     attach_metrics_to_adata(adata, purity_df, conflict_df)
 
     return purity_df, conflict_df
+
+#
+def relu_symmetric(x, tau):
+    """
+    Two-sided ReLU with dead zone [-tau, tau].
+    
+    Values in [-tau, tau] are zeroed out.
+    Values above tau are shifted down by tau.
+    Values below -tau are shifted up by tau.
+    
+    Parameters
+    ----------
+    x : array_like
+        Input values
+    tau : float
+        Dead zone threshold
+        
+    Returns
+    -------
+    out : np.ndarray
+        ReLU-transformed values
+    """
+    out = np.zeros_like(x)
+    out[x > tau] = x[x > tau] - tau
+    out[x < -tau] = x[x < -tau] + tau
+    return out
+
+#
+def compute_cell_purity_relu(
+    M,
+    col_idx,
+    npmi_mat,
+    tau=0.05,                  # dead-zone threshold
+    cell_ids=None,
+    purity_percentile=80.0,
+    purity_threshold=None,
+    eps=1e-8                   # minimum signal for normalization
+):
+    """
+    ReLU-based cell purity score with relative metrics.
+
+    Uses a symmetric ReLU on NPMI to:
+      - zero out weak associations within [-tau, tau]
+      - weight stronger positive/negative evidence more
+      
+    Computes:
+      - Absolute purity: sum of positive ReLU values normalized by number of pairs
+      - Relative purity: fraction of total signal that is positive
+      - Relative conflict: fraction of total signal that is negative
+      - Signal strength: total magnitude of non-zero ReLU values
+
+    Parameters
+    ----------
+    M : np.ndarray, shape (n_cells, n_genes)
+        Binary presence/absence matrix
+    col_idx : np.ndarray
+        Gene indices mapping to NPMI matrix columns
+    npmi_mat : np.ndarray
+        Full NPMI matrix
+    tau : float
+        Dead-zone threshold for symmetric ReLU
+    cell_ids : array-like, optional
+        Cell identifiers for output DataFrame
+    purity_percentile : float
+        Percentile for purity threshold (if threshold not provided)
+    purity_threshold : float, optional
+        Explicit threshold for binary purity classification
+    eps : float
+        Minimum signal strength for computing relative metrics
+
+    Returns
+    -------
+    purity_scores : np.ndarray
+        Absolute purity scores per cell
+    is_pure : np.ndarray
+        Boolean array indicating pure cells
+    purity_threshold : float
+        Threshold used for classification
+    purity_df : pd.DataFrame or None
+        DataFrame with all purity metrics if cell_ids provided
+    """
+    n_cells = M.shape[0]
+    purity_scores = np.full(n_cells, np.nan, dtype=float)
+    signal_strength = np.full(n_cells, np.nan, dtype=float)
+    relative_purity = np.full(n_cells, np.nan, dtype=float)
+    relative_conflict = np.full(n_cells, np.nan, dtype=float)
+
+    for row in range(n_cells):
+        present_idx = np.where(M[row] == 1)[0]
+        gi = col_idx[present_idx]
+        k = len(gi)
+        
+        if k < 2:
+            continue
+
+        sub = npmi_mat[np.ix_(gi, gi)]
+        vals = sub[np.triu_indices_from(sub, k=1)]
+        rvals = relu_symmetric(vals, tau)
+
+        K = k * (k - 1) / 2
+        pos_sum = np.sum(np.maximum(rvals, 0.0))
+        neg_sum = np.sum(np.maximum(-rvals, 0.0))
+        total_abs = pos_sum + neg_sum
+
+        purity_scores[row] = pos_sum / K
+        signal_strength[row] = total_abs
+
+        if total_abs > eps:
+            relative_purity[row] = pos_sum / total_abs
+            relative_conflict[row] = neg_sum / total_abs
+
+    valid = ~np.isnan(purity_scores)
+    
+    if purity_threshold is None:
+        purity_threshold = np.nanpercentile(
+            purity_scores[valid], purity_percentile
+        )
+
+    is_pure = np.zeros_like(purity_scores, dtype=bool)
+    is_pure[valid] = purity_scores[valid] >= purity_threshold
+
+    purity_df = None
+    if cell_ids is not None:
+        purity_df = pd.DataFrame({
+            "cell_id": cell_ids,
+            "cell_purity_relu": purity_scores,
+            "signal_strength": signal_strength,
+            "relative_purity": relative_purity,
+            "relative_conflict": relative_conflict,
+            "is_pure": is_pure
+        })
+
+    return purity_scores, is_pure, purity_threshold, purity_df
+
+#
+def compute_cell_conflict_relu(
+    M,
+    col_idx,
+    npmi_mat,
+    tau=0.05,
+    cell_ids=None,
+    conflict_percentile=80.0,
+    conflict_threshold=None,
+    eps=1e-8
+):
+    """
+    ReLU-based conflict score with relative metrics.
+
+    Measures magnitude-weighted negative evidence
+    after suppressing weak NPMI values within [-tau, tau].
+    
+    Computes:
+      - Absolute conflict: sum of negative ReLU values normalized by number of pairs
+      - Relative conflict: fraction of total signal that is negative
+      - Relative purity: fraction of total signal that is positive
+      - Signal strength: total magnitude of non-zero ReLU values
+
+    Parameters
+    ----------
+    M : np.ndarray, shape (n_cells, n_genes)
+        Binary presence/absence matrix
+    col_idx : np.ndarray
+        Gene indices mapping to NPMI matrix columns
+    npmi_mat : np.ndarray
+        Full NPMI matrix
+    tau : float
+        Dead-zone threshold for symmetric ReLU
+    cell_ids : array-like, optional
+        Cell identifiers for output DataFrame
+    conflict_percentile : float
+        Percentile for conflict threshold (if threshold not provided)
+    conflict_threshold : float, optional
+        Explicit threshold for binary conflict classification
+    eps : float
+        Minimum signal strength for computing relative metrics
+
+    Returns
+    -------
+    conflict_scores : np.ndarray
+        Absolute conflict scores per cell
+    is_conflict : np.ndarray
+        Boolean array indicating high-conflict cells
+    conflict_threshold : float
+        Threshold used for classification
+    conflict_df : pd.DataFrame or None
+        DataFrame with all conflict metrics if cell_ids provided
+    """
+    n_cells = M.shape[0]
+    conflict_scores = np.full(n_cells, np.nan, dtype=float)
+    signal_strength = np.full(n_cells, np.nan, dtype=float)
+    relative_purity = np.full(n_cells, np.nan, dtype=float)
+    relative_conflict = np.full(n_cells, np.nan, dtype=float)
+
+    for row in range(n_cells):
+        present_idx = np.where(M[row] == 1)[0]
+        gi = col_idx[present_idx]
+        k = len(gi)
+
+        if k < 2:
+            continue
+
+        sub = npmi_mat[np.ix_(gi, gi)]
+        vals = sub[np.triu_indices_from(sub, k=1)]
+        rvals = relu_symmetric(vals, tau)
+
+        K = k * (k - 1) / 2
+        pos_sum = np.sum(np.maximum(rvals, 0.0))
+        neg_sum = np.sum(np.maximum(-rvals, 0.0))
+        total_abs = pos_sum + neg_sum
+
+        conflict_scores[row] = neg_sum / K
+        signal_strength[row] = total_abs
+        
+        if total_abs > eps:
+            relative_purity[row] = pos_sum / total_abs
+            relative_conflict[row] = neg_sum / total_abs
+
+    valid = ~np.isnan(conflict_scores)
+
+    if conflict_threshold is None:
+        conflict_threshold = np.nanpercentile(
+            conflict_scores[valid], conflict_percentile
+        )
+
+    is_conflict = np.zeros_like(conflict_scores, dtype=bool)
+    is_conflict[valid] = conflict_scores[valid] >= conflict_threshold
+
+    if cell_ids is not None:
+        conflict_df = pd.DataFrame({
+            "cell_id": cell_ids,
+            "cell_conflict_relu": conflict_scores,
+            "signal_strength": signal_strength,
+            "relative_purity": relative_purity,
+            "relative_conflict": relative_conflict,
+            "is_conflict": is_conflict
+        })
+    else:
+        conflict_df = pd.DataFrame({
+            "cell_conflict_relu": conflict_scores,
+            "signal_strength": signal_strength,
+            "relative_purity": relative_purity,
+            "relative_conflict": relative_conflict,
+            "is_conflict": is_conflict
+        })
+
+    return conflict_scores, is_conflict, conflict_threshold, conflict_df
+
+#
+def attach_metrics_to_adata_relu(adata, purity_df, conflict_df):
+    """
+    Attach ReLU-based NPMI metrics to AnnData object.
+    
+    This function adds the following columns to adata.obs:
+        - cell_purity_relu: absolute purity score
+        - relative_purity: fraction of signal that is positive
+        - relative_conflict: fraction of signal that is negative  
+        - signal_strength: total magnitude of non-zero ReLU values
+        - is_pure: boolean flag for pure cells
+        - cell_conflict_relu: absolute conflict score
+        - is_conflict: boolean flag for high-conflict cells
+        
+    Parameters
+    ----------
+    adata : AnnData
+        The AnnData object to update
+    purity_df : pd.DataFrame
+        DataFrame with purity metrics from compute_cell_purity_relu
+    conflict_df : pd.DataFrame
+        DataFrame with conflict metrics from compute_cell_conflict_relu
+        
+    Returns
+    -------
+    None
+        Modifies adata.obs in place
+    """
+    # Map purity metrics
+    purity_map = dict(zip(purity_df["cell_id"], purity_df["cell_purity_relu"]))
+    rel_purity_map = dict(zip(purity_df["cell_id"], purity_df["relative_purity"]))
+    signal_map_p = dict(zip(purity_df["cell_id"], purity_df["signal_strength"]))
+    purity_bool_map = dict(zip(purity_df["cell_id"], purity_df["is_pure"]))
+    
+    # Map conflict metrics
+    conflict_map = dict(zip(conflict_df["cell_id"], conflict_df["cell_conflict_relu"]))
+    rel_conflict_map = dict(zip(conflict_df["cell_id"], conflict_df["relative_conflict"]))
+    conflict_bool_map = dict(zip(conflict_df["cell_id"], conflict_df["is_conflict"]))
+    
+    # Attach to adata.obs
+    adata.obs["cell_purity_relu"] = adata.obs_names.map(purity_map)
+    adata.obs["relative_purity"] = adata.obs_names.map(rel_purity_map)
+    adata.obs["relative_conflict"] = adata.obs_names.map(rel_conflict_map)
+    adata.obs["signal_strength"] = adata.obs_names.map(signal_map_p)
+    adata.obs["is_pure_relu"] = adata.obs_names.map(purity_bool_map)
+    adata.obs["cell_conflict_relu"] = adata.obs_names.map(conflict_map)
+    adata.obs["is_conflict_relu"] = adata.obs_names.map(conflict_bool_map)
+
+#
+def compute_purity_and_conflict_relu(
+    filtered_df,
+    nucleus_npmi_long,
+    adata,
+    *,
+    cell_col="cell_id",
+    min_transcripts_per_cell=10,
+    exclude_ids=None,
+    tau=0.05,
+    purity_percentile=80.0,
+    conflict_percentile=80.0,
+    eps=1e-8
+):
+    """
+    Compute ReLU-based cell purity and conflict scores and attach to adata.
+    
+    This function uses a symmetric ReLU transformation to:
+      - Suppress weak NPMI associations (within [-tau, tau])
+      - Weight stronger positive and negative evidence more heavily
+      - Compute both absolute and relative metrics
+    
+    The following metrics are computed and attached to adata.obs:
+      - cell_purity_relu: absolute purity (positive evidence / total pairs)
+      - cell_conflict_relu: absolute conflict (negative evidence / total pairs)
+      - relative_purity: positive signal / total signal
+      - relative_conflict: negative signal / total signal
+      - signal_strength: total magnitude of non-zero ReLU values
+      - is_pure_relu: boolean flag for pure cells
+      - is_conflict_relu: boolean flag for high-conflict cells
+
+    Parameters
+    ----------
+    filtered_df : pd.DataFrame
+        Transcript-level data (already QV- and gene-filtered)
+    nucleus_npmi_long : pd.DataFrame
+        Pre-computed NPMI matrix in long format
+    adata : AnnData
+        AnnData object to attach metrics to
+    cell_col : str
+        Column name containing cell IDs in filtered_df
+    min_transcripts_per_cell : int
+        Minimum transcripts required per cell
+    exclude_ids : set | None
+        Set of cell IDs to exclude (e.g., {"UNASSIGNED", "DROP"})
+    tau : float
+        Dead-zone threshold for symmetric ReLU
+    purity_percentile : float
+        Percentile for purity threshold
+    conflict_percentile : float
+        Percentile for conflict threshold
+    eps : float
+        Minimum signal strength for computing relative metrics
+
+    Returns
+    -------
+    purity_df : pd.DataFrame
+        DataFrame with purity metrics per cell
+    conflict_df : pd.DataFrame
+        DataFrame with conflict metrics per cell
+    """
+    # -------- Build cell × gene matrix --------
+    cell_ids, genes_cell, M, col_idx = build_cell_gene_matrix(
+        filtered_df,
+        min_transcripts=min_transcripts_per_cell,
+        genes_npm=nucleus_npmi_long,
+        cell_col=cell_col,
+        exclude_ids=exclude_ids,
+    )
+
+    # -------- Build NPMI matrix --------
+    npmi_mat, gene_to_idx_all = build_npmi_matrix(nucleus_npmi_long)
+
+    # -------- ReLU-based Purity --------
+    purity_scores, is_pure, purity_thr, purity_df = compute_cell_purity_relu(
+        M=M,
+        col_idx=col_idx,
+        npmi_mat=npmi_mat,
+        tau=tau,
+        cell_ids=cell_ids,
+        purity_percentile=purity_percentile,
+        eps=eps,
+    )
+
+    print("ReLU Purity threshold used:", purity_thr)
+
+    # -------- ReLU-based Conflict --------
+    conflict_scores, is_conflict, conflict_thr, conflict_df = compute_cell_conflict_relu(
+        M=M,
+        col_idx=col_idx,
+        npmi_mat=npmi_mat,
+        tau=tau,
+        cell_ids=cell_ids,
+        conflict_percentile=conflict_percentile,
+        eps=eps,
+    )
+
+    print("ReLU Conflict threshold used:", conflict_thr)
+
+    # -------- Attach results to adata.obs --------
+    attach_metrics_to_adata_relu(adata, purity_df, conflict_df)
+
+    return purity_df, conflict_df
