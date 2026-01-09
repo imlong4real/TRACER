@@ -177,7 +177,7 @@ def main():
         build_graph_fn=build_graph_fast,
         prune_fn=prune_genes_by_npmi_greedy,
         coord_cols=("x", "y", "z"),
-        k=5,
+        k=8,
         dist_threshold=1.5,
         min_comp_size=25,
         npmi_threshold=-0.1,
@@ -221,11 +221,16 @@ def main():
         entity_col="cell_id_stitched",
         coord_cols=("x", "y", "z"),
         k=5,
-        dist_threshold=10.0,
+        dist_threshold=25.0,
         out_col="cell_id_spatial",
         show_progress=True,
     )
     print("Stage 4 done: rows=", len(df_split), "took", time.time() - t0, "s")
+
+    # Save spatial split result
+    split_fp = out_dir / "df_split.parquet"
+    print(f"Saving df_split to {split_fp}")
+    df_split.to_parquet(split_fp, index=False)
 
     # Stage 5: re-run stitching with spatial splits
     print("Stage 5: apply_stitching_to_transcripts_fast (final stitching on split labels)")
@@ -261,6 +266,7 @@ def main():
 
     print("Pipeline complete. Outputs:")
     print(" -", stitched_fp)
+    print(" -", split_fp)
     print(" -", finetuned_fp)
 
 
