@@ -101,7 +101,8 @@ def get_confident_nuclei_transcripts(
 def compute_npmi(
     df_subset,
     group_key="cell_id",
-    min_occurrences_per_context=2
+    min_occurrences_per_context=2,
+    count_col=None,
 ):
     """
     Compute PMI/NPMI using presence/absence of genes at the cell or nucleus level,
@@ -117,18 +118,30 @@ def compute_npmi(
     """
 
     # 0. Subset to necessary columns
-    df = df_subset[[group_key, "feature_name"]].copy()
+    if count_col is None:
+        df = df_subset[[group_key, "feature_name"]].copy()
+    else:
+        df = df_subset[[group_key, "feature_name", count_col]].copy()
+    df[group_key] = df[group_key].astype(str)
 
     # ----------------------------------------------------------------------
     # Filter by minimum occurrences per context
     # ----------------------------------------------------------------------
     # Count gene occurrences within each cell/nucleus
-    counts = (
-        df.groupby([group_key, "feature_name"])
-        .size()
-        .rename("gene_count")
-        .reset_index()
-    )
+    if count_col is None:
+        counts = (
+            df.groupby([group_key, "feature_name"])
+            .size()
+            .rename("gene_count")
+            .reset_index()
+        )
+    else:
+        counts = (
+            df.groupby([group_key, "feature_name"])[count_col]
+            .sum()
+            .rename("gene_count")
+            .reset_index()
+        )
 
     # Keep only those gene occurrences with enough counts
     df_filtered = counts[counts["gene_count"] >= min_occurrences_per_context].copy()

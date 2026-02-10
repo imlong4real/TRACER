@@ -1070,6 +1070,27 @@ def build_entity_table(
 # ----------------------------
 # Build Delaunay edges (3D/2D)
 # ----------------------------
+def _edges_from_simplices(simplices: np.ndarray):
+    """
+    Convert simplices (indices) to undirected edge list (i, j) with i<j.
+    """
+    s = np.asarray(simplices)
+    if s.ndim != 2:
+        raise ValueError("simplices must be a 2D array of indices")
+    if not np.issubdtype(s.dtype, np.integer):
+        raise ValueError("simplices must contain integer indices")
+
+    edges = set()
+    for simp in s:
+        for a in range(len(simp)):
+            for b in range(a + 1, len(simp)):
+                i, j = int(simp[a]), int(simp[b])
+                if i > j:
+                    i, j = j, i
+                edges.add((i, j))
+    return sorted(edges)
+
+
 def delaunay_edges(points: np.ndarray):
     """
     points: (N, D) with D=2 or 3
@@ -1077,16 +1098,10 @@ def delaunay_edges(points: np.ndarray):
     """
     tri = Delaunay(points)
     simplices = tri.simplices  # (n_simp, D+1)
-    edges = set()
-    for simp in simplices:
-        simp = list(simp)
-        for a in range(len(simp)):
-            for b in range(a + 1, len(simp)):
-                i, j = simp[a], simp[b]
-                if i > j:
-                    i, j = j, i
-                edges.add((i, j))
-    return sorted(edges)
+    return _edges_from_simplices(simplices)
+
+
+
 
 
 # -------------------------------------------
@@ -1291,6 +1306,7 @@ def stitch_entities_hierarchical(
     penalize_simplicity=True,
     deltaC_min=0.0,
     use_3d=True,
+    dist_threshold: float | None = None,
 ):
     """
     summary_df columns required:
@@ -1317,6 +1333,8 @@ def stitch_entities_hierarchical(
         Minimum deltaC threshold for merging
     use_3d : bool
         Use 3D or 2D coordinates
+    delaunay_backend : str
+        Delaunay backend: "scipy" (default), "fade2d", "fade3d", "gdel3d"
 
     Returns:
       - mapping entity_id -> stitched_entity_id (string)
@@ -1345,8 +1363,18 @@ def stitch_entities_hierarchical(
     if N <= 1:
         return {entity_ids[0]: entity_ids[0]}, {}
 
-    # Delaunay edges
+    # Delaunay edges (use SciPy by default)
     edges = delaunay_edges(pts)
+
+    # Optionally filter edges by geometric length to reduce candidate merges
+    if dist_threshold is not None:
+        if len(edges) > 0:
+            ei = np.asarray(edges, dtype=np.int64)
+            p0 = pts[ei[:, 0]]
+            p1 = pts[ei[:, 1]]
+            dists = np.linalg.norm(p0 - p1, axis=1)
+            keep = dists <= float(dist_threshold)
+            edges = [tuple(x) for x in ei[keep]]
 
     # adjacency on original nodes 
     adj = [[] for _ in range(N)]
@@ -1516,6 +1544,7 @@ def apply_stitching_to_transcripts(
         penalize_simplicity=penalize_simplicity,
         deltaC_min=deltaC_min,
         use_3d=use_3d,
+        dist_threshold=None,
     )
 
     # map back to transcripts
@@ -1622,6 +1651,7 @@ def apply_stitching_to_transcripts_fast(
         penalize_simplicity=penalize_simplicity,
         deltaC_min=deltaC_min,
         use_3d=use_3d,
+        dist_threshold=None,
     )
 
     if pbar is not None:
@@ -1649,6 +1679,162 @@ def apply_stitching_to_transcripts_fast(
         df_out.loc[mask, out_col] = stitched_values
     
     return df_out, entity_to_stitched
+
+
+def apply_stitching_to_transcripts_memory_efficient(
+    df_final: pd.DataFrame,
+    aux: dict,
+    *,
+    entity_col="cell_id_final",
+    gene_col="feature_name",
+    coord_cols=("x", "y", "z"),
+    purity_threshold=0.05,
+    tau=0.05,
+    use_relu=True,
+    penalize_simplicity=True,
+    deltaC_min=0.0,
+    use_3d=True,
+    dist_threshold: float | None = 15.0,
+    out_col="cell_id_stitched",
+    show_progress: bool = True,
+    in_place: bool = False,
+    map_mode: str = "categorical",
+    chunk_size: int | None = 2_000_000,
+):
+    """
+    Memory-efficient stitching wrapper optimized for very large datasets (10M+ rows).
+
+    This function mirrors `apply_stitching_to_transcripts_fast` but minimizes
+    temporary allocations when mapping stitched labels back to transcripts.
+
+    Parameters
+    ----------
+    df_final : pd.DataFrame
+        Transcript-level data with entity assignments
+    aux : dict
+        Contains NPMI matrix ("W") and gene mapping ("gene_to_idx")
+    entity_col : str
+        Column with current entity labels
+    gene_col : str
+        Column with gene names
+    coord_cols : tuple
+        Coordinate column names
+    purity_threshold : float
+        Threshold for original scoring (used if use_relu=False)
+    tau : float
+        Dead-zone threshold for ReLU (used if use_relu=True, default)
+    use_relu : bool
+        If True, use ReLU-based coherence (default, faster and more robust)
+    penalize_simplicity : bool
+        Penalize smaller gene sets in deltaC
+    deltaC_min : float
+        Minimum deltaC for merging
+    use_3d : bool
+        Use 3D coordinates
+    out_col : str
+        Output column name
+    show_progress : bool
+        Show progress bar
+    in_place : bool
+        If True, write output to the input DataFrame without copying
+    map_mode : {"categorical", "chunked"}
+        Mapping strategy to minimize memory use.
+        - "categorical": map category codes (fast, low memory)
+        - "chunked": map in chunks using pandas Series.map()
+    chunk_size : int or None
+        Chunk size for "chunked" mapping. None maps all at once.
+
+    Returns
+    -------
+    df_out : pd.DataFrame
+        DataFrame with stitched labels
+    entity_to_stitched : dict
+        Mapping from original to stitched entity IDs
+    """
+    if show_progress:
+        pbar = tqdm(total=2, desc="stitching")
+    else:
+        pbar = None
+
+    summary = build_entity_table(
+        df_final,
+        entity_col=entity_col,
+        gene_col=gene_col,
+        coord_cols=coord_cols,
+    )
+    if pbar is not None:
+        pbar.update(1)
+
+    if tuple(coord_cols) == ("x", "y", "z"):
+        summary = summary.rename(columns={"x": "x", "y": "y", "z": "z"})
+    else:
+        summary = summary.rename(columns={coord_cols[0]: "x", coord_cols[1]: "y", coord_cols[2]: "z"})
+
+    entity_to_stitched, info = stitch_entities_hierarchical(
+        summary_df=summary.rename(columns={"entity_id": "entity_id"}),
+        aux=aux,
+        purity_threshold=purity_threshold,
+        tau=tau,
+        use_relu=use_relu,
+        penalize_simplicity=penalize_simplicity,
+        deltaC_min=deltaC_min,
+        use_3d=use_3d,
+        dist_threshold=dist_threshold,
+    )
+
+    if pbar is not None:
+        pbar.update(1)
+        pbar.close()
+
+    df_out = df_final if in_place else df_final.copy()
+    ent = df_out[entity_col]
+
+    if map_mode == "categorical":
+        ent_cat = ent.astype("category")
+        categories = ent_cat.cat.categories.astype(str)
+        mapped_categories = pd.Index(categories).map(lambda x: entity_to_stitched.get(x, x))
+
+        # Fast path: one-to-one mapping (no merges) -> just rename categories
+        if mapped_categories.is_unique:
+            df_out[out_col] = ent_cat.cat.rename_categories(mapped_categories)
+        else:
+            # Slow path: merges exist, recode via factorization
+            new_cat_codes, new_categories = pd.factorize(mapped_categories, sort=False)
+            ent_codes = ent_cat.cat.codes.to_numpy(copy=False)
+
+            out_codes = np.full_like(ent_codes, -1)
+            valid = ent_codes >= 0
+            if valid.any():
+                out_codes[valid] = new_cat_codes[ent_codes[valid]]
+
+            df_out[out_col] = pd.Categorical.from_codes(out_codes, categories=new_categories)
+    elif map_mode == "chunked":
+        ent_str = ent.astype(str)
+        df_out[out_col] = ent_str
+
+        mask = ent_str.notna() & (ent_str != "DROP") & (ent_str != "nan")
+        if mask.any():
+            idx = np.flatnonzero(mask.to_numpy())
+            mapping_series = pd.Series(entity_to_stitched)
+
+            if chunk_size is None:
+                vals = ent_str.iloc[idx]
+                mapped = vals.map(mapping_series).fillna(vals)
+                df_out.iloc[idx, df_out.columns.get_loc(out_col)] = mapped.to_numpy()
+            else:
+                for start in range(0, len(idx), chunk_size):
+                    end = start + chunk_size
+                    sel = idx[start:end]
+                    vals = ent_str.iloc[sel]
+                    mapped = vals.map(mapping_series).fillna(vals)
+                    df_out.iloc[sel, df_out.columns.get_loc(out_col)] = mapped.to_numpy()
+    else:
+        raise ValueError("map_mode must be 'categorical' or 'chunked'")
+
+    return df_out, entity_to_stitched
+
+
+
 
 # ---------- Phase 5: Finetune assignment based on spatial coherence ----------
 def enforce_spatial_coherence(
