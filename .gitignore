@@ -27,6 +27,10 @@ tutorials/breast_cancer/data/*.parquet
 tutorials/lung_cancer/data/*.parquet
 **/data/*.parquet
 
+# Zarr stores (large binary arrays)
+**/*.zarr/
+**/*.zarr/**
+
 # Output files (optional - remove these lines if you want to commit outputs)
 tutorials/*/output/*.parquet
 output/*.parquet
