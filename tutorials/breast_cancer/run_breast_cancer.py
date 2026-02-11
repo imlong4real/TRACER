@@ -16,13 +16,20 @@ import json
 import time
 from pathlib import Path
 import sys
+import argparse
 
 import pandas as pd
 import numpy as np
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Run HOT-NERD pipeline on breast cancer tissue")
+    parser.add_argument("--seed", type=int, default=42, help="Reproducibility seed (default: 42)")
+    parser.add_argument("--run-smoke-test", action="store_true", help="Run deterministic reproducibility smoke test and exit")
+    args = parser.parse_args()
+
     repo_root = Path(__file__).resolve().parents[2]
+    # Ensure determinism early: set PYTHONHASHSEED and numpy/random seeds
     data_dir = repo_root / "tutorials" / "breast_cancer" / "data"
     out_dir = repo_root / "tutorials" / "breast_cancer" / "output"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -105,6 +112,18 @@ def main():
 
     # Import hotnerd functions lazily (after paths are resolved)
     sys.path.insert(0, str(repo_root / "src"))
+    # Import reproducibility helpers from core
+    from hotnerd.core import set_reproducibility_seed, reproducibility_smoke_test
+
+    # Apply master seed for reproducibility
+    set_reproducibility_seed(args.seed)
+
+    # If requested, run smoke test and exit
+    if args.run_smoke_test:
+        print("Running reproducibility smoke test...")
+        reproducibility_smoke_test(seed=args.seed)
+        print("Smoke test passed")
+        sys.exit(0)
     # Cython modules are now auto-compiled via pyximport inside core.py on first import
     # No need to setup pyximport here again - it's already done in core.py
 

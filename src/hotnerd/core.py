@@ -1,5 +1,7 @@
 import numpy as np
 import pandas as pd
+import os
+import random
 from sklearn.neighbors import NearestNeighbors
 import torch
 from torch_geometric.data import Data
@@ -14,6 +16,72 @@ import heapq
 from collections import defaultdict
 from tqdm.auto import tqdm
 import concurrent.futures
+
+# ---------- Reproducibility helpers ----------
+_REPRO_SEEDED = False
+
+def set_reproducibility_seed(seed: int = 42) -> None:
+    """
+    Best-effort reproducibility seed setter.
+    Note: PYTHONHASHSEED is honored only at interpreter start; we still
+    set it for clarity and for subprocesses.
+    """
+    global _REPRO_SEEDED
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    _REPRO_SEEDED = True
+
+
+def _ensure_reproducibility_seed(seed: int = 42) -> None:
+    """Call once per process to stabilize hashes and RNG usage."""
+    if not _REPRO_SEEDED:
+        set_reproducibility_seed(seed)
+
+
+def reproducibility_smoke_test(seed: int = 42) -> bool:
+    """
+    Small deterministic smoke test for pipeline reproducibility.
+
+    Runs a tiny synthetic dataset twice and asserts bitwise-identical outputs
+    for graph construction and spatial coherence labeling.
+    """
+    _ensure_reproducibility_seed(seed)
+
+    # Synthetic, deterministic coordinates with near-ties
+    coords = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.5, 0.5, 0.0],
+            [0.5000001, 0.5, 0.0],
+        ],
+        dtype=np.float32,
+    )
+    df = pd.DataFrame(coords, columns=["x", "y", "z"])
+    df["feature_name"] = ["A", "B", "C", "D", "A", "B"]
+    df["transcript_id"] = np.arange(len(df)).astype(str)
+    df["cell_id_stitched"] = ["C1", "C1", "C1", "C1", "C1", "C1"]
+
+    data1 = build_graph(df, k=3, dist_threshold=2.0, coord_cols=("x", "y", "z"))
+    data2 = build_graph(df, k=3, dist_threshold=2.0, coord_cols=("x", "y", "z"))
+
+    if not np.array_equal(data1.edge_index.numpy(), data2.edge_index.numpy()):
+        raise AssertionError("build_graph is not deterministic")
+
+    out1 = enforce_spatial_coherence_fast(
+        df, build_graph_fn=build_graph, k=3, dist_threshold=2.0, show_progress=False
+    )
+    out2 = enforce_spatial_coherence_fast(
+        df, build_graph_fn=build_graph, k=3, dist_threshold=2.0, show_progress=False
+    )
+
+    if not out1["cell_id_spatial"].equals(out2["cell_id_spatial"]):
+        raise AssertionError("spatial coherence labeling is not deterministic")
+
+    return True
 
 # Cython accelerator for pruning
 try:
@@ -148,6 +216,7 @@ def prune_transcripts(
     Two-pass conservative NPMI pruning.
     Partial cell IDs are string-based: cellID-1
     """
+    _ensure_reproducibility_seed()
     df = df.copy()
     df["_cell_str"] = df[cell_id_col].astype(str)
     df[gene_col] = df[gene_col].astype(str).str.strip()
@@ -166,7 +235,7 @@ def prune_transcripts(
     partial_map = {}
 
     for cid, sub in df[df["_cell_str"] != unassigned_id].groupby("_cell_str", sort=False):
-        g_local = sub["_gene_idx"].dropna().astype(int).unique()
+        g_local = np.sort(sub["_gene_idx"].dropna().astype(int).unique())
         if g_local.size <= 1:
             continue
 
@@ -187,9 +256,9 @@ def prune_transcripts(
     df["cell_id_npmi_cons_p2"] = df["cell_id_npmi_cons_p1"]
     df["npmi_cons_p2_status"] = "unchanged"
 
-    for pid in set(partial_map.values()):
+    for pid in sorted(set(partial_map.values())):
         sub = df[df["cell_id_npmi_cons_p1"] == pid]
-        g_local = sub["_gene_idx"].dropna().astype(int).unique()
+        g_local = np.sort(sub["_gene_idx"].dropna().astype(int).unique())
         if g_local.size <= 1:
             df.loc[sub.index, "npmi_cons_p2_status"] = "partial_p2"
             continue
@@ -238,6 +307,7 @@ def prune_transcripts_fast(
 
     Behavior and returned columns match `prune_transcripts`.
     """
+    _ensure_reproducibility_seed()
     df = df.copy()
     # Work directly with cell_id_col to avoid expensive conversion on 28M rows
     # Only convert cell IDs if they're not already strings
@@ -267,7 +337,7 @@ def prune_transcripts_fast(
 
     # Prepare per-cell unique gene lists (only cells that are not unassigned)
     grp = df[df["_cell_str"] != unassigned_id].groupby("_cell_str")["_gene_idx"].apply(
-        lambda s: np.asarray(pd.Index(s.dropna().astype(int)).unique(), dtype=np.int32)
+        lambda s: np.asarray(np.sort(pd.Index(s.dropna().astype(int)).unique()), dtype=np.int32)
     )
 
     cell_items = list(grp.items())
@@ -298,7 +368,6 @@ def prune_transcripts_fast(
         if removed_lists is not None:
             for cid, removed in zip(cell_ids, removed_lists):
                 if removed:
-                    partial_map[cid] = f"{cid}-1"
                     results.append((cid, removed))
 
         if show_progress:
@@ -328,12 +397,17 @@ def prune_transcripts_fast(
             for fut in concurrent.futures.as_completed(futures):
                 cid, removed = fut.result()
                 if removed is not None:
-                    partial_map[cid] = f"{cid}-1"
                     results.append((cid, removed))
                 if pbar is not None:
                     pbar.update(1)
         if pbar is not None:
             pbar.close()
+
+    # Deterministic application order (stable across thread completion)
+    if results:
+        results.sort(key=lambda x: str(x[0]))
+        for cid, _ in results:
+            partial_map[cid] = f"{cid}-1"
 
     # Apply pass1 removals to df in a vectorized batch
     if results:
@@ -374,11 +448,11 @@ def prune_transcripts_fast(
     df["cell_id_npmi_cons_p2"] = df["cell_id_npmi_cons_p1"]
     df["npmi_cons_p2_status"] = "unchanged"
 
-    pids = list(set(partial_map.values()))
+    pids = sorted(set(partial_map.values()))
     if pids:
         # prepare per-partial unique gene lists
         grp_p = df[df["cell_id_npmi_cons_p1"].isin(pids)].groupby("cell_id_npmi_cons_p1")["_gene_idx"].apply(
-            lambda s: np.asarray(pd.Index(s.dropna().astype(int)).unique(), dtype=np.int32)
+            lambda s: np.asarray(np.sort(pd.Index(s.dropna().astype(int)).unique()), dtype=np.int32)
         )
 
         partial_items = list(grp_p.items())
@@ -430,6 +504,10 @@ def prune_transcripts_fast(
                         pbar2.update(1)
             if pbar2 is not None:
                 pbar2.close()
+
+        # Deterministic ordering for pass2 application
+        if results2:
+            results2.sort(key=lambda x: str(x[0]))
 
         # Apply pass2 changes in a vectorized fashion
         # results2: list of (pid, removed)
@@ -523,8 +601,8 @@ def diagnostic_npmi_report(df, aux, cell_id):
     rows = []
 
     def summarize(name, sub):
-        genes = sub["feature_name"].astype(str).unique()
-        gids = pd.Index(genes).map(gene_to_idx).dropna().astype(int).unique()
+        genes = np.sort(sub["feature_name"].astype(str).unique())
+        gids = np.sort(pd.Index(genes).map(gene_to_idx).dropna().astype(int).unique())
         stats = pairwise_npmi_stats(gids, W)
         return {
             "stage": name,
@@ -568,6 +646,8 @@ def build_graph(
           - edge_index : (2,E) long
           - gene_name  : (N,) np.ndarray[str]
     """
+    _ensure_reproducibility_seed()
+
     coords = df[list(coord_cols)].to_numpy(dtype=np.float32)
     N = coords.shape[0]
 
@@ -578,6 +658,13 @@ def build_graph(
     ).fit(coords)
 
     distances, indices = nbrs.kneighbors(coords, return_distance=True)
+
+    # Deterministic neighbor ordering: round distances to stabilize near-ties
+    # and tie-break by neighbor index (lexicographic order).
+    dist_key = np.round(distances, decimals=6)
+    order = np.lexsort((indices, dist_key))
+    distances = np.take_along_axis(distances, order, axis=1)
+    indices = np.take_along_axis(indices, order, axis=1)
 
     # mask: within distance AND not self
     mask = (distances <= dist_threshold)
@@ -633,6 +720,7 @@ def annotate_unassigned_components(
        - unassigned_qc_status
        - cell_id_final
     """
+    _ensure_reproducibility_seed()
     df = df_pruned.copy()
 
     # Ensure transcript_id exists
@@ -674,12 +762,14 @@ def annotate_unassigned_components(
     # Keep isolated nodes so component mapping covers all nodes
     G_nx = to_networkx(data_u, directed=False, remove_isolated=False)
     components = list(nx.connected_components(G_nx))
+    # Deterministic component ordering across Python hash seeds
+    components = sorted(components, key=lambda comp: min(comp))
 
     # Map node -> component index
     num_nodes = df_u.shape[0]
     comp_idx = np.full(num_nodes, -1, dtype=np.int32)
     for ci, comp in enumerate(components):
-        comp_idx[list(comp)] = ci
+        comp_idx[sorted(comp)] = ci
     assert (comp_idx >= 0).all(), "Some nodes did not get assigned to a component (unexpected)."
 
     # Build mapping back to transcript_id
@@ -704,7 +794,7 @@ def annotate_unassigned_components(
 
     # only operate on comps that are large and not already dropped
     keep_candidate = is_unassigned & (~drop_small) & df["unassigned_comp_id"].notna()
-    large_comp_ids = df.loc[keep_candidate, "unassigned_comp_id"].unique()
+    large_comp_ids = np.sort(df.loc[keep_candidate, "unassigned_comp_id"].unique())
 
     # precompute gene idx per transcript (NaN if gene missing from NPMI table)
     gene_idx_all = df[gene_col].map(gene_to_idx)
@@ -715,7 +805,7 @@ def annotate_unassigned_components(
             continue
 
         # unique genes in this component (only those present in NPMI gene_to_idx)
-        g_local = gene_idx_all.loc[comp_mask].dropna().astype(int).unique()
+        g_local = np.sort(gene_idx_all.loc[comp_mask].dropna().astype(int).unique())
         if g_local.size <= 1:
             # Nothing to prune; keep as an unassigned component
             df.loc[comp_mask, "unassigned_qc_status"] = "keep_unassigned_comp"
@@ -774,7 +864,7 @@ def _prune_components_parallel(comp_gene_map, df, keep_candidate, comp_mask_temp
     Prune components in parallel using ThreadPoolExecutor.
     Updates df in-place with pruning results.
     """
-    comp_items = list(comp_gene_map.items())
+    comp_items = sorted(comp_gene_map.items(), key=lambda x: str(x[0]))
     
     with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as executor:
         futures = {
@@ -827,6 +917,7 @@ def annotate_unassigned_components_fast(
     - Uses `_cy_prune.prune_cells` when available to prune per-component gene lists in bulk.
     - Shows a progress bar if `show_progress` is True.
     """
+    _ensure_reproducibility_seed()
     df = df_pruned.copy()
 
     if transcript_id_col not in df.columns:
@@ -908,7 +999,7 @@ def annotate_unassigned_components_fast(
     gene_idx_all = df[gene_col].map(gene_to_idx)
 
     keep_candidate = is_unassigned & (~drop_small) & df["unassigned_comp_id"].notna()
-    large_comp_ids = df.loc[keep_candidate, "unassigned_comp_id"].unique()
+    large_comp_ids = np.sort(df.loc[keep_candidate, "unassigned_comp_id"].unique())
 
     # Prepare per-component gene lists using vectorized groupby (much faster than per-component filtering)
     if show_progress:
@@ -923,8 +1014,8 @@ def annotate_unassigned_components_fast(
         pbar_groupby.set_description("grouping")
     
     # Group by component and get unique gene indices per component
-    for comp_id, group in df_candidate.groupby("unassigned_comp_id"):
-        g_local = group["_gene_idx_local"].dropna().astype(int).unique()
+    for comp_id, group in df_candidate.groupby("unassigned_comp_id", sort=True):
+        g_local = np.sort(group["_gene_idx_local"].dropna().astype(int).unique())
         if g_local.size > 0:
             comp_gene_map[comp_id] = np.asarray(g_local, dtype=np.int32)
     
@@ -936,7 +1027,7 @@ def annotate_unassigned_components_fast(
     if _cy_prune is not None and len(comp_gene_map) > 0:
         if show_progress:
             print(f"[INFO] Using Cython-accelerated pruning ({len(comp_gene_map)} components)")
-        comp_keys = list(comp_gene_map.keys())
+        comp_keys = sorted(comp_gene_map.keys())
         g_arrays = [comp_gene_map[k] if comp_gene_map[k].size > 0 else None for k in comp_keys]
         removed_lists = None
         try:
@@ -1055,10 +1146,11 @@ def build_entity_table(
     df = df[df["_etype"].isin(["cell", "partial", "component"])].copy()
 
     # centroid
-    cent = df.groupby(entity_col)[list(coord_cols)].mean()
+    cent = df.groupby(entity_col, sort=True)[list(coord_cols)].mean()
 
-    # unique genes per entity
-    genes = df.groupby(entity_col)[gene_col].unique()
+    # unique genes per entity (sorted for deterministic downstream mapping)
+    genes = df.groupby(entity_col, sort=True)[gene_col].unique()
+    genes = genes.apply(lambda arr: np.sort(arr.astype(str)))
 
     etype = df.groupby(entity_col)["_etype"].first()
 
@@ -1088,7 +1180,8 @@ def _edges_from_simplices(simplices: np.ndarray):
                 if i > j:
                     i, j = j, i
                 edges.add((i, j))
-    return sorted(edges)
+    # Deterministic edge ordering regardless of simplex order
+    return sorted(edges, key=lambda e: (e[0], e[1]))
 
 
 def delaunay_edges(points: np.ndarray):
@@ -1350,7 +1443,7 @@ def stitch_entities_hierarchical(
     gene_id_lists = []
     for genes in summary_df["genes"].values:
         g = pd.Index(np.asarray(genes, dtype=str)).map(gene_to_idx)
-        g = g[~pd.isna(g)].astype(int).unique()
+        g = np.sort(g[~pd.isna(g)].astype(int).unique())
         gene_id_lists.append(np.asarray(g, dtype=np.int32))
 
     # points
@@ -1425,11 +1518,17 @@ def stitch_entities_hierarchical(
             )
 
     # max-heap of candidate edges by deltaC (lazy updates)
+    def _heap_item(dc, a, b):
+        # Deterministic tie-breaking: enforce ordered endpoints
+        if a > b:
+            a, b = b, a
+        return (-dc, a, b)
+
     heap = []
     for i, j in edges:
         di = compute_deltaC_roots(i, j)
         if np.isfinite(di) and di >= deltaC_min:
-            heapq.heappush(heap, (-di, i, j))
+            heapq.heappush(heap, _heap_item(di, i, j))
 
     # greedy merging
     while heap:
@@ -1484,7 +1583,7 @@ def stitch_entities_hierarchical(
                 continue
             dtry = compute_deltaC_roots(rr, rn)
             if np.isfinite(dtry) and dtry >= deltaC_min:
-                heapq.heappush(heap, (-dtry, rr, rn))
+                heapq.heappush(heap, _heap_item(dtry, rr, rn))
 
     # choose stitched label per final root with priority: cell > partial > component
     root_to_label = {}
@@ -1518,6 +1617,7 @@ def apply_stitching_to_transcripts(
     use_3d=True,
     out_col="cell_id_stitched",
 ):
+    _ensure_reproducibility_seed()
     # build entity table (centroids + genes)
     summary = build_entity_table(
         df_final,
@@ -1619,6 +1719,7 @@ def apply_stitching_to_transcripts_fast(
     entity_to_stitched : dict
         Mapping from original to stitched entity IDs
     """
+    _ensure_reproducibility_seed()
     # build entity table (centroids + genes)
     if show_progress:
         # small progress step for entity build
@@ -1751,6 +1852,7 @@ def apply_stitching_to_transcripts_memory_efficient(
     entity_to_stitched : dict
         Mapping from original to stitched entity IDs
     """
+    _ensure_reproducibility_seed()
     if show_progress:
         pbar = tqdm(total=2, desc="stitching")
     else:
@@ -1860,6 +1962,7 @@ def enforce_spatial_coherence(
     - Returns a new df with an added column `out_col` containing
       the split-aware labels.
     """
+    _ensure_reproducibility_seed()
     df = df_stitched.copy()
 
     # base labels we are checking
@@ -1882,7 +1985,7 @@ def enforce_spatial_coherence(
     G = to_networkx(data_all, to_undirected=True)
 
     # For each label, check connectivity in induced subgraph
-    labels = base_labels.unique()
+    labels = np.sort(base_labels.unique())
     for label in labels:
         if label == "DROP" or label == "nan":
             continue
@@ -1900,8 +2003,8 @@ def enforce_spatial_coherence(
         if len(comps) <= 1:
             continue  # spatially coherent
 
-        # sort by size descending
-        comps_sorted = sorted(comps, key=len, reverse=True)
+        # sort by size descending, tie-break by min node id for determinism
+        comps_sorted = sorted(comps, key=lambda c: (-len(c), min(c)))
 
         # largest keeps original label; others get label-2, label-3, ...
         for i, comp_nodes in enumerate(comps_sorted):
@@ -1910,7 +2013,7 @@ def enforce_spatial_coherence(
             else:
                 new_label = f"{label}-{i+1}"
 
-            comp_nodes = np.array(list(comp_nodes), dtype=int)
+            comp_nodes = np.array(sorted(comp_nodes), dtype=int)
             # mark these transcripts with new_label
             df.loc[df["__node_idx"].isin(comp_nodes), out_col] = new_label
 
@@ -1933,6 +2036,7 @@ def enforce_spatial_coherence_fast(
     """
     Fast variant of `enforce_spatial_coherence` with a progress bar.
     """
+    _ensure_reproducibility_seed()
     df = df_stitched.copy()
     base_labels = df[entity_col].astype(str)
     df[out_col] = base_labels
@@ -1987,7 +2091,8 @@ def enforce_spatial_coherence_fast(
                 uniq_r, counts = np.unique(roots_c, return_counts=True)
                 if uniq_r.size <= 1:
                     continue
-                order = np.argsort(counts)[::-1]
+                # Deterministic tie-break by root id when counts tie
+                order = np.lexsort((uniq_r, -counts))
                 lab = str(lab_codes.categories[c])
                 for i, oi in enumerate(order):
                     r = uniq_r[oi]
@@ -2007,7 +2112,7 @@ def enforce_spatial_coherence_fast(
     # Fallback: original per-label subgraph approach with progress bar (optimized)
     G = to_networkx(data_all, to_undirected=True)
 
-    labels = base_labels.unique()
+    labels = np.sort(base_labels.unique())
     iterable = labels
     if show_progress:
         iterable = tqdm(labels, desc="spatial_labels")
@@ -2035,7 +2140,7 @@ def enforce_spatial_coherence_fast(
         if len(comps) <= 1:
             continue
 
-        comps_sorted = sorted(comps, key=len, reverse=True)
+        comps_sorted = sorted(comps, key=lambda c: (-len(c), min(c)))
         
         # Build node -> position mapping for fast lookup
         node_to_pos = {node: label_positions[i] for i, node in enumerate(node_idx)}
@@ -2127,6 +2232,7 @@ def reassign_unassigned_to_nearby_entities(
     - Euclidean distance in coordinate space
     - Original assigned transcripts are never modified
     """
+    _ensure_reproducibility_seed()
     if unassigned_labels is None:
         unassigned_labels = {"DROP", "-1", "UNASSIGNED", "nan"}
     
@@ -2264,6 +2370,7 @@ def reassign_unassigned_to_nearby_entities_fast(
     stats : dict
         Reassignment statistics.
     """
+    _ensure_reproducibility_seed()
     if entity_summary is None:
         if show_progress:
             print("Building entity summary...")
@@ -3194,8 +3301,8 @@ def stitch_connected_components(
     deltaC_max = {}
     next_id = 0
 
-    for comp in nx.connected_components(G_pos):
-        comp = list(comp)
+    for comp in sorted(nx.connected_components(G_pos), key=lambda c: min(c)):
+        comp = sorted(comp)
         for u in comp:
             stitched_cc_id[u] = next_id
             vals = [G_pos[u][v]["deltaC"] for v in G_pos.neighbors(u)]
