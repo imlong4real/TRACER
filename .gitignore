@@ -35,6 +35,8 @@ tutorials/lung_cancer/data/*.parquet
 # Output files (optional - remove these lines if you want to commit outputs)
 tutorials/*/output/*.parquet
 output/*.parquet
+tutorials/*/output/*.csv
+output/*.csv
 tutorials/*/output/*.h5ad
 tutorials/*/output/*.json
 
