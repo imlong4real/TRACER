@@ -1,20 +1,13 @@
 #!/usr/bin/env python3
-import multiprocessing as mp
-try:
-    mp.set_start_method("spawn", force=True)
-except RuntimeError:
-    # start method already set
-    pass
 """
 Run HOT-NERD pipeline on melanoma tissue data.
 
 Reads:
- - data/melanoma_transcripts_qv30.parquet
- - data/melanoma_nucleus_npmi.csv
+ - data/melanoma_df.parquet  (Parquet file or directory)
+ - data/melanoma_npmi.csv
 
 Writes:
  - output/df_stitched.parquet
- - output/df_split.parquet
  - output/df_finetuned.parquet
 
 This script prints progress messages for each stage.
@@ -23,21 +16,20 @@ import json
 import time
 from pathlib import Path
 import sys
-import multiprocessing as mp
+import argparse
 
 import pandas as pd
 import numpy as np
-import os
-import smtplib
-import ssl
-from email.message import EmailMessage
-
-
-mp.set_start_method("spawn", force=True)
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Run HOT-NERD pipeline on melanoma tissue")
+    parser.add_argument("--seed", type=int, default=42, help="Reproducibility seed (default: 42)")
+    parser.add_argument("--run-smoke-test", action="store_true", help="Run deterministic reproducibility smoke test and exit")
+    args = parser.parse_args()
+
     repo_root = Path(__file__).resolve().parents[2]
+    # Ensure determinism early: set PYTHONHASHSEED and numpy/random seeds
     data_dir = repo_root / "tutorials" / "melanoma" / "data"
     out_dir = repo_root / "tutorials" / "melanoma" / "output"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -45,32 +37,13 @@ def main():
     parquet_path = data_dir / "melanoma_df.parquet"
     npmi_csv = data_dir / "melanoma_npmi.csv"
 
-    if not parquet_path.exists():
-        processed_path = data_dir / "processed" / "melanoma_df.parquet"
-        if processed_path.exists():
-            parquet_path = processed_path
-    if not npmi_csv.exists():
-        processed_npmi = data_dir / "processed" / "melanoma_npmi.csv"
-        if processed_npmi.exists():
-            npmi_csv = processed_npmi
-
     print("Starting HOT-NERD run on melanoma tissue")
     print(f"Reading transcripts from: {parquet_path}")
     t0 = time.time()
 
     # Read transcripts (parquet can be a directory)
     try:
-        df_transcripts = pd.read_parquet(
-            parquet_path,
-            columns=[
-                "transcript_id",
-                "cell_id",
-                "feature_name",
-                "x_location",
-                "y_location",
-                "z_location",
-            ],
-        )
+        df_transcripts = pd.read_parquet(parquet_path)
     except Exception as e:
         print("Failed to read parquet with pandas (pyarrow):", e)
         print("Trying fallback: pandas + fastparquet engine (if installed)...")
@@ -130,13 +103,6 @@ def main():
                     print("Cannot read Parquet. Please ensure the file/directory is a valid Parquet dataset, or install 'fastparquet' or 'dask'.")
                     raise
 
-    if "x" not in df_transcripts.columns and "x_location" in df_transcripts.columns:
-        df_transcripts = df_transcripts.rename(
-            columns={"x_location": "x", "y_location": "y", "z_location": "z"}
-        )
-    if "z" not in df_transcripts.columns:
-        df_transcripts["z"] = 0.0
-
     print("Loaded transcripts rows:", len(df_transcripts), "took", time.time() - t0, "s")
 
     print(f"Reading NPMI table from: {npmi_csv}")
@@ -146,6 +112,18 @@ def main():
 
     # Import hotnerd functions lazily (after paths are resolved)
     sys.path.insert(0, str(repo_root / "src"))
+    # Import reproducibility helpers from core
+    from hotnerd.core import set_reproducibility_seed, reproducibility_smoke_test
+
+    # Apply master seed for reproducibility
+    set_reproducibility_seed(args.seed)
+
+    # If requested, run smoke test and exit
+    if args.run_smoke_test:
+        print("Running reproducibility smoke test...")
+        reproducibility_smoke_test(seed=args.seed)
+        print("Smoke test passed")
+        sys.exit(0)
     # Cython modules are now auto-compiled via pyximport inside core.py on first import
     # No need to setup pyximport here again - it's already done in core.py
 
@@ -157,47 +135,9 @@ def main():
         prune_genes_by_npmi_greedy,
         build_graph
     )
-
-    def send_email(subject: str, body: str) -> None:
-        """Send a short email using SMTP settings read from environment variables.
-
-        Required environment variables:
-          - EMAIL_SMTP_SERVER (e.g. smtp.gmail.com)
-          - EMAIL_TO (recipient email)
-
-        Optional:
-          - EMAIL_SMTP_PORT (default 587)
-          - EMAIL_SMTP_USER, EMAIL_SMTP_PASS (for auth)
-          - EMAIL_FROM (defaults to EMAIL_SMTP_USER)
-        """
-        smtp_server = os.getenv("EMAIL_SMTP_SERVER")
-        recipient = os.getenv("EMAIL_TO")
-        if not smtp_server or not recipient:
-            print("Email not configured (EMAIL_SMTP_SERVER or EMAIL_TO missing); skipping email: ", subject)
-            return
-
-        port = int(os.getenv("EMAIL_SMTP_PORT", "587"))
-        user = os.getenv("EMAIL_SMTP_USER")
-        password = os.getenv("EMAIL_SMTP_PASS")
-        sender = os.getenv("EMAIL_FROM", user or "hotnerd@localhost")
-
-        msg = EmailMessage()
-        msg["Subject"] = subject
-        msg["From"] = sender
-        msg["To"] = recipient
-        msg.set_content(body)
-
-        context = ssl.create_default_context()
-        try:
-            with smtplib.SMTP(smtp_server, port, timeout=30) as server:
-                server.starttls(context=context)
-                if user and password:
-                    server.login(user, password)
-                server.send_message(msg)
-            print(f"Sent email: {subject}")
-        except Exception as e:
-            print("Warning: failed to send email:", e)
     import torch
+    # also seed torch RNG for extra determinism
+    torch.manual_seed(args.seed)
     from torch_geometric.data import Data
     from scipy.spatial import cKDTree
 
@@ -237,53 +177,22 @@ def main():
     # Stage 1: conservative NPMI pruning
     print("Stage 1: prune_transcripts_fast (conservative NPMI)")
     t0 = time.time()
-    pruned_fp = out_dir / "df_pruned.parquet"
-    aux_fp = out_dir / "aux.pkl"
-
-    if pruned_fp.exists() and aux_fp.exists():
-        print("Found existing stage-1 outputs; loading df_pruned and aux from disk")
-        df_pruned = pd.read_parquet(pruned_fp)
-        import joblib
-
-        aux = joblib.load(aux_fp)
-    else:
-        df_pruned, aux = prune_transcripts_fast(
+    df_pruned, aux = prune_transcripts_fast(
         df=df_transcripts,
         npmi_df=df_npmi,
         cell_id_col="cell_id",
         gene_col="feature_name",
         threshold=-0.1,
-        unassigned_id="UNASSIGNED",
+        unassigned_id="-1",
         n_jobs=-1,
         show_progress=True,
     )
-        # persist stage-1 outputs to allow resume
-        try:
-            df_pruned.to_parquet(pruned_fp, index=False)
-            import joblib
-
-            joblib.dump(aux, aux_fp)
-            print(f"Saved stage-1 outputs: {pruned_fp}, {aux_fp}")
-        except Exception as e:
-            print("Warning: failed to save stage-1 outputs:", e)
     print("Stage 1 done: rows=", len(df_pruned), "took", time.time() - t0, "s")
-    try:
-        send_email(
-            subject="HOT-NERD: Stage 1 complete",
-            body=f"Stage 1 complete: pruned={len(df_pruned)} transcripts. Time: {time.time()-t0:.1f}s\nSaved: {pruned_fp if pruned_fp.exists() else 'not saved'}",
-        )
-    except Exception:
-        pass
 
     # Stage 2: annotate unassigned components
     print("Stage 2: annotate_unassigned_components_fast (build graph + CCs)")
     t0 = time.time()
-    final_fp = out_dir / "df_final.parquet"
-    if final_fp.exists():
-        print("Found existing stage-2 output; loading df_final from disk")
-        df_final = pd.read_parquet(final_fp)
-    else:
-        df_final = annotate_unassigned_components_fast(
+    df_final = annotate_unassigned_components_fast(
         df_pruned=df_pruned,
         aux=aux,
         build_graph_fn=build_graph_fast,
@@ -291,28 +200,15 @@ def main():
         coord_cols=("x", "y", "z"),
         k=8,
         dist_threshold=1.5,
-        min_comp_size=100,
-        npmi_threshold=-0.1,
+        min_comp_size=25,
+        npmi_threshold=-0.2,
         unassigned_final_col="cell_id_npmi_cons_p2",
         cell_id_col="cell_id",
         gene_col="feature_name",
         transcript_id_col="transcript_id",
         show_progress=True,
     )
-        # persist stage-2 output
-        try:
-            df_final.to_parquet(final_fp, index=False)
-            print(f"Saved stage-2 output: {final_fp}")
-        except Exception as e:
-            print("Warning: failed to save stage-2 output:", e)
     print("Stage 2 done: rows=", len(df_final), "took", time.time() - t0, "s")
-    try:
-        send_email(
-            subject="HOT-NERD: Stage 2 complete",
-            body=f"Stage 2 complete: annotated={len(df_final)} transcripts. Time: {time.time()-t0:.1f}s\nSaved: {final_fp if final_fp.exists() else 'not saved'}",
-        )
-    except Exception:
-        pass
 
     # Stage 3: initial stitching
     print("Stage 3: apply_stitching_to_transcripts_memory_efficient (initial stitching)")
@@ -325,13 +221,11 @@ def main():
         coord_cols=("x", "y", "z"),
         purity_threshold=0.05,
         penalize_simplicity=True,
-        deltaC_min=0.01,
-        use_3d=True,
+        deltaC_min=0,
         dist_threshold=10.0,
+        use_3d=True,
         out_col="cell_id_stitched",
         show_progress=True,
-        in_place=False,
-        map_mode="categorical",
     )
     print("Stage 3 done: rows=", len(df_stitched), "took", time.time() - t0, "s")
 
@@ -339,13 +233,6 @@ def main():
     stitched_fp = out_dir / "df_stitched.parquet"
     print(f"Saving df_stitched to {stitched_fp}")
     df_stitched.to_parquet(stitched_fp, index=False)
-    try:
-        send_email(
-            subject="HOT-NERD: Stage 3 complete",
-            body=f"Stage 3 complete: stitched={len(df_stitched)} transcripts. Time: {time.time()-t0:.1f}s\nSaved: {stitched_fp}",
-        )
-    except Exception:
-        pass
 
     # Stage 4: enforce spatial coherence (split large/multi-component labels)
     print("Stage 4: enforce_spatial_coherence_fast (split spatially disjoint labels)")
@@ -356,7 +243,7 @@ def main():
         entity_col="cell_id_stitched",
         coord_cols=("x", "y", "z"),
         k=5,
-        dist_threshold=5.0,
+        dist_threshold=10.0,
         out_col="cell_id_spatial",
         show_progress=True,
     )
@@ -366,13 +253,6 @@ def main():
     split_fp = out_dir / "df_split.parquet"
     print(f"Saving df_split to {split_fp}")
     df_split.to_parquet(split_fp, index=False)
-    try:
-        send_email(
-            subject="HOT-NERD: Stage 4 complete",
-            body=f"Stage 4 complete: split={len(df_split)} transcripts. Time: {time.time()-t0:.1f}s\nSaved: {split_fp}",
-        )
-    except Exception:
-        pass
 
     # Stage 5: re-run stitching with spatial splits
     print("Stage 5: apply_stitching_to_transcripts_memory_efficient (final stitching on split labels)")
@@ -385,13 +265,11 @@ def main():
         coord_cols=("x", "y", "z"),
         purity_threshold=0.05,
         penalize_simplicity=True,
-        deltaC_min=0.01,
-        use_3d=True,
+        deltaC_min=0,
         dist_threshold=10.0,
+        use_3d=True,
         out_col="cell_id_finetuned",
         show_progress=True,
-        in_place=False,
-        map_mode="categorical",
     )
     print("Stage 5 done: rows=", len(df_finetuned), "took", time.time() - t0, "s")
 
@@ -399,13 +277,6 @@ def main():
     finetuned_fp = out_dir / "df_finetuned.parquet"
     print(f"Saving df_finetuned to {finetuned_fp}")
     df_finetuned.to_parquet(finetuned_fp, index=False)
-    try:
-        send_email(
-            subject="HOT-NERD: Stage 5 complete",
-            body=f"Stage 5 complete: finetuned={len(df_finetuned)} transcripts. Time: {time.time()-t0:.1f}s\nSaved: {finetuned_fp}",
-        )
-    except Exception:
-        pass
 
     # Save entity maps for debugging
     try:
@@ -420,13 +291,6 @@ def main():
     print(" -", stitched_fp)
     print(" -", split_fp)
     print(" -", finetuned_fp)
-    try:
-        send_email(
-            subject="HOT-NERD: Pipeline complete",
-            body=f"Pipeline complete. Outputs:\n - {stitched_fp}\n - {split_fp}\n - {finetuned_fp}",
-        )
-    except Exception:
-        pass
 
 
 if __name__ == "__main__":

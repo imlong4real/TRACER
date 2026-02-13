@@ -130,12 +130,14 @@ def main():
     from hotnerd import (
         prune_transcripts_fast,
         annotate_unassigned_components_fast,
-        apply_stitching_to_transcripts_fast,
+        apply_stitching_to_transcripts_memory_efficient,
         enforce_spatial_coherence_fast,
         prune_genes_by_npmi_greedy,
         build_graph
     )
     import torch
+    # also seed torch RNG for extra determinism
+    torch.manual_seed(args.seed)
     from torch_geometric.data import Data
     from scipy.spatial import cKDTree
 
@@ -199,7 +201,7 @@ def main():
         k=8,
         dist_threshold=1.5,
         min_comp_size=25,
-        npmi_threshold=-0.1,
+        npmi_threshold=-0.2,
         unassigned_final_col="cell_id_npmi_cons_p2",
         cell_id_col="cell_id",
         gene_col="feature_name",
@@ -209,9 +211,9 @@ def main():
     print("Stage 2 done: rows=", len(df_final), "took", time.time() - t0, "s")
 
     # Stage 3: initial stitching
-    print("Stage 3: apply_stitching_to_transcripts_fast (initial stitching)")
+    print("Stage 3: apply_stitching_to_transcripts_memory_efficient (initial stitching)")
     t0 = time.time()
-    df_stitched, entity_to_stitched = apply_stitching_to_transcripts_fast(
+    df_stitched, entity_to_stitched = apply_stitching_to_transcripts_memory_efficient(
         df_final=df_final,
         aux=aux,
         entity_col="cell_id_final",
@@ -219,7 +221,8 @@ def main():
         coord_cols=("x", "y", "z"),
         purity_threshold=0.05,
         penalize_simplicity=True,
-        deltaC_min=0.0,
+        deltaC_min=0,
+        dist_threshold=10.0,
         use_3d=True,
         out_col="cell_id_stitched",
         show_progress=True,
@@ -240,7 +243,7 @@ def main():
         entity_col="cell_id_stitched",
         coord_cols=("x", "y", "z"),
         k=5,
-        dist_threshold=25.0,
+        dist_threshold=10.0,
         out_col="cell_id_spatial",
         show_progress=True,
     )
@@ -252,9 +255,9 @@ def main():
     df_split.to_parquet(split_fp, index=False)
 
     # Stage 5: re-run stitching with spatial splits
-    print("Stage 5: apply_stitching_to_transcripts_fast (final stitching on split labels)")
+    print("Stage 5: apply_stitching_to_transcripts_memory_efficient (final stitching on split labels)")
     t0 = time.time()
-    df_finetuned, entity_to_stitched_ft = apply_stitching_to_transcripts_fast(
+    df_finetuned, entity_to_stitched_ft = apply_stitching_to_transcripts_memory_efficient(
         df_final=df_split,
         aux=aux,
         entity_col="cell_id_spatial",
@@ -262,7 +265,8 @@ def main():
         coord_cols=("x", "y", "z"),
         purity_threshold=0.05,
         penalize_simplicity=True,
-        deltaC_min=0.0,
+        deltaC_min=0,
+        dist_threshold=10.0,
         use_3d=True,
         out_col="cell_id_finetuned",
         show_progress=True,

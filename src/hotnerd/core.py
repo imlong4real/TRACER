@@ -2272,8 +2272,24 @@ def reassign_unassigned_to_nearby_entities(
         }
     
     # Entity coordinates and IDs
+    # Drop entities with missing coordinates (centroid could be NaN if all members lacked coords)
+    before_entities = len(entities)
+    entities = entities.dropna(subset=list(coord_cols))
+    dropped_entities = before_entities - len(entities)
+    if dropped_entities > 0 and show_progress:
+        print(f"Warning: dropped {dropped_entities} entities with NaN centroids before KNN build")
+
     entity_coords = entities[list(coord_cols)].to_numpy(dtype=np.float32)
     entity_ids = entities["entity_id"].to_numpy(dtype=object)
+
+    # Also drop unassigned transcripts that lack valid coordinates
+    if np.isnan(unassigned_coords).any():
+        valid_mask = ~np.isnan(unassigned_coords).any(axis=1)
+        n_invalid = (~valid_mask).sum()
+        if n_invalid > 0 and show_progress:
+            print(f"Warning: {n_invalid} unassigned transcripts have NaN coordinates and will be skipped")
+        valid_unassigned_idx = np.array(unassigned_idx)[valid_mask]
+        unassigned_coords = unassigned_coords[valid_mask]
     
     # Build KNN index for fast nearest-neighbor lookup
     knn = NearestNeighbors(n_neighbors=1, algorithm="kd_tree", metric="euclidean")

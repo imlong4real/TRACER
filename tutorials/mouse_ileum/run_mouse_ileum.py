@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Run HOT-NERD pipeline on lung cancer tissue data.
+Run HOT-NERD pipeline on mouse ileum tissue data.
 
 Reads:
- - data/lung_cancer_df_parquet  (Parquet file or directory)
- - data/lung_cancer_npmi.csv
+ - data/mouse_ileum_df.parquet  (Parquet file or directory)
+ - data/mouse_gut_npmi.csv
 Writes:
  - output/df_stitched.parquet
+ - output/df_split.parquet
  - output/df_finetuned.parquet
 
 This script prints progress messages for each stage.
@@ -22,21 +23,20 @@ import numpy as np
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run HOT-NERD pipeline on lung cancer tissue")
+    parser = argparse.ArgumentParser(description="Run HOT-NERD pipeline on mouse ileum tissue")
     parser.add_argument("--seed", type=int, default=42, help="Reproducibility seed (default: 42)")
     parser.add_argument("--run-smoke-test", action="store_true", help="Run deterministic reproducibility smoke test and exit")
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parents[2]
-    # Ensure determinism early: set PYTHONHASHSEED and numpy/random seeds
-    data_dir = repo_root / "tutorials" / "lung_cancer" / "data"
-    out_dir = repo_root / "tutorials" / "lung_cancer" / "output"
+    data_dir = repo_root / "tutorials" / "mouse_ileum" / "data"
+    out_dir = repo_root / "tutorials" / "mouse_ileum" / "output"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    parquet_path = data_dir / "lung_cancer_df.parquet"
-    npmi_csv = data_dir / "lung_cancer_npmi.csv"
+    parquet_path = data_dir / "mouse_gut_df.parquet"
+    npmi_csv = data_dir / "mouse_gut_npmi.csv"
 
-    print("Starting HOT-NERD run on lung cancer tissue")
+    print("Starting HOT-NERD run on mouse ileum tissue")
     print(f"Reading transcripts from: {parquet_path}")
     t0 = time.time()
 
@@ -123,8 +123,6 @@ def main():
         reproducibility_smoke_test(seed=args.seed)
         print("Smoke test passed")
         sys.exit(0)
-    # Cython modules are now auto-compiled via pyximport inside core.py on first import
-    # No need to setup pyximport here again - it's already done in core.py
 
     from hotnerd import (
         prune_transcripts_fast,
@@ -134,8 +132,6 @@ def main():
         prune_genes_by_npmi_greedy,
         build_graph
     )
-    # import core module for reassignment helper
-    import hotnerd.core as core
     import torch
     # also seed torch RNG for extra determinism
     torch.manual_seed(args.seed)
@@ -201,8 +197,8 @@ def main():
         coord_cols=("x", "y", "z"),
         k=8,
         dist_threshold=1.5,
-        min_comp_size=10,
-        npmi_threshold=-0.2,
+        min_comp_size=25,
+        npmi_threshold=-0.1,
         unassigned_final_col="cell_id_npmi_cons_p2",
         cell_id_col="cell_id",
         gene_col="feature_name",
@@ -227,8 +223,15 @@ def main():
         use_3d=True,
         out_col="cell_id_stitched",
         show_progress=True,
+        in_place=False,
+        map_mode="categorical",
     )
     print("Stage 3 done: rows=", len(df_stitched), "took", time.time() - t0, "s")
+
+    # Save intermediate stitched result
+    stitched_fp = out_dir / "df_stitched.parquet"
+    print(f"Saving df_stitched to {stitched_fp}")
+    df_stitched.to_parquet(stitched_fp, index=False)
 
     # Stage 4: enforce spatial coherence (split large/multi-component labels)
     print("Stage 4: enforce_spatial_coherence_fast (split spatially disjoint labels)")
@@ -244,6 +247,11 @@ def main():
         show_progress=True,
     )
     print("Stage 4 done: rows=", len(df_split), "took", time.time() - t0, "s")
+
+    # Save spatial split result
+    split_fp = out_dir / "df_split.parquet"
+    print(f"Saving df_split to {split_fp}")
+    df_split.to_parquet(split_fp, index=False)
 
     # Stage 5: re-run stitching with spatial splits
     print("Stage 5: apply_stitching_to_transcripts_memory_efficient (final stitching on split labels)")
@@ -261,33 +269,14 @@ def main():
         use_3d=True,
         out_col="cell_id_finetuned",
         show_progress=True,
+        in_place=False,
+        map_mode="categorical",
     )
     print("Stage 5 done: rows=", len(df_finetuned), "took", time.time() - t0, "s")
 
     # Save final finetuned result
-    finetuned_fp = out_dir / "df_finetuned_p5.parquet"
-    print(f"Saving df_finetuned to {finetuned_fp}")
-    df_finetuned.to_parquet(finetuned_fp, index=False)
-
-    # Phase 6: reassignment of unassigned transcripts to nearby entities
-    print("Phase 6: reassign_unassigned_to_nearby_entities_fast (reassign unassigned transcripts)")
-    t0 = time.time()
-    df_finetuned, n_reassigned, stats = core.reassign_unassigned_to_nearby_entities_fast(
-        df_finetuned,
-        entity_summary=None,  # Auto-build from df_finetuned
-        entity_col='cell_id_finetuned',
-        gene_col='feature_name',
-        coord_cols=('x', 'y', 'z'),
-        out_col='cell_id_finetuned_2',
-        dist_threshold=10.0,  # Max distance for reassignment
-        only_partial_component=False,  # Don't assign to 'cell' type
-        show_progress=True,
-    )
-    print(f"Phase 6 done: reassigned={n_reassigned} transcripts. Took {time.time()-t0:.1f}s")
-
-    # Save the reassigned finetuned dataframe (overwrite previous finetuned parquet)
     finetuned_fp = out_dir / "df_finetuned.parquet"
-    print(f"Saving reassigned df_finetuned to {finetuned_fp}")
+    print(f"Saving df_finetuned to {finetuned_fp}")
     df_finetuned.to_parquet(finetuned_fp, index=False)
 
     # Save entity maps for debugging
@@ -300,6 +289,8 @@ def main():
         print("Warning: failed to write entity mapping json files")
 
     print("Pipeline complete. Outputs:")
+    print(" -", stitched_fp)
+    print(" -", split_fp)
     print(" -", finetuned_fp)
 
 
