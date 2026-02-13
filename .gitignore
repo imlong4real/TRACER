@@ -16,8 +16,6 @@ dist/
 
 # Jupyter
 .ipynb_checkpoints/
-
-# Ignore all Jupyter notebooks (avoid committing changes to notebooks)
 *.ipynb
 
 # Cython build artifacts
@@ -40,8 +38,9 @@ output/*.parquet
 tutorials/*/output/*.h5ad
 tutorials/*/output/*.json
 
-# Ignore PNGs produced by plotting in any `plot/` folder
+# Plot images
 **/plot/*.png
+**/plot/**/*.png
 
 # Tutorial data files (optional)
 tutorials/*/data/*.xlsx
