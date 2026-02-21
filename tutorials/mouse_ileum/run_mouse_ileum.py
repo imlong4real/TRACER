@@ -3,7 +3,7 @@
 Run HOT-NERD pipeline on mouse ileum tissue data.
 
 Reads:
- - data/mouse_ileum_df.parquet  (Parquet file or directory)
+ - data/mouse_gut_df.parquet  (Parquet file or directory)
  - data/mouse_gut_npmi.csv
 Writes:
  - output/df_stitched.parquet

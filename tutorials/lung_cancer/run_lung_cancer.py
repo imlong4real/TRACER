@@ -183,7 +183,7 @@ def main():
         npmi_df=df_npmi,
         cell_id_col="cell_id",
         gene_col="feature_name",
-        threshold=-0.1,
+        threshold=-0.05,
         unassigned_id="-1",
         n_jobs=-1,
         show_progress=True,
@@ -202,7 +202,7 @@ def main():
         k=8,
         dist_threshold=1.5,
         min_comp_size=10,
-        npmi_threshold=-0.2,
+        npmi_threshold=-0.1,
         unassigned_final_col="cell_id_npmi_cons_p2",
         cell_id_col="cell_id",
         gene_col="feature_name",
@@ -222,8 +222,8 @@ def main():
         coord_cols=("x", "y", "z"),
         purity_threshold=0.05,
         penalize_simplicity=True,
-        deltaC_min=0,
-        dist_threshold=10.0,
+        deltaC_min=0.01,
+        dist_threshold=5.0,
         use_3d=True,
         out_col="cell_id_stitched",
         show_progress=True,
@@ -239,7 +239,7 @@ def main():
         entity_col="cell_id_stitched",
         coord_cols=("x", "y", "z"),
         k=5,
-        dist_threshold=10.0,
+        dist_threshold=5.0,
         out_col="cell_id_spatial",
         show_progress=True,
     )
@@ -256,8 +256,8 @@ def main():
         coord_cols=("x", "y", "z"),
         purity_threshold=0.05,
         penalize_simplicity=True,
-        deltaC_min=0,
-        dist_threshold=10.0,
+        deltaC_min=0.01,
+        dist_threshold=5.0,
         use_3d=True,
         out_col="cell_id_finetuned",
         show_progress=True,
@@ -265,7 +265,7 @@ def main():
     print("Stage 5 done: rows=", len(df_finetuned), "took", time.time() - t0, "s")
 
     # Save final finetuned result
-    finetuned_fp = out_dir / "df_finetuned_p5.parquet"
+    finetuned_fp = out_dir / "df_finetuned_5um.parquet"
     print(f"Saving df_finetuned to {finetuned_fp}")
     df_finetuned.to_parquet(finetuned_fp, index=False)
 
@@ -279,14 +279,14 @@ def main():
         gene_col='feature_name',
         coord_cols=('x', 'y', 'z'),
         out_col='cell_id_finetuned_2',
-        dist_threshold=10.0,  # Max distance for reassignment
+        dist_threshold=5.0,  # Max distance for reassignment
         only_partial_component=False,  # Don't assign to 'cell' type
         show_progress=True,
     )
     print(f"Phase 6 done: reassigned={n_reassigned} transcripts. Took {time.time()-t0:.1f}s")
 
     # Save the reassigned finetuned dataframe (overwrite previous finetuned parquet)
-    finetuned_fp = out_dir / "df_finetuned.parquet"
+    finetuned_fp = out_dir / "df_finetuned_5um.parquet"
     print(f"Saving reassigned df_finetuned to {finetuned_fp}")
     df_finetuned.to_parquet(finetuned_fp, index=False)
 
