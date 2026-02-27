@@ -40,9 +40,13 @@ output/*.csv
 tutorials/*/output/*.h5ad
 tutorials/*/output/*.json
 
-# Plot images
+# Plot images - exclude all PNG files
+*.png
 **/plot/*.png
 **/plot/**/*.png
+
+# Exclude melanoma tutorial folder entirely (large images and data)
+tutorials/melanoma/
 
 # Tutorial data files (optional)
 tutorials/*/data/*.xlsx
