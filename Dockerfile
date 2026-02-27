@@ -37,4 +37,4 @@ RUN python -m pip install --upgrade pip setuptools wheel Cython \
     && python -m pip install torch-geometric --find-links ${PYG_WHL_URL} \
     && python -m pip install -e .
 
-CMD ["python", "-c", "import hotnerd; print(hotnerd.__version__)" ]
+CMD ["python", "-c", "import tracer; print(tracer.__version__)" ]

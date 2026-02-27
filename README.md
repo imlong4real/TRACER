@@ -1,16 +1,15 @@
 # TRACER (HOT-NERD)
 
 <p align="center">
-  <img src="assets/images/logo.png" alt="HOT-NERD Logo" width="300"/>
+  <img src="assets/images/logo.png" alt="TRACER Logo" width="300"/>
 </p>
 Tissue Reconstruction via Associative Clique Extraction and Relation-mapping (TRACER)
-(internally developed as HOT-NERD — High-Order Transcriptomic with NPMI-Enhanced Reconstruction & Delaunay-stitching)
 
 Overview
 --------
 TRACER is a Python package for imaging-based spatial transcriptomics, enabling 3D tissue reconstruction, segmentation refinement, and partial pseudo-cell inference.
 
-The software is implemented and distributed under the internal package name HOT-NERD, which reflects the underlying high-order transcriptomic reconstruction methodology.
+The software is implemented and distributed under the package name `tracer`, providing high-order transcriptomic reconstruction with NPMI-enhanced reconstruction and Delaunay-stitching.
 
 - Partition large tissue spatially using Metis on a kNN graph built from cell centroids.
 - Compute gene co-occurrence statistics (PMI / NPMI) and derive per-cell purity and conflict metrics.
@@ -26,7 +25,7 @@ python3 -m pip install -e '.[dev]'
 
 Cython acceleration (Recommended)
 ------------------------------
-HOT-NERD ships a Cython module to accelerate greedy NPMI pruning. To build and install a wheel that compiles the Cython extension, ensure you have a C compiler and `Cython` available.
+TRACER ships a Cython module to accelerate greedy NPMI pruning. To build and install a wheel that compiles the Cython extension, ensure you have a C compiler and `Cython` available.
 
 macOS prerequisites:
 
@@ -52,7 +51,7 @@ python -m build --wheel --no-isolation -o dist
 Install the built wheel:
 
 ```bash
-python -m pip install dist/hotnerd-*.whl
+python -m pip install dist/tracer-*.whl
 ```
 
 Editable / development install (dynamic compilation fallback):
@@ -68,19 +67,19 @@ python -m pip install Cython
 Notes:
 
 - Building wheels is recommended for reproducible, faster imports (no on-the-fly compilation).
-- If a wheel is not available or Cython isn't installed, HOT-NERD falls back to pure-Python implementations (behaviorally identical, slower).
+- If a wheel is not available or Cython isn't installed, TRACER falls back to pure-Python implementations (behaviorally identical, slower).
 
 Import and inspect available functions:
 
 ```python
-import hotnerd
-print(hotnerd.__version__)
-print(sorted(hotnerd.__all__))
+import tracer
+print(tracer.__version__)
+print(sorted(tracer.__all__))
 ```
 
 Example
 -------
-The `examples/` and `tutorials/` folders contain runnable demonstrations that show how HOT-NERD can refine an initial segmentation produced by the 10X Xenium platform.
+The `examples/` and `tutorials/` folders contain runnable demonstrations that show how TRACER can refine an initial segmentation produced by the 10X Xenium platform.
 
 ### Breast Cancer Example (3D Refinement)
 
@@ -88,9 +87,9 @@ The `examples/` and `tutorials/` folders contain runnable demonstrations that sh
 
 ![Original segmentation](examples/output/10X_transcripts.png)
 
-- After refining segmentation with HOT-NERD, we can identify Z-axis overlap at single-cell level:
+- After refining segmentation with TRACER, we can identify Z-axis overlap at single-cell level:
 
-![Refined segmentation (HOT-NERD)](examples/output/cell_124838_concave_refinement.png)
+![Refined segmentation (TRACER)](examples/output/cell_124838_concave_refinement.png)
 
 Run the example locally:
 
@@ -101,13 +100,13 @@ python examples/refine_segmentation.py
 
 ### Breast Cancer Tutorial (Large-Scale 3D Refinement & Quality Metrics)
 
-HOT-NERD demonstrates exceptional performance on a large-scale Xenium v1 breast cancer dataset (~28M transcripts) with dramatic quality improvements:
+TRACER demonstrates exceptional performance on a large-scale Xenium v1 breast cancer dataset (~28M transcripts) with dramatic quality improvements:
 
 ![Purity and Conflict Scores](tutorials/breast_cancer/plot/breast_cancer_mean_purity_conflict_transcript_scores.png)
 
 **Quantitative Improvements on Standard Xenium Segmentation:**
-- **Purity Score** (gene co-expression consistency): 0.457 → 0.686 (HOT-NERD Stitched) → **0.708** (HOT-NERD Stitched + Fine-tuned) — **+55% improvement**
-- **Conflict Score** (incompatible gene signatures): 0.055 → 0.005 (HOT-NERD Stitched) → **0.004** (HOT-NERD Stitched + Fine-tuned) — **-93% reduction**
+- **Purity Score** (gene co-expression consistency): 0.457 → 0.686 (TRACER Stitched) → **0.708** (TRACER Stitched + Fine-tuned) — **+55% improvement**
+- **Conflict Score** (incompatible gene signatures): 0.055 → 0.005 (TRACER Stitched) → **0.004** (TRACER Stitched + Fine-tuned) — **-93% reduction**
 
 **Enhanced Cell Type Clustering with Author-Annotated Cell Types:**
 
@@ -119,13 +118,13 @@ See the [breast cancer tutorial](tutorials/breast_cancer/) for complete analysis
 
 ### Lung Cancer Tutorial (Quality Metrics & UMAP Enhancement)
 
-HOT-NERD significantly improves cell segmentation quality, as demonstrated on a lung cancer biopsy sample using NPMI-based purity and conflict scores:
+TRACER significantly improves cell segmentation quality, as demonstrated on a lung cancer biopsy sample using NPMI-based purity and conflict scores:
 
 ![Purity and Conflict Scores](tutorials/lung_cancer/plot/lung_cancer_mean_purity_conflict_transcript_scores.png)
 
 **Quantitative Improvements:**
-- **Purity Score** (gene co-expression consistency): 0.292 → 0.356 (HOT-NERD Stitched) → **0.373** (HOT-NERD Stitched + Fine-tuned) — **+28% improvement**
-- **Conflict Score** (incompatible gene signatures): 0.032 → 0.009 (HOT-NERD Stitched) → **0.008** (HOT-NERD Stitched + Fine-tuned) — **-75% reduction**
+- **Purity Score** (gene co-expression consistency): 0.292 → 0.356 (TRACER Stitched) → **0.373** (TRACER Stitched + Fine-tuned) — **+28% improvement**
+- **Conflict Score** (incompatible gene signatures): 0.032 → 0.009 (TRACER Stitched) → **0.008** (TRACER Stitched + Fine-tuned) — **-75% reduction**
 
 **Enhanced UMAP Interpretability:**
 
@@ -148,7 +147,7 @@ For questions or collaboration, please contact:
 
 Repository
 ----------
-https://github.com/imlong4real/HOT-NERD
+https://github.com/imlong4real/TRACER
 
 License
 -------

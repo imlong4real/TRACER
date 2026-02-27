@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Run HOT-NERD pipeline on melanoma tissue data.
+Run TRACER pipeline on melanoma tissue data.
 
 Reads:
  - data/melanoma_df.parquet  (Parquet file or directory)
@@ -23,7 +23,7 @@ import numpy as np
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run HOT-NERD pipeline on melanoma tissue")
+    parser = argparse.ArgumentParser(description="Run TRACER pipeline on melanoma tissue")
     parser.add_argument("--seed", type=int, default=42, help="Reproducibility seed (default: 42)")
     parser.add_argument("--run-smoke-test", action="store_true", help="Run deterministic reproducibility smoke test and exit")
     args = parser.parse_args()
@@ -37,7 +37,7 @@ def main():
     parquet_path = data_dir / "melanoma_df.parquet"
     npmi_csv = data_dir / "melanoma_npmi.csv"
 
-    print("Starting HOT-NERD run on melanoma tissue")
+    print("Starting TRACER run on melanoma tissue")
     print(f"Reading transcripts from: {parquet_path}")
     t0 = time.time()
 
@@ -110,10 +110,10 @@ def main():
     df_npmi = pd.read_csv(npmi_csv)
     print("Loaded npmi rows:", len(df_npmi), "took", time.time() - t0, "s")
 
-    # Import hotnerd functions lazily (after paths are resolved)
+    # Import tracer functions lazily (after paths are resolved)
     sys.path.insert(0, str(repo_root / "src"))
     # Import reproducibility helpers from core
-    from hotnerd.core import set_reproducibility_seed, reproducibility_smoke_test
+    from tracer.core import set_reproducibility_seed, reproducibility_smoke_test
 
     # Apply master seed for reproducibility
     set_reproducibility_seed(args.seed)
@@ -127,7 +127,7 @@ def main():
     # Cython modules are now auto-compiled via pyximport inside core.py on first import
     # No need to setup pyximport here again - it's already done in core.py
 
-    from hotnerd import (
+    from tracer import (
         prune_transcripts_fast,
         annotate_unassigned_components_fast,
         apply_stitching_to_transcripts_memory_efficient,

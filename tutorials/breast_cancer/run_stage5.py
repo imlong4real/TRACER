@@ -29,10 +29,10 @@ def main():
     df_npmi = pd.read_csv(npmi_csv)
     print(f"Loaded {len(df_npmi):,} gene pairs, took {time.time() - t0:.2f}s")
 
-    # Import hotnerd
+    # Import tracer
     sys.path.insert(0, str(repo_root / "src"))
-    from hotnerd import apply_stitching_to_transcripts_fast
-    from hotnerd.core import build_dense_npmi_matrix
+    from tracer import apply_stitching_to_transcripts_fast
+    from tracer.core import build_dense_npmi_matrix
 
     # Rebuild aux dict from NPMI CSV
     print("Building NPMI matrix...")

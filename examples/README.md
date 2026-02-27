@@ -5,7 +5,7 @@
 
 This folder contains a runnable example that demonstrates how to refine
 an initial segmentation visualization into a clustered/stitched result
-using the `hotnerd` API.
+using the `tracer` API.
 
 Files
 - `refine_segmentation.py`: runnable script which synthesizes data,

@@ -1,9 +1,9 @@
-# Breast Cancer Tissue Analysis with HOT-NERD
+# Breast Cancer Tissue Analysis with TRACER
 
 **Author:** Long Yuan  
 **Email:** lyuan13[at]jhmi.edu
 
-This tutorial demonstrates the HOT-NERD pipeline on a large-scale Xenium v1 breast cancer dataset containing ~28M transcripts.
+This tutorial demonstrates the TRACER pipeline on a large-scale Xenium v1 breast cancer dataset containing ~28M transcripts.
 
 ## Dataset
 
@@ -17,7 +17,7 @@ This dataset provides high-resolution spatial transcriptomics of the breast tumo
 ## Requirements
 
 - Python 3.9+
-- HOT-NERD package with Cython acceleration (see main README)
+- TRACER package with Cython acceleration (see main README)
 - Required packages: pandas, numpy, scipy, torch, torch-geometric, tqdm
 
 ## Data Files
@@ -32,7 +32,7 @@ Place the following files in the `data/` directory:
 python tutorials/breast_cancer/run_breast_cancer.py
 ```
 
-The script executes the full HOT-NERD pipeline:
+The script executes the full TRACER pipeline:
 1. **Stage 1**: Conservative NPMI-based pruning (removes low-quality transcripts)
 2. **Stage 2**: Graph-based component detection and annotation of unassigned transcripts
 3. **Stage 3**: Hierarchical stitching of partial cells and components
@@ -43,7 +43,7 @@ The script executes the full HOT-NERD pipeline:
 
 ```
 $ python tutorials/breast_cancer/run_breast_cancer.py
-Starting HOT-NERD run on breast cancer tissue
+Starting TRACER run on breast cancer tissue
 Reading transcripts from: /Users/lyuan13/Desktop/HOT-NERD/tutorials/breast_cancer/data/breast_cancer_df.parquet
 Loaded transcripts rows: 28059774 took 0.43671131134033203 s
 Reading NPMI table from: /Users/lyuan13/Desktop/HOT-NERD/tutorials/breast_cancer/data/breast_cancer_npmi.csv
@@ -100,13 +100,13 @@ pip install -e .
 
 ## Quality Metrics & UMAP Enhancement
 
-HOT-NERD significantly improves cell segmentation quality using NPMI-based purity and conflict scores:
+TRACER significantly improves cell segmentation quality using NPMI-based purity and conflict scores:
 
 ![Purity and Conflict Scores](plot/breast_cancer_mean_purity_conflict_transcript_scores.png)
 
 **Quantitative Improvements:**
-- **Purity Score** (gene co-expression consistency): 0.457 (Original Xenium) → 0.686 (HOT-NERD Stitched) → **0.708** (HOT-NERD Stitched + Fine-tuned) — **+55% improvement**
-- **Conflict Score** (incompatible gene signatures): 0.055 (Original Xenium) → 0.005 (HOT-NERD Stitched) → **0.004** (HOT-NERD Stitched + Fine-tuned) — **-93% reduction**
+- **Purity Score** (gene co-expression consistency): 0.457 (Original Xenium) → 0.686 (TRACER Stitched) → **0.708** (TRACER Stitched + Fine-tuned) — **+55% improvement**
+- **Conflict Score** (incompatible gene signatures): 0.055 (Original Xenium) → 0.005 (TRACER Stitched) → **0.004** (TRACER Stitched + Fine-tuned) — **-93% reduction**
 
 **Enhanced UMAP with Author-Annotated Cell Types:**
 

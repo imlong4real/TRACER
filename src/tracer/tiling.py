@@ -1,5 +1,5 @@
 #----------------------·•●  🧽  ●•·-------------------------
-#                   HotNerd Tiling Module
+#                   TRACER Tiling Module
 #----------------------·•●──────●•·-------------------------
 # Author: Long Yuan
 # Affiliation: Johns Hopkins University

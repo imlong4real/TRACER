@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Run HOT-NERD Stages 4-5 (spatial coherence + final stitching) on breast cancer tissue.
+Run TRACER Stages 4-5 (spatial coherence + final stitching) on breast cancer tissue.
 
 This script reloads the df_stitched.parquet output from Stage 3 and completes
 the pipeline with optimized Stage 5 apply_labels mapping.
@@ -32,7 +32,7 @@ def main():
     npmi_csv = data_dir / "breast_cancer_npmi.csv"
     stitched_parquet = out_dir / "df_stitched.parquet"
 
-    print("Starting HOT-NERD Stages 4-5 (spatial coherence + final stitching)")
+    print("Starting TRACER Stages 4-5 (spatial coherence + final stitching)")
     print(f"Reading df_stitched from: {stitched_parquet}")
     t0 = time.time()
 
@@ -50,11 +50,11 @@ def main():
     df_npmi = pd.read_csv(npmi_csv)
     print("Loaded npmi rows:", len(df_npmi), "took", time.time() - t0, "s")
 
-    # Import hotnerd functions lazily (after paths are resolved)
+    # Import tracer functions lazily (after paths are resolved)
     sys.path.insert(0, str(repo_root / "src"))
     # Cython modules are auto-compiled via pyximport inside core.py
     
-    from hotnerd import (
+    from tracer import (
         enforce_spatial_coherence_fast,
         apply_stitching_to_transcripts_fast,
         prune_genes_by_npmi_greedy,

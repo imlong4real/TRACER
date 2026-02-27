@@ -4,9 +4,9 @@ requires = ["setuptools>=61.0", "wheel", "Cython>=0.29"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "hotnerd"
+name = "tracer"
 version = "0.1.1"
-description = "HOT-NERD core library"
+description = "TRACER core library"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { file = "LICENSE" }
@@ -39,13 +39,13 @@ dev = ["pytest>=7.0", "black", "flake8"]
 docs = ["sphinx"]
 
 [project.urls]
-Homepage = "https://github.com/imlong4real/HOT-NERD"
-Source = "https://github.com/imlong4real/HOT-NERD"
+Homepage = "https://github.com/imlong4real/TRACER"
+Source = "https://github.com/imlong4real/TRACER"
 
 [tool.setuptools]
 include-package-data = true
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["hotnerd"]
+include = ["tracer"]
 

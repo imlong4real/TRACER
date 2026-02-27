@@ -1,4 +1,4 @@
-"""HOT-NERD package.
+"""TRACER package.
 
 Convenience exports for commonly used functions and metadata.
 """

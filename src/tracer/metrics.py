@@ -1,5 +1,5 @@
 #----------------------·•●  🧽  ●•·-------------------------
-#                   HotNerd Metrics Module
+#                   TRACER Metrics Module
 #----------------------·•●──────●•·-------------------------
 # Author: Long Yuan
 # Affiliation: Johns Hopkins University

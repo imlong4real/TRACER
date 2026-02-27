@@ -1,6 +1,6 @@
 """Example: refine segmentation visualization
 
-This script builds a small synthetic dataset and runs the HOT-NERD
+This script builds a small synthetic dataset and runs the TRACER
 pipeline to demonstrate how an initial segmentation image (`10X.png`)
 can be refined to a clustered result (`v1_example.png`).
 
@@ -36,7 +36,7 @@ if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
 try:
-    from hotnerd import (
+    from tracer import (
         build_graph,
         add_edge_prob_stats,
         to_networkx,
@@ -50,7 +50,7 @@ try:
     )
 except Exception as e:
     raise SystemExit(
-        "Failed to import hotnerd. Either install the package (pip install -e .) or ensure src/ is on PYTHONPATH.\n"
+        "Failed to import tracer. Either install the package (pip install -e .) or ensure src/ is on PYTHONPATH.\n"
         f"Import error: {e}"
     )
 

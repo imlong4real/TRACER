@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=hotnerd_melanoma_s42
-#SBATCH --output=logs/hotnerd_melanoma_s42_%j.out
-#SBATCH --error=logs/hotnerd_melanoma_s42_%j.err
+#SBATCH --job-name=tracer_melanoma_s42
+#SBATCH --output=logs/tracer_melanoma_s42_%j.out
+#SBATCH --error=logs/tracer_melanoma_s42_%j.err
 #SBATCH --time=14:00:00
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=96G
@@ -41,12 +41,12 @@ echo "Pip freeze:"
 pip freeze > logs/pip_freeze_${SLURM_JOB_ID}.txt
 
 echo "Git commit:"
-git -C ~/HOT-NERD rev-parse HEAD
+git -C ~/TRACER rev-parse HEAD
 
 # ===== Move to repo =====
-cd ~/HOT-NERD
+cd ~/TRACER
 
-# ===== Run HOT-NERD =====
+# ===== Run TRACER =====
 python tutorials/melanoma/run_melanoma.py --seed 42
 
 echo "End time: $(date)"

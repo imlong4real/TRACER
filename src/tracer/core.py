@@ -190,14 +190,14 @@ def prune_genes_by_npmi_greedy(
 # _cy_prune module; otherwise the pure-Python function above remains in use.
 try:
     import importlib
-    _cy = importlib.import_module("hotnerd._cy_prune")
+    _cy = importlib.import_module("tracer._cy_prune")
     prune_genes_by_npmi_greedy = _cy.prune_genes_by_npmi_greedy
 except Exception:
     try:
         import pyximport
         pyximport.install(language_level=3)
         import importlib
-        _cy = importlib.import_module("hotnerd._cy_prune")
+        _cy = importlib.import_module("tracer._cy_prune")
         prune_genes_by_npmi_greedy = _cy.prune_genes_by_npmi_greedy
     except Exception:
         # Leave the pure-Python implementation as a fallback

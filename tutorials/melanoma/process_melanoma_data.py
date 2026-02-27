@@ -10,7 +10,7 @@ from shapely.geometry import Polygon
 from spatialdata import SpatialData
 from spatialdata.models import TableModel, PointsModel, ShapesModel
 
-from hotnerd.metrics import compute_npmi
+from tracer.metrics import compute_npmi
 
 
 def _build_polygons_from_vertices(df: pd.DataFrame) -> gpd.GeoDataFrame:

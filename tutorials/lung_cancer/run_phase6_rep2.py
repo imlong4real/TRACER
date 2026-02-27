@@ -6,7 +6,7 @@ Usage:
 
 This script will:
  - load `tutorials/lung_cancer/output/df_finetuned_rep2.parquet`
- - run `reassign_unassigned_to_nearby_entities_fast` (Phase 6) from `src/hotnerd/core.py`
+ - run `reassign_unassigned_to_nearby_entities_fast` (Phase 6) from `src/tracer/core.py`
  - save the updated file back to `df_finetuned_rep2.parquet`
  - compare exact (bitwise) match rates for `cell_id_stitched`, `cell_id_finetuned`, and
    `cell_id_finetuned_2` between `df_finetuned.parquet` and `df_finetuned_rep2.parquet`.
@@ -20,8 +20,8 @@ import pandas as pd
 
 
 def load_core_module() -> object:
-    core_path = Path("src/hotnerd/core.py")
-    spec = importlib.util.spec_from_file_location("hotnerd_core_local", str(core_path))
+    core_path = Path("src/tracer/core.py")
+    spec = importlib.util.spec_from_file_location("tracer_core_local", str(core_path))
     core = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(core)
     return core
