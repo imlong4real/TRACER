@@ -33,7 +33,7 @@ def main():
     out_dir = repo_root / "tutorials" / "lung_cancer" / "output"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    parquet_path = data_dir / "lung_cancer_df.parquet"
+    parquet_path = data_dir / "lung_cancer_df_nuclear_expansion.parquet"
     npmi_csv = data_dir / "lung_cancer_npmi.csv"
 
     print("Starting HOT-NERD run on lung cancer tissue")
@@ -265,7 +265,7 @@ def main():
     print("Stage 5 done: rows=", len(df_finetuned), "took", time.time() - t0, "s")
 
     # Save final finetuned result
-    finetuned_fp = out_dir / "df_finetuned_5um.parquet"
+    finetuned_fp = out_dir / "df_finetuned_nuclear_expansion_5um.parquet"
     print(f"Saving df_finetuned to {finetuned_fp}")
     df_finetuned.to_parquet(finetuned_fp, index=False)
 
@@ -286,7 +286,7 @@ def main():
     print(f"Phase 6 done: reassigned={n_reassigned} transcripts. Took {time.time()-t0:.1f}s")
 
     # Save the reassigned finetuned dataframe (overwrite previous finetuned parquet)
-    finetuned_fp = out_dir / "df_finetuned_5um.parquet"
+    finetuned_fp = out_dir / "df_finetuned_nuclear_expansion_5um.parquet"
     print(f"Saving reassigned df_finetuned to {finetuned_fp}")
     df_finetuned.to_parquet(finetuned_fp, index=False)
 
