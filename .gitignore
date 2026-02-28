@@ -40,8 +40,17 @@ output/*.csv
 tutorials/*/output/*.h5ad
 tutorials/*/output/*.json
 
-# Plot images - exclude all PNG files
+# Plot images - exclude all PNG files EXCEPT those referenced in documentation
 *.png
+!assets/images/logo.png
+!examples/output/10X.png
+!examples/output/10X_transcripts.png
+!examples/output/cell_124838_concave_refinement.png
+!examples/output/v1_example.png
+!tutorials/breast_cancer/plot/breast_cancer_mean_purity_conflict_transcript_scores.png
+!tutorials/breast_cancer/plot/breast_cancer_umap_whole_cell_supervised_overlay.png
+!tutorials/lung_cancer/plot/lung_cancer_mean_purity_conflict_transcript_scores.png
+!tutorials/lung_cancer/plot/lung_cancer_umap_whole_cell.png
 **/plot/*.png
 **/plot/**/*.png
 
