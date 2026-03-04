@@ -1,4 +1,4 @@
-# TRACER (HOT-NERD)
+# TRACER 
 
 <p align="center">
   <img src="assets/images/logo.png" alt="TRACER Logo" width="300"/>

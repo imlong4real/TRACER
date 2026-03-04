@@ -16,7 +16,7 @@ dist/
 
 # Jupyter
 .ipynb_checkpoints/
-*.ipynb
+#*.ipynb
 
 # Cython build artifacts
 .pyxbld/

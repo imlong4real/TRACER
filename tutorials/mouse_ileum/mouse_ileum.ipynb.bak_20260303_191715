@@ -1,0 +1,610 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "id": "6c33aaae",
+   "metadata": {},
+   "source": [
+    "# HOT-NERD Mouse Ileum Tutorial\n",
+    "\n",
+    "This notebook demonstrates the complete HOT-NERD pipeline on a MERFISH mouse ileum dataset, performing cell segmentation refinement from spatial transcriptomics data.\n",
+    "\n",
+    "## Dataset\n",
+    "\n",
+    "**MERFISH Mouse Ileum Dataset**\n",
+    "\n",
+    "This dataset uses MERFISH (Multiplexed Error-Robust Fluorescence In Situ Hybridization) spatial transcriptomics data from mouse ileum tissue. The initial cell segmentation was performed using **Baysor** with membrane prior derived from **Cellpose**.\n",
+    "\n",
+    "**Reference:**\n",
+    "> Petukhov, V., Xu, R.J., Soldatov, R.A. et al. Cell segmentation in imaging-based spatial transcriptomics. *Nat Biotechnol* **40**, 345–354 (2022). https://doi.org/10.1038/s41587-021-01044-w\n",
+    "\n",
+    "HOT-NERD refines the Baysor segmentation by leveraging NPMI-based quality metrics and graph-based transcript stitching to improve cell boundary accuracy and resolve ambiguous assignments.\n",
+    "\n",
+    "## Pipeline Overview\n",
+    "\n",
+    "The notebook executes the full HOT-NERD workflow:\n",
+    "\n",
+    "1. **Conservative NPMI Pruning** - Remove low-quality transcripts based on gene co-expression patterns\n",
+    "2. **Component Annotation** - Graph-based detection and annotation of unassigned transcripts\n",
+    "3. **Hierarchical Stitching** - Merge partial cells and components into complete cell boundaries\n",
+    "4. **Spatial Coherence Enforcement** - Ensure cell assignments are spatially connected\n",
+    "5. **Final Refinement** - Re-stitch to produce final high-quality cell segmentation\n",
+    "\n",
+    "## Performance Notes\n",
+    "\n",
+    "This notebook uses **Cython-accelerated functions** (`_fast` variants) that reduce runtime from hours to minutes:\n",
+    "- `prune_transcripts_fast` with parallel processing\n",
+    "- `annotate_unassigned_components_fast` with bulk Cython pruning\n",
+    "- `enforce_spatial_coherence_fast` with C-level connected components\n",
+    "\n",
+    "Run the next code cell to set up the Cython environment, imports, and helper functions."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 14,
+   "id": "8975466b",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Requirement already satisfied: Cython in /Users/lyuan13/anaconda3/envs/spatial/lib/python3.11/site-packages (3.2.3)\n",
+      "Note: you may need to restart the kernel to use updated packages.\n"
+     ]
+    }
+   ],
+   "source": [
+    "# optional: install/enable Cython at runtime (run once if wheel not built)\n",
+    "%pip install --upgrade Cython"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "id": "5473e804",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "/Users/lyuan13/anaconda3/envs/spatial/lib/python3.11/site-packages/tqdm/auto.py:21: TqdmWarning: IProgress not found. Please update jupyter and ipywidgets. See https://ipywidgets.readthedocs.io/en/stable/user_install.html\n",
+      "  from .autonotebook import tqdm as notebook_tqdm\n"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "cython available: True\n",
+      "cython _cy_spatial available: True\n"
+     ]
+    }
+   ],
+   "source": [
+    "import pyximport, numpy, sys\n",
+    "import importlib\n",
+    "pyximport.install(setup_args={\"include_dirs\": [numpy.get_include()]},\n",
+    "                  language_level=3, build_in_temp=False)\n",
+    "sys.path.insert(0, \"src\")\n",
+    "import hotnerd.core as core\n",
+    "importlib.reload(core)   # ensures pyximport compilation runs\n",
+    "print(\"cython available:\", core._cy_prune is not None)\n",
+    "print(\"cython _cy_spatial available:\", getattr(core, \"_cy_spatial\", None) is not None)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "id": "18e2d5e6",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import sys\n",
+    "from pathlib import Path\n",
+    "import pandas as pd\n",
+    "import traceback\n",
+    "\n",
+    "# ensure repo src on path\n",
+    "repo_root = Path.cwd()\n",
+    "sys.path.insert(0, str(repo_root / \"src\"))\n",
+    "\n",
+    "# robust parquet reader helper\n",
+    "def read_parquet_robust(path: Path):\n",
+    "    try:\n",
+    "        return pd.read_parquet(path)\n",
+    "    except Exception as e:\n",
+    "        print(\"pd.read_parquet failed:\", e)\n",
+    "        try:\n",
+    "            import pyarrow.parquet as pq\n",
+    "            import pyarrow as pa\n",
+    "            files = [path] if not path.is_dir() else sorted(path.glob(\"*.parquet\"))\n",
+    "            tables = []\n",
+    "            for f in files:\n",
+    "                print(\"Reading parquet file:\", f)\n",
+    "                pf = pq.ParquetFile(str(f))\n",
+    "                tbl = pf.read()\n",
+    "                tables.append(tbl)\n",
+    "            if not tables:\n",
+    "                raise RuntimeError(\"No parquet files found for fallback read\")\n",
+    "            return pa.concat_tables(tables).to_pandas()\n",
+    "        except Exception:\n",
+    "            traceback.print_exc()\n",
+    "            raise\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "id": "1f2cc8ac",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "parquet: /Users/lyuan13/Desktop/HOT-NERD/tutorials/mouse_ileum/data/mouse_gut_df.parquet\n",
+      "npmi: /Users/lyuan13/Desktop/HOT-NERD/tutorials/mouse_ileum/data/mouse_gut_npmi.csv\n",
+      "Reading transcripts...\n",
+      "Transcripts rows: 819665\n",
+      "Reading NPMI...\n",
+      "NPMI rows: 47089\n"
+     ]
+    }
+   ],
+   "source": [
+    "# Data paths (adjust if notebook root differs)\n",
+    "DATA_DIR = repo_root / \"data\"\n",
+    "PARQUET_PATH = DATA_DIR / \"mouse_gut_df.parquet\"\n",
+    "NPMI_CSV = DATA_DIR / \"mouse_gut_npmi.csv\"\n",
+    "\n",
+    "print('parquet:', PARQUET_PATH)\n",
+    "print('npmi:', NPMI_CSV)\n",
+    "\n",
+    "# Read data\n",
+    "print('Reading transcripts...')\n",
+    "df_transcripts = read_parquet_robust(PARQUET_PATH)\n",
+    "print('Transcripts rows:', len(df_transcripts))\n",
+    "\n",
+    "print('Reading NPMI...')\n",
+    "df_npmi = pd.read_csv(NPMI_CSV)\n",
+    "print('NPMI rows:', len(df_npmi))"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 4,
+   "id": "260ca88f",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Running prune_transcripts (conservative NPMI pruning)\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "prune_pass1: 100%|██████████| 8212/8212 [00:00<00:00, 82797174.15it/s]\n",
+      "apply_pass1: 100%|██████████| 1/1 [00:00<00:00, 28728.11it/s]\n",
+      "prune_pass2: 100%|██████████| 7103/7103 [00:00<00:00, 467027.34it/s]\n"
+     ]
+    },
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Done. pruned rows: 819665\n"
+     ]
+    },
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>transcript_id</th>\n",
+       "      <th>feature_name</th>\n",
+       "      <th>cell_id</th>\n",
+       "      <th>x</th>\n",
+       "      <th>y</th>\n",
+       "      <th>z</th>\n",
+       "      <th>is_noise</th>\n",
+       "      <th>nuclei_probs</th>\n",
+       "      <th>qv</th>\n",
+       "      <th>overlaps_nucleus</th>\n",
+       "      <th>cell_id_npmi_cons_p1</th>\n",
+       "      <th>npmi_cons_p1_status</th>\n",
+       "      <th>cell_id_npmi_cons_p2</th>\n",
+       "      <th>npmi_cons_p2_status</th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <th>0</th>\n",
+       "      <td>3048145</td>\n",
+       "      <td>Maoa</td>\n",
+       "      <td>84</td>\n",
+       "      <td>1705.0</td>\n",
+       "      <td>1271.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>False</td>\n",
+       "      <td>1.0</td>\n",
+       "      <td>0.954363</td>\n",
+       "      <td>1</td>\n",
+       "      <td>84-1</td>\n",
+       "      <td>partial_p1</td>\n",
+       "      <td>84-1</td>\n",
+       "      <td>partial_p2</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>1</th>\n",
+       "      <td>3048147</td>\n",
+       "      <td>Maoa</td>\n",
+       "      <td>231</td>\n",
+       "      <td>1725.0</td>\n",
+       "      <td>1922.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>False</td>\n",
+       "      <td>1.0</td>\n",
+       "      <td>0.908246</td>\n",
+       "      <td>1</td>\n",
+       "      <td>231-1</td>\n",
+       "      <td>partial_p1</td>\n",
+       "      <td>-1</td>\n",
+       "      <td>unassigned_from_partial</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>2</th>\n",
+       "      <td>3048148</td>\n",
+       "      <td>Maoa</td>\n",
+       "      <td>231</td>\n",
+       "      <td>1753.0</td>\n",
+       "      <td>1863.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>False</td>\n",
+       "      <td>1.0</td>\n",
+       "      <td>0.977219</td>\n",
+       "      <td>1</td>\n",
+       "      <td>231-1</td>\n",
+       "      <td>partial_p1</td>\n",
+       "      <td>-1</td>\n",
+       "      <td>unassigned_from_partial</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>3</th>\n",
+       "      <td>3048149</td>\n",
+       "      <td>Maoa</td>\n",
+       "      <td>231</td>\n",
+       "      <td>1760.0</td>\n",
+       "      <td>1865.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>False</td>\n",
+       "      <td>1.0</td>\n",
+       "      <td>0.991316</td>\n",
+       "      <td>1</td>\n",
+       "      <td>231-1</td>\n",
+       "      <td>partial_p1</td>\n",
+       "      <td>-1</td>\n",
+       "      <td>unassigned_from_partial</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>4</th>\n",
+       "      <td>3048153</td>\n",
+       "      <td>Maoa</td>\n",
+       "      <td>53</td>\n",
+       "      <td>1904.0</td>\n",
+       "      <td>794.0</td>\n",
+       "      <td>0.0</td>\n",
+       "      <td>False</td>\n",
+       "      <td>1.0</td>\n",
+       "      <td>0.983210</td>\n",
+       "      <td>1</td>\n",
+       "      <td>53-1</td>\n",
+       "      <td>partial_p1</td>\n",
+       "      <td>53-1</td>\n",
+       "      <td>partial_p2</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "   transcript_id feature_name  cell_id       x       y    z  is_noise  \\\n",
+       "0        3048145         Maoa       84  1705.0  1271.0  0.0     False   \n",
+       "1        3048147         Maoa      231  1725.0  1922.0  0.0     False   \n",
+       "2        3048148         Maoa      231  1753.0  1863.0  0.0     False   \n",
+       "3        3048149         Maoa      231  1760.0  1865.0  0.0     False   \n",
+       "4        3048153         Maoa       53  1904.0   794.0  0.0     False   \n",
+       "\n",
+       "   nuclei_probs        qv  overlaps_nucleus cell_id_npmi_cons_p1  \\\n",
+       "0           1.0  0.954363                 1                 84-1   \n",
+       "1           1.0  0.908246                 1                231-1   \n",
+       "2           1.0  0.977219                 1                231-1   \n",
+       "3           1.0  0.991316                 1                231-1   \n",
+       "4           1.0  0.983210                 1                 53-1   \n",
+       "\n",
+       "  npmi_cons_p1_status cell_id_npmi_cons_p2      npmi_cons_p2_status  \n",
+       "0          partial_p1                 84-1               partial_p2  \n",
+       "1          partial_p1                   -1  unassigned_from_partial  \n",
+       "2          partial_p1                   -1  unassigned_from_partial  \n",
+       "3          partial_p1                   -1  unassigned_from_partial  \n",
+       "4          partial_p1                 53-1               partial_p2  "
+      ]
+     },
+     "execution_count": 4,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# Run conservative pruning\n",
+    "print('Running prune_transcripts (conservative NPMI pruning)')\n",
+    "\n",
+    "# df_transcripts and df_npmi are loaded earlier in this notebook\n",
+    "df_pruned, aux = core.prune_transcripts_fast(\n",
+    "    df_transcripts,\n",
+    "    df_npmi,\n",
+    "    cell_id_col=\"cell_id\",\n",
+    "    gene_col=\"feature_name\",\n",
+    "    threshold=-0.1,\n",
+    "    unassigned_id=\"-1\",\n",
+    "    n_jobs=-1,            # adjust for your machine (-1 for all cores handled inside)\n",
+    "    show_progress=True,  # enable tqdm progress bars\n",
+    ")\n",
+    "print('Done. pruned rows:', len(df_pruned))\n",
+    "df_pruned.head()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 5,
+   "id": "a948502a",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Constructed 44 edges among 91,352 transcripts (k≤8, d≤1.5 µm)\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "post_cc_mapping: : 4it [00:00, 1784.24it/s]                        \n",
+      "grouping: 100%|██████████| 2/2 [00:00<00:00, 2018.43it/s]\n"
+     ]
+    }
+   ],
+   "source": [
+    "df_final = core.annotate_unassigned_components_fast(\n",
+    "    df_pruned,            # DataFrame returned from prune_transcripts_fast\n",
+    "    aux,                  # aux dict returned from prune_transcripts_fast\n",
+    "    build_graph_fn=core.build_graph,\n",
+    "    prune_fn=core.prune_genes_by_npmi_greedy,\n",
+    "    coord_cols=(\"x\",\"y\",\"z\"),\n",
+    "    k=8,\n",
+    "    dist_threshold=1.5,\n",
+    "    min_comp_size=20,\n",
+    "    npmi_threshold=-0.1,\n",
+    "    unassigned_final_col=\"cell_id_npmi_cons_p2\",\n",
+    "    cell_id_col=\"cell_id\",\n",
+    "    gene_col=\"feature_name\",\n",
+    "    transcript_id_col=\"transcript_id\",\n",
+    "    show_progress=True,   # enable tqdm\n",
+    ")"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 6,
+   "id": "ac9e2aef",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "stitching: 100%|██████████| 2/2 [00:23<00:00, 11.99s/it]\n"
+     ]
+    }
+   ],
+   "source": [
+    "df_stitched, entity_to_stitched = core.apply_stitching_to_transcripts_fast(\n",
+    "    df_final=df_final,          # DataFrame (output of annotate_unassigned_components/_fast)\n",
+    "    aux=aux,                    # aux dict from prune_transcripts(_fast)\n",
+    "    entity_col=\"cell_id_final\",\n",
+    "    gene_col=\"feature_name\",\n",
+    "    coord_cols=(\"x\",\"y\",\"z\"),\n",
+    "    tau=0.05,\n",
+    "    penalize_simplicity=True,\n",
+    "    deltaC_min=0.0,\n",
+    "    use_3d=True,\n",
+    "    out_col=\"cell_id_stitched\",\n",
+    "    show_progress=True,         # tqdm progress\n",
+    ")"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 7,
+   "id": "fb277a7d",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Constructed 3,881,027 edges among 819,665 transcripts (k≤5, d≤20.0 µm)\n"
+     ]
+    },
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "spatial_labels: 100%|██████████| 8574/8574 [00:02<00:00, 2870.49it/s]\n"
+     ]
+    }
+   ],
+   "source": [
+    "df_spatial = core.enforce_spatial_coherence_fast(\n",
+    "    df_stitched,                        # DataFrame produced by apply_stitching_to_transcripts(_fast)\n",
+    "    build_graph_fn=core.build_graph,\n",
+    "    entity_col=\"cell_id_stitched\",      # label column to check\n",
+    "    coord_cols=(\"x\", \"y\", \"z\"),\n",
+    "    k=5,\n",
+    "    dist_threshold=20.0,\n",
+    "    out_col=\"cell_id_spatial\",\n",
+    "    show_progress=True,                 # show tqdm progress\n",
+    ")"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 8,
+   "id": "32e8002e",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "stitching: 100%|██████████| 2/2 [08:34<00:00, 257.44s/it]\n"
+     ]
+    }
+   ],
+   "source": [
+    "df_finetuned, entity_to_stitched_ft = core.apply_stitching_to_transcripts_fast(\n",
+    "    df_final=df_spatial,          # DataFrame (output of enforce_spatial_coherence_fast)\n",
+    "    aux=aux,\n",
+    "    entity_col=\"cell_id_spatial\",\n",
+    "    gene_col=\"feature_name\",\n",
+    "    coord_cols=(\"x\", \"y\", \"z\"),\n",
+    "    tau=0.05,\n",
+    "    penalize_simplicity=True,\n",
+    "    deltaC_min=0.0,\n",
+    "    use_3d=True,\n",
+    "    out_col=\"cell_id_finetuned\",\n",
+    "    show_progress=True,   \n",
+    ")"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 10,
+   "id": "3a1c1c3c",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Building entity summary...\n",
+      "Phase 6: Reassigned 44524/91352 unassigned transcripts (threshold=40.0)\n",
+      "  Mean distance: 28.73, Max distance: 40.00\n",
+      "Reassigned 44524 transcripts\n",
+      "Mean reassignment distance: 28.73\n"
+     ]
+    }
+   ],
+   "source": [
+    "df_finetuned, n_reassigned, stats = core.reassign_unassigned_to_nearby_entities_fast(\n",
+    "    df_finetuned,\n",
+    "    entity_summary=None,  # Auto-build from df_finetuned\n",
+    "    entity_col='cell_id_finetuned',\n",
+    "    gene_col='feature_name',\n",
+    "    coord_cols=('x', 'y', 'z'),\n",
+    "    out_col='cell_id_finetuned_2',\n",
+    "    dist_threshold=40.0,  # Max distance for reassignment\n",
+    "    only_partial_component=False,  # Don't assign to 'cell' type\n",
+    "    show_progress=True,\n",
+    ")\n",
+    "\n",
+    "print(f\"Reassigned {n_reassigned} transcripts\")\n",
+    "print(f\"Mean reassignment distance: {stats['mean_distance']:.2f}\")"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 11,
+   "id": "11da03d3",
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Saved df_stitched -> /Users/lyuan13/Desktop/HOT-NERD/tutorials/mouse_ileum/output/df_stitched.parquet\n",
+      "Saved df_finetuned -> /Users/lyuan13/Desktop/HOT-NERD/tutorials/mouse_ileum/output/df_finetuned.parquet\n"
+     ]
+    }
+   ],
+   "source": [
+    "from pathlib import Path\n",
+    "\n",
+    "out_dir = repo_root / \"output\"\n",
+    "out_dir.mkdir(parents=True, exist_ok=True)\n",
+    "\n",
+    "fp_stitched = out_dir / \"df_stitched.parquet\"\n",
+    "fp_finetuned = out_dir / \"df_finetuned.parquet\"\n",
+    "\n",
+    "df_stitched.to_parquet(fp_stitched, index=False)\n",
+    "df_finetuned.to_parquet(fp_finetuned, index=False)\n",
+    "\n",
+    "print(\"Saved df_stitched ->\", fp_stitched)\n",
+    "print(\"Saved df_finetuned ->\", fp_finetuned)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "50dc426e",
+   "metadata": {},
+   "outputs": [],
+   "source": []
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "spatial",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.11.14"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 5
+}
