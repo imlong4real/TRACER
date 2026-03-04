@@ -16,7 +16,7 @@ dist/
 
 # Jupyter
 .ipynb_checkpoints/
-#*.ipynb
+# *.ipynb  # Notebooks are now tracked
 
 # Cython build artifacts
 .pyxbld/
@@ -55,7 +55,7 @@ tutorials/*/output/*.json
 **/plot/**/*.png
 
 # Exclude melanoma tutorial folder entirely (large images and data)
-tutorials/melanoma/
+# tutorials/melanoma/  # Re-enabled: melanoma notebooks are important
 
 # Tutorial data files (optional)
 tutorials/*/data/*.xlsx
