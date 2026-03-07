@@ -103,13 +103,21 @@ def compute_npmi(
     group_key="cell_id",
     min_occurrences_per_context=2,
     count_col=None,
+    set_neg_one=False,
+    thr=0.05
 ):
     """
     Compute PMI/NPMI using presence/absence of genes at the cell or nucleus level,
     with robustness control by requiring each gene to occur at least N times
     within a context (cell or nucleus) before being considered "present".
-
-    Returns
+    Optional:
+    set_neg_one : bool
+        If True, assigns NPMI = -1 for gene pairs with zero observed
+        co-occurrence (P_ij == 0) when both marginal probabilities
+        exceed thr.
+    thr : float
+        Marginal probability threshold used for the optional -1
+        assignment (default 0.05).
     -------
     long_df : DataFrame
         Columns:
@@ -200,6 +208,13 @@ def compute_npmi(
     with np.errstate(divide="ignore", invalid="ignore"):
         PMI[valid] = np.log(P_ij[valid] / denom[valid])
         NPMI[valid] = PMI[valid] / (-np.log(P_ij[valid]))
+
+    # ----------------------------------------------------------------------
+    # Optional: assign -1 if P_i > thr and P_j > thr and _P_ij = 0 (i.e. strong individual presence but no co-occurrence)
+    # ----------------------------------------------------------------------
+    if set_neg_one:
+        zero_coocc = (P_ij == 0) & (P_i_col > thr) & (P_j_row > thr)
+        NPMI[zero_coocc] = -1.0
 
     # ----------------------------------------------------------------------
     # Convert to long format
