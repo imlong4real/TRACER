@@ -64,3 +64,7 @@ tutorials/*/data/*.xlsx
 *.log
 /tmp/
 
+
+# Ignore CSV and TSV files
+*.csv.gz
+*.tsv
