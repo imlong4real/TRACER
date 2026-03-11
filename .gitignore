@@ -68,3 +68,4 @@ tutorials/*/data/*.xlsx
 # Ignore CSV and TSV files
 *.csv.gz
 *.tsv
+tutorials/mouse_ileum/data/baysor_segmentation.csv
