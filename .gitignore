@@ -69,3 +69,4 @@ tutorials/*/data/*.xlsx
 *.csv.gz
 *.tsv
 tutorials/mouse_ileum/data/baysor_segmentation.csv
+tutorials/lung_cancer/data/Baysor_segmentation.csv

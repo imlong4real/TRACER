@@ -139,6 +139,15 @@ Design notes
 - Source layout: `src/` package layout.
 - Runtime dependencies include `numpy`, `pandas`, `geopandas`, `shapely`, `scikit-learn`, `pymetis`, `open3d`, and `matplotlib`.
 
+Citation
+--------
+If you used this work, please cite:
+
+Reconstructing biologically coherent cellular profiles from imaging-based spatial transcriptomics  
+Long Yuan, Youyun Zheng, Shuming Zhang, Rameen Beroukhim, Atul Deshpande  
+doi: https://doi.org/10.64898/2026.03.08.710395  
+bioRxiv: https://www.biorxiv.org/content/10.64898/2026.03.08.710395v1
+
 Contact
 -------
 For questions or collaboration, please contact:
