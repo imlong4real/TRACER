@@ -1,0 +1,40 @@
+#!/bin/bash
+#$ -S /bin/bash
+#$ -N tracer_gbm
+#$ -cwd
+#$ -j y
+#$ -o logs/$JOB_NAME.$JOB_ID.log
+#$ -pe smp 4
+#$ -l h_rt=192:00:00
+#$ -l h_vmem=128G
+
+set -euo pipefail
+
+REPO=/mnt/storage/dept/medonc/beroukhim/youyun/BTC_GBM/code/TRACER
+SIF=$REPO/tracer_latest.sif
+INPUT=/mnt/storage/dept/medonc/beroukhim/youyun/BTC_GBM/data/xenium/output-XETG00323__0023274__P4_resection__20241004__181038/transcripts.parquet
+NPMI=$REPO/tutorials/gbm/data/gbm_npmi.csv
+OUTPUT=$REPO/tutorials/gbm/output/df_finetuned.parquet
+
+mkdir -p "$REPO/logs" "$REPO/tutorials/gbm/output"
+
+source /mnt/storage/dept/medonc/beroukhim/youyun/util/miniforge3/etc/profile.d/conda.sh
+conda activate segmentation
+
+export PYTHONUNBUFFERED=1
+export OMP_NUM_THREADS=${NSLOTS:-1}
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+
+cd "$REPO"
+
+apptainer exec \
+    --bind "$REPO":/app \
+    --bind /mnt/storage:/mnt/storage \
+    --pwd /app \
+    "$SIF" \
+    python tutorials/gbm/run_gbm.py \
+        --input "$INPUT" \
+        --npmi /app/tutorials/gbm/data/gbm_npmi.csv \
+        --output /app/tutorials/gbm/output/df_finetuned.parquet
