@@ -1234,6 +1234,7 @@ def coherence_C_from_genes_relu(
     npmi_mat: np.ndarray,
     *,
     tau=0.05,
+    use_relative=False,
 ):
     """
     ReLU-based coherence score: C = purity - conflict
@@ -1255,6 +1256,9 @@ def coherence_C_from_genes_relu(
         NPMI matrix
     tau : float
         Dead-zone threshold for symmetric ReLU
+    use_relative : bool
+        If True, compute coherence using relative purity/conflict;
+        otherwise use absolute purity/conflict (default behavior).
         
     Returns
     -------
@@ -1283,9 +1287,19 @@ def coherence_C_from_genes_relu(
     K = vals.size
     pos_sum = np.sum(np.maximum(rvals, 0.0))
     neg_sum = np.sum(np.maximum(-rvals, 0.0))
-    
-    purity = float(pos_sum / K)
-    conflict = float(neg_sum / K)
+
+    if use_relative:
+        total_abs = pos_sum + neg_sum
+        if total_abs > 0:
+            purity = float(pos_sum / total_abs)
+            conflict = float(neg_sum / total_abs)
+        else:
+            purity = 0.0
+            conflict = 0.0
+    else:
+        purity = float(pos_sum / K)
+        conflict = float(neg_sum / K)
+
     C = purity - conflict
     
     return float(C), purity, conflict
@@ -1330,6 +1344,7 @@ def deltaC_between_clusters_relu(
     npmi_mat: np.ndarray,
     *,
     tau=0.05,
+    use_relative=False,
     penalize_simplicity=True,
 ):
     """
@@ -1338,12 +1353,12 @@ def deltaC_between_clusters_relu(
     Uses ReLU-based coherence scoring for more robust cluster merging.
     """
     # individual
-    C_u, _, _ = coherence_C_from_genes_relu(genes_u, npmi_mat, tau=tau)
-    C_v, _, _ = coherence_C_from_genes_relu(genes_v, npmi_mat, tau=tau)
+    C_u, _, _ = coherence_C_from_genes_relu(genes_u, npmi_mat, tau=tau, use_relative=use_relative)
+    C_v, _, _ = coherence_C_from_genes_relu(genes_v, npmi_mat, tau=tau, use_relative=use_relative)
 
     # union
     union = np.unique(np.concatenate([genes_u, genes_v]))
-    C_union, _, _ = coherence_C_from_genes_relu(union, npmi_mat, tau=tau)
+    C_union, _, _ = coherence_C_from_genes_relu(union, npmi_mat, tau=tau, use_relative=use_relative)
 
     if not penalize_simplicity:
         return C_union - max(C_u, C_v)
@@ -1396,6 +1411,7 @@ def stitch_entities_hierarchical(
     purity_threshold=0.05,
     tau=0.05,
     use_relu=True,
+    use_relative=False,
     penalize_simplicity=True,
     deltaC_min=0.0,
     use_3d=True,
@@ -1420,6 +1436,9 @@ def stitch_entities_hierarchical(
         Dead-zone threshold for ReLU (used if use_relu=True)
     use_relu : bool
         If True, use ReLU-based coherence scoring (default)
+    use_relative : bool
+        If True (and use_relu=True), use relative_purity and
+        relative_conflict for the stitching criterion.
     penalize_simplicity : bool
         If True, penalize smaller gene sets in deltaC
     deltaC_min : float
@@ -1505,6 +1524,7 @@ def stitch_entities_hierarchical(
                 root_genes[rb],
                 npmi_mat,
                 tau=tau,
+                use_relative=use_relative,
                 penalize_simplicity=penalize_simplicity,
             )
     else:
@@ -1792,6 +1812,7 @@ def apply_stitching_to_transcripts_memory_efficient(
     purity_threshold=0.05,
     tau=0.05,
     use_relu=True,
+    use_relative=False,
     penalize_simplicity=True,
     deltaC_min=0.0,
     use_3d=True,
@@ -1826,6 +1847,9 @@ def apply_stitching_to_transcripts_memory_efficient(
         Dead-zone threshold for ReLU (used if use_relu=True, default)
     use_relu : bool
         If True, use ReLU-based coherence (default, faster and more robust)
+    use_relative : bool
+        If True (and use_relu=True), use relative_purity and
+        relative_conflict for stitching.
     penalize_simplicity : bool
         Penalize smaller gene sets in deltaC
     deltaC_min : float
@@ -1878,6 +1902,7 @@ def apply_stitching_to_transcripts_memory_efficient(
         purity_threshold=purity_threshold,
         tau=tau,
         use_relu=use_relu,
+        use_relative=use_relative,
         penalize_simplicity=penalize_simplicity,
         deltaC_min=deltaC_min,
         use_3d=use_3d,
