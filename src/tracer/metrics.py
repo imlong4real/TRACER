@@ -665,30 +665,7 @@ def compute_purity_and_conflict(
     return purity_df, conflict_df
 
 #
-def relu_symmetric(x, tau):
-    """
-    Two-sided ReLU with dead zone [-tau, tau].
-    
-    Values in [-tau, tau] are zeroed out.
-    Values above tau are shifted down by tau.
-    Values below -tau are shifted up by tau.
-    
-    Parameters
-    ----------
-    x : array_like
-        Input values
-    tau : float
-        Dead zone threshold
-        
-    Returns
-    -------
-    out : np.ndarray
-        ReLU-transformed values
-    """
-    out = np.zeros_like(x)
-    out[x > tau] = x[x > tau] - tau
-    out[x < -tau] = x[x < -tau] + tau
-    return out
+from ._utils import relu_symmetric  # noqa: E402 — re-exported for back-compat
 
 #
 def compute_cell_purity_relu(
