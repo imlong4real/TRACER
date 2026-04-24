@@ -12,6 +12,7 @@ from tqdm.auto import tqdm  # noqa: F401 — used by prune_transcripts_fast
 
 from . import _cy_prune
 from ._repro import _ensure_reproducibility_seed
+from ._utils import prepare_transcript_df
 
 
 # ---------- Phase 1/2: Conservative NPMI pruning ----------
@@ -197,39 +198,51 @@ def prune_transcripts_fast(
     unassigned_id="-1",
     n_jobs: int = 1,
     show_progress: bool = True,
+    in_place: bool = False,
 ):
     """
     Parallelized version of `prune_transcripts` with progress bars.
 
-    - `n_jobs` controls number of worker threads (use -1 for all cores).
-    - Uses thread-based parallelism to avoid copying large `W` matrix between processes.
+    - `n_jobs` is accepted for API compatibility but is a no-op — the
+      per-cell pruning runs as a single C-level batch inside
+      `_cy_prune.prune_cells`.
+    - `in_place`: if True, mutate the input DataFrame rather than copying
+      it. Lets callers avoid the 5–20 GB duplication at 100M-row scale.
 
     Behavior and returned columns match `prune_transcripts`.
     """
     _ensure_reproducibility_seed()
-    df = df.copy()
-    # Work directly with cell_id_col to avoid expensive conversion on 28M rows
-    # Only convert cell IDs if they're not already strings
-    if df[cell_id_col].dtype != 'object':
+    if not in_place:
+        df = df.copy()
+
+    # Normalise `feature_name` → pd.Categorical. Idempotent. ~10× memory
+    # drop on a 100M-row gene column with only a few hundred unique names,
+    # plus it speeds up the .map(gene_to_idx) that follows because
+    # categorical.map() operates on the category vocabulary once rather
+    # than dispatching per row.
+    prepare_transcript_df(df, gene_col=gene_col)
+
+    # `_cell_str`: a string view of cell_id used for the pid partial
+    # label concatenation (`f"{cid}-1"`) below. If cell_id is already
+    # string/object, reuse the reference (no copy); otherwise cast once.
+    if df[cell_id_col].dtype != "object":
         df["_cell_str"] = df[cell_id_col].astype(str)
     else:
         df["_cell_str"] = df[cell_id_col]
-
-    # Optimize gene conversion: avoid double .astype(str).str.strip() on 28M rows
-    if df[gene_col].dtype != 'object':
-        df[gene_col] = df[gene_col].astype(str)
-    # Skip .str.strip() for performance; assume input is already clean or build_dense_npmi_matrix handles it
-    # If needed, only strip during npmi_df processing, not on df
 
     genes, gene_to_idx, W = build_dense_npmi_matrix(npmi_df)
     df["_gene_idx"] = df[gene_col].map(gene_to_idx)
 
     # ---------- PASS 1 (parallelizable) ----------
     df["cell_id_npmi_cons_p1"] = df["_cell_str"]
-    df["npmi_cons_p1_status"] = np.where(
-        df["_cell_str"] == unassigned_id,
-        "unassigned_input",
-        "core",
+    # Pre-declare the full category vocabulary so `.loc[…, col] = "partial_p1"`
+    # below doesn't trigger a "not in categories" error. Categorical storage
+    # drops this column's memory from ~75 MiB to ~1.5 MiB at 1.4M rows (100×
+    # win — just int codes + a 3-label vocabulary).
+    _STATUS_P1_CATS = ["unassigned_input", "core", "partial_p1"]
+    df["npmi_cons_p1_status"] = pd.Categorical(
+        np.where(df["_cell_str"] == unassigned_id, "unassigned_input", "core"),
+        categories=_STATUS_P1_CATS,
     )
 
     partial_map = {}
@@ -309,7 +322,10 @@ def prune_transcripts_fast(
 
     # ---------- PASS 2 (parallelizable over partials) ----------
     df["cell_id_npmi_cons_p2"] = df["cell_id_npmi_cons_p1"]
-    df["npmi_cons_p2_status"] = "unchanged"
+    _STATUS_P2_CATS = ["unchanged", "partial_p2", "unassigned_from_partial"]
+    df["npmi_cons_p2_status"] = pd.Categorical(
+        ["unchanged"] * len(df), categories=_STATUS_P2_CATS,
+    )
 
     pids = sorted(set(partial_map.values()))
     if pids:

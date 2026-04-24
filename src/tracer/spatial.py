@@ -10,6 +10,7 @@ from sklearn.neighbors import NearestNeighbors
 
 from . import _cy_prune, _cy_spatial
 from ._repro import _ensure_reproducibility_seed
+from ._utils import prepare_transcript_df
 from .graph import build_graph, to_networkx  # noqa: F401 — used internally/callers
 
 
@@ -181,19 +182,27 @@ def annotate_unassigned_components_fast(
     gene_col="feature_name",
     transcript_id_col="transcript_id",
     show_progress: bool = True,
+    in_place: bool = False,
 ):
     """
     Faster variant of `annotate_unassigned_components`.
     - Uses `_cy_prune.prune_cells` when available to prune per-component gene lists in bulk.
     - Shows a progress bar if `show_progress` is True.
+    - `in_place`: if True, mutate the input DataFrame instead of copying
+      it. Saves ~N bytes × row-count on the transient copy.
     """
     _ensure_reproducibility_seed()
-    df = df_pruned.copy()
+    if not in_place:
+        df = df_pruned.copy()
+    else:
+        df = df_pruned
 
     if transcript_id_col not in df.columns:
         df[transcript_id_col] = df.index.astype(str)
 
-    df[gene_col] = df[gene_col].astype(str).str.strip()
+    # feature_name → Categorical (no-op if already); dropped the redundant
+    # `.astype(str).str.strip()` that scanned all 100M+ rows twice.
+    prepare_transcript_df(df, gene_col=gene_col)
 
     if unassigned_final_col in df.columns:
         is_unassigned = df[unassigned_final_col].astype(str) == "-1"
@@ -202,8 +211,18 @@ def annotate_unassigned_components_fast(
         is_unassigned = df[cell_id_col].astype(str) == "-1"
         assigned_id_series = df[cell_id_col].astype(str)
 
+    # `unassigned_qc_status` only ever takes one of 4 sentinel values —
+    # declare the full vocabulary up front so the column stays categorical
+    # through every `.loc[..., col] = "…"` assignment below. Drops memory
+    # from ~35 MiB to ~1.5 MiB at 1.4M rows (and ~3 GB at 100M).
+    _QC_STATUS_CATS = [
+        "unassigned_raw", "drop_small_comp",
+        "drop_npmi_pruned_gene", "keep_unassigned_comp",
+    ]
     df["unassigned_comp_id"] = pd.Series(index=df.index, dtype="object")
-    df["unassigned_qc_status"] = pd.Series(index=df.index, dtype="object")
+    df["unassigned_qc_status"] = pd.Categorical(
+        [None] * len(df), categories=_QC_STATUS_CATS,
+    )
     df.loc[is_unassigned, "unassigned_qc_status"] = "unassigned_raw"
 
     if is_unassigned.sum() == 0:
@@ -435,12 +454,19 @@ def enforce_spatial_coherence_fast(
     dist_threshold: float = 3.0,
     out_col: str = "cell_id_spatial",
     show_progress: bool = True,
+    in_place: bool = False,
 ):
     """
     Fast variant of `enforce_spatial_coherence` with a progress bar.
+
+    `in_place=True` skips the defensive DataFrame copy. Safe for our
+    pipeline where upstream stages hand their freshly-built df to the
+    next stage — at 100M rows the copy is ~10 GB of transient overhead.
+    Note: we still need to `reset_index` below, so a partial mutation
+    happens even with `in_place=True`.
     """
     _ensure_reproducibility_seed()
-    df = df_stitched.copy()
+    df = df_stitched if in_place else df_stitched.copy()
     base_labels = df[entity_col].astype(str)
     df[out_col] = base_labels
     df = df.reset_index(drop=True)
@@ -523,6 +549,7 @@ def reassign_unassigned_to_nearby_entities(
     unassigned_labels=None,
     only_partial_component: bool = True,
     show_progress: bool = True,
+    in_place: bool = False,
 ):
     """
     Phase 6: Reassign unassigned transcripts to the nearest "partial" or "component" entity
@@ -585,7 +612,7 @@ def reassign_unassigned_to_nearby_entities(
     if unassigned_labels is None:
         unassigned_labels = {"DROP", "-1", "UNASSIGNED", "nan"}
 
-    df = df_spatial.copy()
+    df = df_spatial if in_place else df_spatial.copy()
     df[out_col] = df[entity_col].astype(str)
 
     # Identify unassigned transcripts
@@ -701,6 +728,7 @@ def reassign_unassigned_to_nearby_entities_fast(
     unassigned_labels=None,
     only_partial_component: bool = True,
     show_progress: bool = True,
+    in_place: bool = False,
 ):
     """
     Fast wrapper around reassign_unassigned_to_nearby_entities.
@@ -765,4 +793,5 @@ def reassign_unassigned_to_nearby_entities_fast(
         unassigned_labels=unassigned_labels,
         only_partial_component=only_partial_component,
         show_progress=show_progress,
+        in_place=in_place,
     )

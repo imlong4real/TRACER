@@ -45,26 +45,30 @@ def build_entity_table(
       - unique genes list
       - type: cell/partial/component
     """
-    df = df_final.copy()
-    df[gene_col] = df[gene_col].astype(str).str.strip()
-
-    # filter out drops / missing
-    ent = df[entity_col].astype(str)
+    # Read-only view of the two columns we need — no full-df copy.
+    # Previously called `.astype(str).str.strip()` on `df_final[gene_col]`
+    # which forced an O(100M)-row Python string op; assume gene names
+    # arrive normalised (use `prepare_transcript_df` upstream).
+    ent = df_final[entity_col].astype(str)
     keep = ent.notna() & (ent != "DROP") & (ent != "nan")
-    df = df.loc[keep].copy()
+
+    # Slice to the keep rows. `.loc` is a view when the mask is boolean.
+    df = df_final.loc[keep, [entity_col, gene_col, *coord_cols]].copy()
+    df[entity_col] = df[entity_col].astype(str)
 
     # entity type
     df["_etype"] = df[entity_col].map(infer_entity_type)
-    df = df[df["_etype"].isin(["cell", "partial", "component"])].copy()
+    df = df[df["_etype"].isin(["cell", "partial", "component"])]
 
-    # centroid
-    cent = df.groupby(entity_col, sort=True)[list(coord_cols)].mean()
+    # centroid (`observed=True` avoids processing empty categorical groups
+    # when entity_col is categorical).
+    cent = df.groupby(entity_col, sort=True, observed=True)[list(coord_cols)].mean()
 
     # unique genes per entity (sorted for deterministic downstream mapping)
-    genes = df.groupby(entity_col, sort=True)[gene_col].unique()
+    genes = df.groupby(entity_col, sort=True, observed=True)[gene_col].unique()
     genes = genes.apply(lambda arr: np.sort(arr.astype(str)))
 
-    etype = df.groupby(entity_col)["_etype"].first()
+    etype = df.groupby(entity_col, observed=True)["_etype"].first()
 
     summary = cent.join(genes.rename("genes")).join(etype.rename("etype"))
     summary = summary.reset_index().rename(columns={entity_col: "entity_id"})
