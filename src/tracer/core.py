@@ -2307,34 +2307,39 @@ def reassign_unassigned_to_nearby_entities(
     entity_coords = entities[list(coord_cols)].to_numpy(dtype=np.float32)
     entity_ids = entities["entity_id"].to_numpy(dtype=object)
 
-    # Also drop unassigned transcripts that lack valid coordinates
+    # Also drop unassigned transcripts that lack valid coordinates.
+    # `unassigned_idx` must be kept aligned with `unassigned_coords` — previously
+    # a NaN-coords branch silently desynchronised them, causing either an
+    # IndexError below or incorrect label assignment.
     if np.isnan(unassigned_coords).any():
         valid_mask = ~np.isnan(unassigned_coords).any(axis=1)
-        n_invalid = (~valid_mask).sum()
+        n_invalid = int((~valid_mask).sum())
         if n_invalid > 0 and show_progress:
             print(f"Warning: {n_invalid} unassigned transcripts have NaN coordinates and will be skipped")
-        valid_unassigned_idx = np.array(unassigned_idx)[valid_mask]
+        unassigned_idx = unassigned_idx[valid_mask]
         unassigned_coords = unassigned_coords[valid_mask]
-    
+
     # Build KNN index for fast nearest-neighbor lookup
     knn = NearestNeighbors(n_neighbors=1, algorithm="kd_tree", metric="euclidean")
     knn.fit(entity_coords)
-    
+
     # Find nearest entity for each unassigned transcript
     distances, indices = knn.kneighbors(unassigned_coords)
     distances = distances.ravel()
     indices = indices.ravel()
-    
+
     # Determine which unassigned transcripts should be reassigned
     within_threshold = distances <= dist_threshold
-    n_reassigned = within_threshold.sum()
-    
-    # Reassign transcripts within threshold
-    for i, unassigned_pos in enumerate(unassigned_idx):
-        if within_threshold[i]:
-            entity_idx = indices[i]
-            new_label = entity_ids[entity_idx]
-            df.loc[unassigned_pos, out_col] = new_label
+    n_reassigned = int(within_threshold.sum())
+
+    # Vectorized reassignment: `unassigned_idx` is positional
+    # (from np.where(...)[0]), so use .iloc with a column position to avoid
+    # the O(n) per-row alignment cost of .loc[scalar, col].
+    if n_reassigned:
+        sel_rows = unassigned_idx[within_threshold]
+        new_labels = entity_ids[indices[within_threshold]]
+        col_pos = df.columns.get_loc(out_col)
+        df.iloc[sel_rows, col_pos] = new_labels
     
     # Compute statistics
     if n_reassigned > 0:
