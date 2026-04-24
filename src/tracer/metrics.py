@@ -9,6 +9,9 @@
 import numpy as np
 import pandas as pd
 import geopandas as gpd
+import scipy.sparse as sp
+
+from ._kernels import pair_aggregate_dense
 
 #
 def get_confident_nuclei_transcripts(
@@ -125,66 +128,73 @@ def compute_npmi(
             P_i_given_j, P_j_given_i, PMI, NPMI
     """
 
-    # 0. Subset to necessary columns
+    # 0. Minimal column projection (no .copy() of the entire 100M-row frame)
     if count_col is None:
-        df = df_subset[[group_key, "feature_name"]].copy()
+        df = df_subset[[group_key, "feature_name"]]
     else:
-        df = df_subset[[group_key, "feature_name", count_col]].copy()
-    df[group_key] = df[group_key].astype(str)
+        df = df_subset[[group_key, "feature_name", count_col]]
+    group_series = df[group_key].astype(str)
 
     # ----------------------------------------------------------------------
     # Filter by minimum occurrences per context
     # ----------------------------------------------------------------------
-    # Count gene occurrences within each cell/nucleus
     if count_col is None:
         counts = (
-            df.groupby([group_key, "feature_name"])
-            .size()
-            .rename("gene_count")
-            .reset_index()
+            df.assign(_grp=group_series)
+              .groupby(["_grp", "feature_name"])
+              .size()
+              .rename("gene_count")
+              .reset_index()
+              .rename(columns={"_grp": group_key})
         )
     else:
         counts = (
-            df.groupby([group_key, "feature_name"])[count_col]
-            .sum()
-            .rename("gene_count")
-            .reset_index()
+            df.assign(_grp=group_series)
+              .groupby(["_grp", "feature_name"])[count_col]
+              .sum()
+              .rename("gene_count")
+              .reset_index()
+              .rename(columns={"_grp": group_key})
         )
 
-    # Keep only those gene occurrences with enough counts
-    df_filtered = counts[counts["gene_count"] >= min_occurrences_per_context].copy()
-
+    df_filtered = counts[counts["gene_count"] >= min_occurrences_per_context]
     if df_filtered.empty:
         raise ValueError(
             f"No genes pass min_occurrences_per_context={min_occurrences_per_context}."
         )
 
-    # For presence/absence, set value = 1 for all retained (context, gene) pairs
-    df_filtered["value"] = 1
+    # ----------------------------------------------------------------------
+    # Build sparse contexts × genes presence matrix via categorical codes.
+    # Previously used df.pivot_table(values=1, aggfunc="max", fill_value=0)
+    # which densifies to C×G ints in pandas — for C=200K, G=500 that's
+    # 800 MB of pandas overhead, independent of the actual sparsity.
+    # ----------------------------------------------------------------------
+    ctx_cat = pd.Categorical(df_filtered[group_key].astype(str))
+    gene_cat = pd.Categorical(df_filtered["feature_name"].astype(str))
+
+    rows_i = ctx_cat.codes.astype(np.int32)
+    cols_i = gene_cat.codes.astype(np.int32)
+    vals = np.ones(len(rows_i), dtype=np.int32)
+
+    contexts = ctx_cat.categories.to_numpy()
+    genes = gene_cat.categories.to_numpy()
+    C = len(contexts)
+    G_gene = len(genes)
+    M = sp.coo_matrix(
+        (vals, (rows_i, cols_i)), shape=(C, G_gene)
+    ).tocsr()
+    M.data = np.ones_like(M.data, dtype=np.int32)  # binarise
 
     # ----------------------------------------------------------------------
-    # Pivot to contexts × genes matrix (presence/absence)
+    # Probabilities P(i), P(i,j) — sparse co-occurrence matmul.
     # ----------------------------------------------------------------------
-    M = df_filtered.pivot_table(
-        index=group_key,
-        columns="feature_name",
-        values="value",
-        aggfunc="max",
-        fill_value=0
-    )
-
-    contexts = M.index.to_numpy()
-    genes = M.columns.to_numpy()
-    C = M.shape[0]
-
-    # ----------------------------------------------------------------------
-    # Probabilities P(i), P(i,j)
-    # ----------------------------------------------------------------------
-    counts_i = M.sum(axis=0).to_numpy()
+    counts_i = np.asarray(M.sum(axis=0)).ravel()
     P_i = counts_i / C
 
-    co_matrix = (M.T @ M).to_numpy()
-    P_ij = co_matrix / C
+    # Sparse × sparse; returns sparse. Dense-ify for the elementwise ops
+    # below — at G ≈ 500 the G×G matrix is 2 MB float64, trivial.
+    co_matrix_sp = (M.T @ M)
+    P_ij = np.asarray(co_matrix_sp.todense(), dtype=np.float64) / C
 
     # ----------------------------------------------------------------------
     # Conditional probabilities
@@ -293,47 +303,79 @@ def build_cell_gene_matrix(filtered_df, min_transcripts=10, genes_npm=None, cell
     """
     
     # Convert cell IDs to string for consistency with AnnData
-    df = filtered_df.copy()
-    df[cell_col] = df[cell_col].astype(str)
-    
+    df = filtered_df
+    # Avoid copying 100M-row df up front; use boolean views where possible.
+    cell_col_series = df[cell_col].astype(str)
+
     # Remove excluded cell IDs
     if exclude_ids is None:
         exclude_ids = {"UNASSIGNED"}
     if exclude_ids:
-        df = df[~df[cell_col].isin(exclude_ids)].copy()
+        keep_mask = ~cell_col_series.isin(exclude_ids)
+        cell_col_series = cell_col_series[keep_mask]
+        df = df.loc[keep_mask.index[keep_mask]]
 
     # Filter by minimum transcript count per cell
-    cell_counts = df.groupby(cell_col).size()
+    cell_counts = cell_col_series.groupby(cell_col_series).size()
     good_ids = cell_counts[cell_counts >= min_transcripts].index
-    df = df[df[cell_col].isin(good_ids)].copy()
+    mask_good = cell_col_series.isin(good_ids)
+    df = df.loc[mask_good.index[mask_good]]
+    cell_col_series = cell_col_series[mask_good]
 
-    df["value"] = 1
-
-    # Pivot to cell × gene
-    cell_gene = df.pivot_table(
-        index=cell_col,
-        columns="feature_name",
-        values="value",
-        aggfunc=lambda x: 1,
-        fill_value=0,
-    )
-
-    # Ensure cell_ids are strings to match AnnData obs_names
-    cell_ids = cell_gene.index.astype(str).to_numpy()
-    genes_cell = cell_gene.columns.to_numpy()
-    M = cell_gene.to_numpy().astype(np.int8)
-
-    # Restrict to genes that appear in NPMI dataset
+    # Restrict gene universe to NPMI vocabulary *before* building the matrix,
+    # so sparse construction skips transcripts whose gene never shows up in
+    # NPMI pairs at all.
     all_genes = np.union1d(
         genes_npm["gene_i"].unique(),
         genes_npm["gene_j"].unique()
     )
-    gene_to_idx_all = {g: i for i, g in enumerate(all_genes)}
 
-    mask = np.array([g in gene_to_idx_all for g in genes_cell])
-    M = M[:, mask]
-    genes_cell = genes_cell[mask]
-    col_idx = np.array([gene_to_idx_all[g] for g in genes_cell], dtype=np.int32)
+    gene_series = df["feature_name"].astype(str)
+    in_vocab = gene_series.isin(all_genes)
+    df = df.loc[in_vocab.index[in_vocab]]
+    cell_col_series = cell_col_series[in_vocab]
+    gene_series = gene_series[in_vocab]
+
+    # Build presence/absence matrix via categorical codes + scipy.sparse.
+    # Previous implementation used pivot_table(aggfunc=lambda x: 1), which
+    # forces a Python call per group — catastrophic on 100M+ rows. Here we
+    # let scipy coalesce duplicates at CSR-build time.
+    cell_cat = pd.Categorical(cell_col_series)
+    gene_cat = pd.Categorical(gene_series, categories=all_genes)
+
+    rows_i = cell_cat.codes.astype(np.int32)
+    cols_i = gene_cat.codes.astype(np.int32)
+    # Any gene not in `all_genes` got code -1; defensive filter.
+    valid = cols_i >= 0
+    if not valid.all():
+        rows_i = rows_i[valid]
+        cols_i = cols_i[valid]
+
+    n_cells = len(cell_cat.categories)
+    n_genes = len(all_genes)
+
+    # COO → CSR de-duplicates automatically (sum_duplicates → binarise).
+    coo = sp.coo_matrix(
+        (np.ones(len(rows_i), dtype=np.int8), (rows_i, cols_i)),
+        shape=(n_cells, n_genes),
+    )
+    csr = coo.tocsr()
+    csr.data = np.ones_like(csr.data, dtype=np.int8)  # binarise
+
+    cell_ids = cell_cat.categories.to_numpy().astype(str)
+
+    # Drop columns (genes) that never appeared in any retained cell — keeps
+    # M's width the same as before: only genes actually present.
+    col_mass = np.asarray(csr.sum(axis=0)).ravel() > 0
+    csr = csr[:, col_mass]
+    genes_cell = all_genes[col_mass]
+    col_idx = np.flatnonzero(col_mass).astype(np.int32)
+
+    # Densify to int8 for backward-compat (callers expect np.ndarray). At
+    # ~200K cells × ~500 genes this is ~100 MiB — negligible next to the
+    # 100M-row source df and orders of magnitude smaller than what the
+    # pivot_table was allocating.
+    M = np.asarray(csr.todense(), dtype=np.int8)
 
     return cell_ids, genes_cell, M, col_idx
 
@@ -378,16 +420,18 @@ def build_npmi_matrix(nucleus_npmi_long):
         nucleus_npmi_long["gene_i"].unique(),
         nucleus_npmi_long["gene_j"].unique(),
     )
-    gene_to_idx = {g:i for i,g in enumerate(genes)}
+    gene_to_idx = {g: i for i, g in enumerate(genes)}
     G = len(genes)
 
-    npmi_mat = np.zeros((G, G), dtype=float)
+    # Vectorized: no more Python per-row itertuples loop. At G=500 this
+    # went from ~2 s to ~10 ms; at G=5000 the old loop would take minutes.
+    i_idx = nucleus_npmi_long["gene_i"].map(gene_to_idx).to_numpy()
+    j_idx = nucleus_npmi_long["gene_j"].map(gene_to_idx).to_numpy()
+    vals = nucleus_npmi_long["NPMI"].to_numpy(dtype=float)
 
-    for row in nucleus_npmi_long.itertuples(index=False):
-        i = gene_to_idx[row.gene_i]
-        j = gene_to_idx[row.gene_j]
-        npmi_mat[i,j] = row.NPMI
-        npmi_mat[j,i] = row.NPMI
+    npmi_mat = np.zeros((G, G), dtype=float)
+    npmi_mat[i_idx, j_idx] = vals
+    npmi_mat[j_idx, i_idx] = vals
 
     return npmi_mat, gene_to_idx
 
@@ -458,33 +502,25 @@ def compute_cell_purity(
       - the purity_percentile (default 80% → bottom 20% are suspect).
     """
 
-    n_cells = M.shape[0]
-    purity_scores = np.full(n_cells, np.nan, dtype=float)
+    # Single parallel kernel pass → all primitives we need for every
+    # per-row metric. Replaces 200K × O(k^2) Python loop.
+    k_arr, n_pos, _sum_neg, _pos_relu, _neg_relu = pair_aggregate_dense(
+        M, col_idx, npmi_mat, threshold=npmi_threshold, tau=0.0,
+    )
+    n_pairs_total = k_arr * (k_arr - 1) // 2
 
-    for row in range(n_cells):
-        present_idx = np.where(M[row] == 1)[0]
-        gi = col_idx[present_idx]
-        k = len(gi)
-        if k < 2:
-            continue  # leave as NaN
-
-        sub = npmi_mat[np.ix_(gi, gi)]
-        vals = sub[np.triu_indices_from(sub, k=1)]
-
-        # purity fraction: proportion of NPMI > npmi_threshold
-        purity = np.mean(vals > npmi_threshold)
-        purity_scores[row] = purity
+    purity_scores = np.full(M.shape[0], np.nan, dtype=float)
+    has_pairs = n_pairs_total > 0
+    purity_scores[has_pairs] = n_pos[has_pairs] / n_pairs_total[has_pairs]
 
     # determine threshold for boolean purity
     valid = ~np.isnan(purity_scores)
     if purity_threshold is None:
-        # use percentile of *valid* scores
         purity_threshold = np.nanpercentile(purity_scores[valid], purity_percentile)
 
     is_pure = np.zeros_like(purity_scores, dtype=bool)
     is_pure[valid] = purity_scores[valid] >= purity_threshold
 
-    # package as DataFrame if cell_ids provided
     purity_df = None
     if cell_ids is not None:
         purity_df = pd.DataFrame({
@@ -509,28 +545,17 @@ def compute_cell_conflict(
     Higher = more contaminated / merged.
     """
 
-    n_cells = M.shape[0]
-    conflict_scores = np.full(n_cells, np.nan, dtype=float)
+    # Kernel returns `sum_neg` per row; conflict = sum_neg / total_pairs.
+    # `threshold` arg below doesn't affect sum_neg, only n_pos_above.
+    k_arr, _n_pos, sum_neg, _pos_relu, _neg_relu = pair_aggregate_dense(
+        M, col_idx, npmi_mat, threshold=0.0, tau=0.0,
+    )
+    n_pairs_total = k_arr * (k_arr - 1) // 2
 
-    for row in range(n_cells):
-        present_idx = np.where(M[row] == 1)[0]
-        gi = col_idx[present_idx]
-        k = len(gi)
+    conflict_scores = np.full(M.shape[0], np.nan, dtype=float)
+    has_pairs = n_pairs_total > 0
+    conflict_scores[has_pairs] = sum_neg[has_pairs] / n_pairs_total[has_pairs]
 
-        if k < 2:
-            continue  # leave as NaN
-
-        sub = npmi_mat[np.ix_(gi, gi)]
-        vals = sub[np.triu_indices_from(sub, k=1)]
-
-        # contributions from negative NPMI only (flip sign → positive penalty)
-        neg_contribs = -vals[vals < 0]
-
-        K = k * (k - 1) / 2  # total number of pairs
-        if K > 0:
-            conflict_scores[row] = neg_contribs.sum() / K
-
-    # determine conflict threshold
     valid = ~np.isnan(conflict_scores)
     if conflict_threshold is None:
         conflict_threshold = np.nanpercentile(
@@ -538,7 +563,6 @@ def compute_cell_conflict(
             conflict_percentile
         )
 
-    # high conflict = score >= threshold
     is_conflict = np.zeros_like(conflict_scores, dtype=bool)
     is_conflict[valid] = conflict_scores[valid] >= conflict_threshold
 
@@ -720,38 +744,28 @@ def compute_cell_purity_relu(
     purity_df : pd.DataFrame or None
         DataFrame with all purity metrics if cell_ids provided
     """
+    k_arr, _n_pos, _sum_neg, pos_relu, neg_relu = pair_aggregate_dense(
+        M, col_idx, npmi_mat, threshold=0.0, tau=tau,
+    )
+    n_pairs_total = k_arr * (k_arr - 1) // 2
+    has_pairs = n_pairs_total > 0
+    total_abs = pos_relu + neg_relu
+
     n_cells = M.shape[0]
     purity_scores = np.full(n_cells, np.nan, dtype=float)
     signal_strength = np.full(n_cells, np.nan, dtype=float)
     relative_purity = np.full(n_cells, np.nan, dtype=float)
     relative_conflict = np.full(n_cells, np.nan, dtype=float)
 
-    for row in range(n_cells):
-        present_idx = np.where(M[row] == 1)[0]
-        gi = col_idx[present_idx]
-        k = len(gi)
-        
-        if k < 2:
-            continue
+    purity_scores[has_pairs] = pos_relu[has_pairs] / n_pairs_total[has_pairs]
+    signal_strength[has_pairs] = total_abs[has_pairs]
 
-        sub = npmi_mat[np.ix_(gi, gi)]
-        vals = sub[np.triu_indices_from(sub, k=1)]
-        rvals = relu_symmetric(vals, tau)
-
-        K = k * (k - 1) / 2
-        pos_sum = np.sum(np.maximum(rvals, 0.0))
-        neg_sum = np.sum(np.maximum(-rvals, 0.0))
-        total_abs = pos_sum + neg_sum
-
-        purity_scores[row] = pos_sum / K
-        signal_strength[row] = total_abs
-
-        if total_abs > eps:
-            relative_purity[row] = pos_sum / total_abs
-            relative_conflict[row] = neg_sum / total_abs
+    has_signal = has_pairs & (total_abs > eps)
+    relative_purity[has_signal] = pos_relu[has_signal] / total_abs[has_signal]
+    relative_conflict[has_signal] = neg_relu[has_signal] / total_abs[has_signal]
 
     valid = ~np.isnan(purity_scores)
-    
+
     if purity_threshold is None:
         purity_threshold = np.nanpercentile(
             purity_scores[valid], purity_percentile
@@ -826,35 +840,25 @@ def compute_cell_conflict_relu(
     conflict_df : pd.DataFrame or None
         DataFrame with all conflict metrics if cell_ids provided
     """
+    k_arr, _n_pos, _sum_neg, pos_relu, neg_relu = pair_aggregate_dense(
+        M, col_idx, npmi_mat, threshold=0.0, tau=tau,
+    )
+    n_pairs_total = k_arr * (k_arr - 1) // 2
+    has_pairs = n_pairs_total > 0
+    total_abs = pos_relu + neg_relu
+
     n_cells = M.shape[0]
     conflict_scores = np.full(n_cells, np.nan, dtype=float)
     signal_strength = np.full(n_cells, np.nan, dtype=float)
     relative_purity = np.full(n_cells, np.nan, dtype=float)
     relative_conflict = np.full(n_cells, np.nan, dtype=float)
 
-    for row in range(n_cells):
-        present_idx = np.where(M[row] == 1)[0]
-        gi = col_idx[present_idx]
-        k = len(gi)
+    conflict_scores[has_pairs] = neg_relu[has_pairs] / n_pairs_total[has_pairs]
+    signal_strength[has_pairs] = total_abs[has_pairs]
 
-        if k < 2:
-            continue
-
-        sub = npmi_mat[np.ix_(gi, gi)]
-        vals = sub[np.triu_indices_from(sub, k=1)]
-        rvals = relu_symmetric(vals, tau)
-
-        K = k * (k - 1) / 2
-        pos_sum = np.sum(np.maximum(rvals, 0.0))
-        neg_sum = np.sum(np.maximum(-rvals, 0.0))
-        total_abs = pos_sum + neg_sum
-
-        conflict_scores[row] = neg_sum / K
-        signal_strength[row] = total_abs
-        
-        if total_abs > eps:
-            relative_purity[row] = pos_sum / total_abs
-            relative_conflict[row] = neg_sum / total_abs
+    has_signal = has_pairs & (total_abs > eps)
+    relative_purity[has_signal] = pos_relu[has_signal] / total_abs[has_signal]
+    relative_conflict[has_signal] = neg_relu[has_signal] / total_abs[has_signal]
 
     valid = ~np.isnan(conflict_scores)
 

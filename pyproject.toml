@@ -29,6 +29,7 @@ dependencies = [
   "pyarrow>=8.0",
   "scipy>=1.7",
   "networkx>=2.6",
+  "numba>=0.58",
   "torch>=1.10",
   "torch-geometric>=2.0",
   "open3d>=0.17",

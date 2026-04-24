@@ -2637,34 +2637,27 @@ def compute_purity_conflict_per_cc(M, npmi_mat, col_idx, purity_threshold=0.05):
     For k >= 2:
         purity = frac(NPMI > threshold)
         conflict = mean(|negative NPMI|)
+
+    Implementation note: the per-row work is one parallel kernel pass
+    (see `tracer._kernels.pair_aggregate_dense`); the Python double loop
+    that used to live here was the bottleneck of the per-CC metrics at
+    200K+ components.
     """
-    n_cells = M.shape[0]
-    purity = np.zeros(n_cells, dtype=np.float32)
-    conflict = np.zeros(n_cells, dtype=np.float32)
+    from ._kernels import pair_aggregate_dense
 
-    for i in range(n_cells):
-        present = np.where(M[i] == 1)[0]
-        k = len(present)
+    k_arr, n_pos, sum_neg, _pos_relu, _neg_relu = pair_aggregate_dense(
+        M, col_idx, npmi_mat, threshold=purity_threshold, tau=0.0,
+    )
+    n_pairs_total = k_arr * (k_arr - 1) // 2
+    has_pairs = n_pairs_total > 0
 
-        if k < 2:
-            purity[i] = 0.0
-            conflict[i] = 0.0
-            continue
-
-        gi = col_idx[present]
-        sub = npmi_mat[np.ix_(gi, gi)]
-        vals = sub[np.triu_indices_from(sub, k=1)]
-
-        if vals.size == 0:
-            purity[i] = 0.0
-            conflict[i] = 0.0
-            continue
-
-        purity[i] = float(np.mean(vals > purity_threshold))
-
-        neg = -vals[vals < 0]
-        K = k * (k - 1) / 2
-        conflict[i] = float(neg.sum() / K) if K > 0 else 0.0
+    purity = np.zeros(M.shape[0], dtype=np.float32)
+    conflict = np.zeros(M.shape[0], dtype=np.float32)
+    # Original compute_cell_purity used `np.mean(vals > threshold)` which
+    # counts ALL pairs (including NaN pairs that are False) in the denom.
+    # Matching that exactly: n_pos / n_pairs_total.
+    purity[has_pairs] = (n_pos[has_pairs] / n_pairs_total[has_pairs]).astype(np.float32)
+    conflict[has_pairs] = (sum_neg[has_pairs] / n_pairs_total[has_pairs]).astype(np.float32)
 
     return purity, conflict
 
@@ -2710,6 +2703,15 @@ def compute_purity_conflict_per_cc_relu(M, npmi_mat, col_idx, tau=0.05, eps=1e-8
     signal_strength : np.ndarray
         Total signal magnitude per CC
     """
+    from ._kernels import pair_aggregate_dense
+
+    k_arr, _n_pos, _sum_neg, pos_relu, neg_relu = pair_aggregate_dense(
+        M, col_idx, npmi_mat, threshold=0.0, tau=tau,
+    )
+    n_pairs_total = k_arr * (k_arr - 1) // 2
+    has_pairs = n_pairs_total > 0
+    total_abs = pos_relu + neg_relu
+
     n_cells = M.shape[0]
     purity = np.zeros(n_cells, dtype=np.float32)
     conflict = np.zeros(n_cells, dtype=np.float32)
@@ -2717,38 +2719,13 @@ def compute_purity_conflict_per_cc_relu(M, npmi_mat, col_idx, tau=0.05, eps=1e-8
     relative_conflict = np.zeros(n_cells, dtype=np.float32)
     signal_strength = np.zeros(n_cells, dtype=np.float32)
 
-    for i in range(n_cells):
-        present = np.where(M[i] == 1)[0]
-        k = len(present)
+    purity[has_pairs] = (pos_relu[has_pairs] / n_pairs_total[has_pairs]).astype(np.float32)
+    conflict[has_pairs] = (neg_relu[has_pairs] / n_pairs_total[has_pairs]).astype(np.float32)
+    signal_strength[has_pairs] = total_abs[has_pairs].astype(np.float32)
 
-        if k < 2:
-            # All metrics remain 0
-            continue
-
-        gi = col_idx[present]
-        sub = npmi_mat[np.ix_(gi, gi)]
-        vals = sub[np.triu_indices_from(sub, k=1)]
-
-        if vals.size == 0:
-            continue
-
-        # Apply symmetric ReLU
-        rvals = relu_symmetric(vals, tau)
-
-        K = k * (k - 1) / 2
-        pos_sum = np.sum(np.maximum(rvals, 0.0))
-        neg_sum = np.sum(np.maximum(-rvals, 0.0))
-        total_abs = pos_sum + neg_sum
-
-        # Absolute metrics (normalized by number of pairs)
-        purity[i] = float(pos_sum / K)
-        conflict[i] = float(neg_sum / K)
-        signal_strength[i] = float(total_abs)
-
-        # Relative metrics (normalized by total signal)
-        if total_abs > eps:
-            relative_purity[i] = float(pos_sum / total_abs)
-            relative_conflict[i] = float(neg_sum / total_abs)
+    has_signal = has_pairs & (total_abs > eps)
+    relative_purity[has_signal] = (pos_relu[has_signal] / total_abs[has_signal]).astype(np.float32)
+    relative_conflict[has_signal] = (neg_relu[has_signal] / total_abs[has_signal]).astype(np.float32)
 
     return purity, conflict, relative_purity, relative_conflict, signal_strength
 
