@@ -684,18 +684,20 @@ def apply_stitching_to_transcripts_memory_efficient(
     df_final: pd.DataFrame,
     aux: dict,
     *,
-    entity_col="cell_id_final",
-    gene_col="feature_name",
+    entity_col: str = "tracer_id",
+    gene_col: str = "feature_name",
     coord_cols=("x", "y", "z"),
-    purity_threshold=0.05,
-    tau=0.05,
-    use_relu=True,
-    use_relative=False,
-    penalize_simplicity=True,
-    deltaC_min=0.0,
-    use_3d=True,
+    purity_threshold: float = 0.05,
+    tau: float = 0.05,
+    use_relu: bool = True,
+    use_relative: bool = False,
+    penalize_simplicity: bool = True,
+    deltaC_min: float = 0.0,
+    use_3d: bool = True,
     dist_threshold: float | None = 15.0,
-    out_col="cell_id_stitched",
+    out_col: str = "tracer_id",
+    debug_stages: bool = False,
+    debug_legacy_col: str = "cell_id_stitched",
     show_progress: bool = True,
     in_place: bool = False,
     map_mode: str = "categorical",
@@ -813,6 +815,9 @@ def apply_stitching_to_transcripts_memory_efficient(
                 out_codes[valid] = new_cat_codes[ent_codes[valid]]
 
             df_out[out_col] = pd.Categorical.from_codes(out_codes, categories=new_categories)
+        if debug_stages and debug_legacy_col != out_col:
+            df_out[debug_legacy_col] = df_out[out_col].copy()
+        return df_out, entity_to_stitched
     elif map_mode == "chunked":
         ent_str = ent.astype(str)
         df_out[out_col] = ent_str
@@ -836,4 +841,6 @@ def apply_stitching_to_transcripts_memory_efficient(
     else:
         raise ValueError("map_mode must be 'categorical' or 'chunked'")
 
+    if debug_stages and debug_legacy_col != out_col:
+        df_out[debug_legacy_col] = df_out[out_col].copy()
     return df_out, entity_to_stitched

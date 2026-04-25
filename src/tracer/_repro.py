@@ -58,7 +58,9 @@ def reproducibility_smoke_test(seed: int = 42) -> bool:
     df = pd.DataFrame(coords, columns=["x", "y", "z"])
     df["feature_name"] = ["A", "B", "C", "D", "A", "B"]
     df["transcript_id"] = np.arange(len(df)).astype(str)
-    df["cell_id_stitched"] = ["C1", "C1", "C1", "C1", "C1", "C1"]
+    # The redesigned pipeline uses a single `tracer_id` column updated
+    # in place by each stage. Seed it with a single label here.
+    df["tracer_id"] = ["C1", "C1", "C1", "C1", "C1", "C1"]
 
     data1 = build_graph(df, k=3, dist_threshold=2.0, coord_cols=("x", "y", "z"))
     data2 = build_graph(df, k=3, dist_threshold=2.0, coord_cols=("x", "y", "z"))
@@ -73,7 +75,9 @@ def reproducibility_smoke_test(seed: int = 42) -> bool:
         df, build_graph_fn=build_graph, k=3, dist_threshold=2.0, show_progress=False
     )
 
-    if not out1["cell_id_spatial"].equals(out2["cell_id_spatial"]):
+    # Default `out_col` is now `tracer_id`; both stages mutated it in
+    # place. Determinism check now reads the canonical column.
+    if not out1["tracer_id"].equals(out2["tracer_id"]):
         raise AssertionError("spatial coherence labeling is not deterministic")
 
     return True

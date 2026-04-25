@@ -32,29 +32,65 @@ def prepare_transcript_df(
     df: pd.DataFrame,
     *,
     gene_col: str = "feature_name",
+    fov_col: str = "fov_name",
+    cell_id_col: str = "cell_id",
+    transcript_id_col: str = "transcript_id",
 ) -> pd.DataFrame:
     """Normalise a transcript-level DataFrame for the TRACER pipeline.
 
-    Currently just converts `feature_name` to Categorical — the gene
-    vocabulary is small (hundreds) and highly repeated (millions of
-    transcripts), so object→categorical is a ~10× memory drop on that
-    column and speeds up every `groupby('feature_name')`, `isin`, and
-    equality check that touches it downstream.
+    Performs four idempotent memory-saving conversions in place:
 
-    `cell_id` is intentionally left alone: downstream stages create
-    derived columns (`cell_id_npmi_cons_p1`, `cell_id_stitched`, …)
-    that add *new* string labels (e.g. `"{cid}-1"` partials). Making
-    `cell_id` categorical would propagate the dtype to those derived
-    columns and break `.loc` assignment of unseen categories. A future
-    change can pre-expand the category vocabulary to keep those
-    columns categorical too.
+    1. `feature_name` → Categorical. Gene vocabulary is tiny (hundreds)
+       and highly repeated (millions of transcripts) — drops the column
+       from ~5 GB of object pointers at 100M rows to ~100 MB of int
+       codes, and speeds up every downstream groupby/isin/equality.
 
-    Call at the top of any stage that ingests a fresh transcript df.
-    Idempotent — a no-op when the column is already categorical.
-    Mutates `df` in place and returns it for convenience.
+    2. `fov_name` → Categorical. FOV vocabulary is small (~100 typical)
+       and the column is just carried along by the pipeline. Drops a
+       further ~70 MiB at 1.4M rows / ~5 GB at 100M.
+
+    3. `cell_id` int64 → int32 if all values fit (signed, ≤ 2^31). Cuts
+       this column in half. At 1.4M rows: ~5 MiB → ~3 MiB; at 100M:
+       ~800 MiB → ~400 MiB.
+
+    4. `transcript_id` uint64 → uint32 if all values fit (≤ 2^32 − 1).
+       Same proportional saving.
+
+    `cell_id` is **not** converted to Categorical even when it's a
+    string: downstream stages create derived columns that add new
+    string labels (`"{cid}-1"` partials, `"UNASSIGNED_N"` components)
+    via `.loc` assignment, which would error against a frozen
+    categorical vocabulary. Pre-expansion would be possible but lives
+    in stage-specific code, not this generic helper.
+
+    Idempotent and safe to call repeatedly — a no-op when the column
+    is already in the target dtype, or when the column is missing.
     """
     if gene_col in df.columns:
         ensure_string_categorical(df, gene_col)
+    if fov_col in df.columns:
+        ensure_string_categorical(df, fov_col)
+
+    # Numeric downcasts: only when safe (values fit in target dtype).
+    if cell_id_col in df.columns:
+        s = df[cell_id_col]
+        if s.dtype == np.int64:
+            mn, mx = int(s.min()), int(s.max())
+            if -(2**31) <= mn and mx < 2**31:
+                df[cell_id_col] = s.astype(np.int32)
+
+    if transcript_id_col in df.columns:
+        s = df[transcript_id_col]
+        if s.dtype == np.uint64:
+            if int(s.max()) < 2**32:
+                df[transcript_id_col] = s.astype(np.uint32)
+        elif s.dtype == np.int64:
+            mn, mx = int(s.min()), int(s.max())
+            if 0 <= mn and mx < 2**32:
+                df[transcript_id_col] = s.astype(np.uint32)
+            elif -(2**31) <= mn and mx < 2**31:
+                df[transcript_id_col] = s.astype(np.int32)
+
     return df
 
 

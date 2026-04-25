@@ -177,19 +177,37 @@ def annotate_unassigned_components_fast(
     dist_threshold=1.5,
     min_comp_size=50,
     npmi_threshold=-0.1,
-    unassigned_final_col="cell_id_npmi_cons_p2",
-    cell_id_col="cell_id",
-    gene_col="feature_name",
-    transcript_id_col="transcript_id",
+    entity_col: str = "tracer_id",
+    out_col: str = "tracer_id",
+    cell_id_col: str = "cell_id",
+    gene_col: str = "feature_name",
+    transcript_id_col: str = "transcript_id",
+    debug_stages: bool = False,
     show_progress: bool = True,
     in_place: bool = False,
 ):
     """
-    Faster variant of `annotate_unassigned_components`.
-    - Uses `_cy_prune.prune_cells` when available to prune per-component gene lists in bulk.
-    - Shows a progress bar if `show_progress` is True.
-    - `in_place`: if True, mutate the input DataFrame instead of copying
-      it. Saves ~N bytes × row-count on the transient copy.
+    Annotate unassigned transcripts with connected-component IDs and
+    NPMI-prune their genes.
+
+    Parameters
+    ----------
+    entity_col : str
+        Column to read for "is this transcript currently unassigned"
+        ("-1") — defaults to `"tracer_id"`, the canonical pipeline
+        column written by `prune_transcripts_fast`.
+    out_col : str
+        Where to write the updated assignment (in place by default).
+        Rows that started as "-1" become either `"UNASSIGNED_<i>"`
+        (kept component) or `"DROP"` (dropped).
+    debug_stages : bool
+        When True, additionally writes legacy snapshot columns:
+        `cell_id_final` (mirrors `out_col` post-stage), plus the
+        diagnostic columns `unassigned_comp_id`,
+        `unassigned_qc_status`, `unassigned_comp_size`. Default False
+        keeps output minimal.
+    in_place : bool
+        Skip the defensive `df.copy()`.
     """
     _ensure_reproducibility_seed()
     if not in_place:
@@ -200,33 +218,42 @@ def annotate_unassigned_components_fast(
     if transcript_id_col not in df.columns:
         df[transcript_id_col] = df.index.astype(str)
 
-    # feature_name → Categorical (no-op if already); dropped the redundant
-    # `.astype(str).str.strip()` that scanned all 100M+ rows twice.
     prepare_transcript_df(df, gene_col=gene_col)
 
-    if unassigned_final_col in df.columns:
-        is_unassigned = df[unassigned_final_col].astype(str) == "-1"
-        assigned_id_series = df[unassigned_final_col].astype(str)
-    else:
+    # Read the canonical pipeline column to find unassigned transcripts.
+    # Fallback to `cell_id_col` only if the pipeline column doesn't exist
+    # yet (e.g., user is running stage 2 standalone on raw data).
+    if entity_col in df.columns:
+        is_unassigned = df[entity_col].astype(str) == "-1"
+        assigned_id_series = df[entity_col].astype(str)
+    elif cell_id_col in df.columns:
         is_unassigned = df[cell_id_col].astype(str) == "-1"
         assigned_id_series = df[cell_id_col].astype(str)
+    else:
+        raise ValueError(
+            f"Neither `{entity_col}` nor `{cell_id_col}` found in df. "
+            "Run `prune_transcripts_fast` first or pass an explicit "
+            "`entity_col`."
+        )
 
-    # `unassigned_qc_status` only ever takes one of 4 sentinel values —
-    # declare the full vocabulary up front so the column stays categorical
-    # through every `.loc[..., col] = "…"` assignment below. Drops memory
-    # from ~35 MiB to ~1.5 MiB at 1.4M rows (and ~3 GB at 100M).
+    # Diagnostic columns are kept locally — only attached to df when
+    # `debug_stages=True`. Categorical with full vocabulary so the
+    # later `.loc[..., col] = "…"` assignments don't error out.
     _QC_STATUS_CATS = [
         "unassigned_raw", "drop_small_comp",
         "drop_npmi_pruned_gene", "keep_unassigned_comp",
     ]
-    df["unassigned_comp_id"] = pd.Series(index=df.index, dtype="object")
-    df["unassigned_qc_status"] = pd.Categorical(
-        [None] * len(df), categories=_QC_STATUS_CATS,
-    )
-    df.loc[is_unassigned, "unassigned_qc_status"] = "unassigned_raw"
+    qc_status = pd.Categorical([None] * len(df), categories=_QC_STATUS_CATS)
+    qc_status[is_unassigned.to_numpy()] = "unassigned_raw"
+    comp_id_series = pd.Series(index=df.index, dtype="object")
 
     if is_unassigned.sum() == 0:
-        df["cell_id_final"] = assigned_id_series
+        df[out_col] = assigned_id_series
+        if debug_stages:
+            df["cell_id_final"] = assigned_id_series
+            df["unassigned_qc_status"] = qc_status
+            df["unassigned_comp_id"] = comp_id_series
+            df["unassigned_comp_size"] = pd.Series(np.nan, index=df.index, dtype="float32")
         return df
 
     df_u = df.loc[is_unassigned].copy()
@@ -273,37 +300,37 @@ def annotate_unassigned_components_fast(
         pbar_cc.update(1)
         pbar_cc.close()
 
+    # Components → strings, kept locally (only attached to df under
+    # debug_stages). Component IDs are written to comp_id_series here.
     comp_ids_str = np.array([f"UNASSIGNED_{i}" for i in comp_idx], dtype=object)
-    df.loc[df_u.index, "unassigned_comp_id"] = comp_ids_str
+    comp_id_series.loc[df_u.index] = comp_ids_str
 
     comp_sizes = pd.Series(comp_idx).value_counts().sort_index()
     comp_size_map = {f"UNASSIGNED_{i}": int(sz) for i, sz in comp_sizes.items()}
-    df["unassigned_comp_size"] = df["unassigned_comp_id"].map(comp_size_map)
+    comp_size_series = comp_id_series.map(comp_size_map)
 
-    drop_small = is_unassigned & df["unassigned_comp_size"].notna() & (df["unassigned_comp_size"] < min_comp_size)
-    df.loc[drop_small, "unassigned_qc_status"] = "drop_small_comp"
+    drop_small = is_unassigned & comp_size_series.notna() & (comp_size_series < min_comp_size)
+    qc_status[drop_small.to_numpy()] = "drop_small_comp"
 
     W = aux["W"]
     gene_to_idx = aux["gene_to_idx"]
     gene_idx_all = df[gene_col].map(gene_to_idx)
 
-    keep_candidate = is_unassigned & (~drop_small) & df["unassigned_comp_id"].notna()
-    large_comp_ids = np.sort(df.loc[keep_candidate, "unassigned_comp_id"].unique())
+    keep_candidate = is_unassigned & (~drop_small) & comp_id_series.notna()
 
-    # Prepare per-component gene lists using vectorized groupby (much faster than per-component filtering)
     if show_progress:
         pbar_groupby = tqdm(total=2, desc="grouping_genes")
 
     comp_gene_map = {}
-    df_candidate = df.loc[keep_candidate].copy()
+    df_candidate = df.loc[keep_candidate, [gene_col]].copy()
+    df_candidate["_comp_id_local"] = comp_id_series.loc[keep_candidate].astype(str)
     df_candidate["_gene_idx_local"] = gene_idx_all.loc[keep_candidate]
 
     if show_progress:
         pbar_groupby.update(1)
         pbar_groupby.set_description("grouping")
 
-    # Group by component and get unique gene indices per component
-    for comp_id, group in df_candidate.groupby("unassigned_comp_id", sort=True):
+    for comp_id, group in df_candidate.groupby("_comp_id_local", sort=True):
         g_local = np.sort(group["_gene_idx_local"].dropna().astype(int).unique())
         if g_local.size > 0:
             comp_gene_map[comp_id] = np.asarray(g_local, dtype=np.int32)
@@ -312,9 +339,7 @@ def annotate_unassigned_components_fast(
         pbar_groupby.update(1)
         pbar_groupby.close()
 
-    # Bulk-prune all components through the Cython kernel. Python fallback
-    # removed — `_cy_prune` is a hard import now, so the only reason this
-    # would fail is a real bug worth surfacing.
+    # Bulk-prune all components through the Cython kernel.
     if len(comp_gene_map) > 0:
         comp_keys = sorted(comp_gene_map.keys())
         g_arrays = [comp_gene_map[k] if comp_gene_map[k].size > 0 else None for k in comp_keys]
@@ -324,38 +349,50 @@ def annotate_unassigned_components_fast(
         if show_progress:
             iterator = tqdm(list(iterator), desc="prune_comps")
 
-        # Vectorized approach: build a mask for genes to drop, then apply once
         drop_gene_mask_all = np.zeros(len(df), dtype=bool)
+        comp_id_series_str = comp_id_series.astype(str)
+        keep_candidate_arr = keep_candidate.to_numpy()
 
         for comp_id, removed in iterator:
-            if removed is None or len(removed) == 0:
-                # Mark all transcripts in this component as kept
-                comp_mask = (df["unassigned_comp_id"] == comp_id) & keep_candidate
-                df.loc[comp_mask, "unassigned_qc_status"] = "keep_unassigned_comp"
+            comp_mask_arr = (comp_id_series_str.to_numpy() == comp_id) & keep_candidate_arr
+            comp_indices = np.where(comp_mask_arr)[0]
+
+            if comp_indices.size == 0:
                 continue
 
-            # Get indices of transcripts in this component
-            comp_indices = np.where((df["unassigned_comp_id"] == comp_id) & keep_candidate)[0]
-
-            if len(comp_indices) == 0:
+            if removed is None or len(removed) == 0:
+                qc_status[comp_indices] = "keep_unassigned_comp"
                 continue
 
             removed_set = set(map(int, removed))
             comp_gene_mask = gene_idx_all.iloc[comp_indices].isin(removed_set).to_numpy()
             drop_gene_mask_all[comp_indices[comp_gene_mask]] = True
+            qc_status[comp_indices[~comp_gene_mask]] = "keep_unassigned_comp"
 
-            df.loc[comp_indices[~comp_gene_mask], "unassigned_qc_status"] = "keep_unassigned_comp"
+        qc_status[drop_gene_mask_all] = "drop_npmi_pruned_gene"
 
-        df.loc[drop_gene_mask_all, "unassigned_qc_status"] = "drop_npmi_pruned_gene"
+    # Build the canonical assignment column.
+    final_assignment = assigned_id_series.copy()
+    qc_arr = np.asarray(qc_status)
+    kept_unassigned_arr = is_unassigned.to_numpy() & (qc_arr == "keep_unassigned_comp")
+    if kept_unassigned_arr.any():
+        kept_idx = np.where(kept_unassigned_arr)[0]
+        final_assignment.iloc[kept_idx] = comp_id_series.iloc[kept_idx].astype(str).values
 
-    cell_id_final = assigned_id_series.copy()
-    kept_unassigned = is_unassigned & (df["unassigned_qc_status"] == "keep_unassigned_comp")
-    cell_id_final.loc[kept_unassigned] = df.loc[kept_unassigned, "unassigned_comp_id"].astype(str)
+    dropped_arr = is_unassigned.to_numpy() & (
+        (qc_arr == "drop_small_comp") | (qc_arr == "drop_npmi_pruned_gene")
+    )
+    if dropped_arr.any():
+        final_assignment.iloc[np.where(dropped_arr)[0]] = "DROP"
 
-    dropped = is_unassigned & df["unassigned_qc_status"].isin(["drop_small_comp", "drop_npmi_pruned_gene"])
-    cell_id_final.loc[dropped] = "DROP"
-
-    df["cell_id_final"] = cell_id_final
+    # Canonical output: in-place write to `out_col`. With debug_stages,
+    # also expose the legacy snapshot columns + diagnostic columns.
+    df[out_col] = final_assignment.values
+    if debug_stages:
+        df["cell_id_final"] = final_assignment.values
+        df["unassigned_comp_id"] = comp_id_series
+        df["unassigned_comp_size"] = comp_size_series.astype("float32")
+        df["unassigned_qc_status"] = qc_status
 
     return df
 
@@ -448,22 +485,28 @@ def enforce_spatial_coherence_fast(
     df_stitched: pd.DataFrame,
     build_graph_fn,
     *,
-    entity_col: str = "cell_id_stitched",
+    entity_col: str = "tracer_id",
     coord_cols=("x", "y", "z"),
     k: int = 5,
     dist_threshold: float = 3.0,
-    out_col: str = "cell_id_spatial",
+    out_col: str = "tracer_id",
+    debug_stages: bool = False,
     show_progress: bool = True,
     in_place: bool = False,
 ):
     """
     Fast variant of `enforce_spatial_coherence` with a progress bar.
 
-    `in_place=True` skips the defensive DataFrame copy. Safe for our
-    pipeline where upstream stages hand their freshly-built df to the
-    next stage — at 100M rows the copy is ~10 GB of transient overhead.
-    Note: we still need to `reset_index` below, so a partial mutation
-    happens even with `in_place=True`.
+    Reads `entity_col` (default `tracer_id`), splits any spatially
+    disconnected label into `lab`, `lab-2`, `lab-3`, …, and writes back
+    to `out_col` (defaults to `tracer_id` — in-place update).
+
+    `debug_stages=True` additionally writes the same result to a
+    legacy-named `cell_id_spatial` snapshot column.
+
+    `in_place=True` skips the defensive DataFrame copy. Note: we still
+    need to `reset_index` below, so a partial mutation happens even with
+    `in_place=True`.
     """
     _ensure_reproducibility_seed()
     df = df_stitched if in_place else df_stitched.copy()
@@ -487,6 +530,8 @@ def enforce_spatial_coherence_fast(
     if not hasattr(data_all, "edge_index") or data_all.edge_index.numel() == 0:
         # No edges → every label is trivially one component; out_col already
         # equals base_labels from the initial assignment above.
+        if debug_stages:
+            df["cell_id_spatial"] = df[out_col].copy()
         df = df.drop(columns=["__node_idx"])
         return df
 
@@ -534,6 +579,8 @@ def enforce_spatial_coherence_fast(
             sel = (roots_c == r)
             out[idx[sel]] = new_lab
     df[out_col] = out
+    if debug_stages:
+        df["cell_id_spatial"] = out.copy()
     df = df.drop(columns=["__node_idx"])
     return df
 
@@ -542,12 +589,14 @@ def reassign_unassigned_to_nearby_entities(
     df_spatial: pd.DataFrame,
     entity_summary: pd.DataFrame,
     *,
-    entity_col: str = "cell_id_spatial",
-    out_col: str = "cell_id_finetuned",
+    entity_col: str = "tracer_id",
+    out_col: str = "tracer_id",
     coord_cols=("x", "y", "z"),
     dist_threshold: float = 20.0,
     unassigned_labels=None,
     only_partial_component: bool = True,
+    debug_stages: bool = False,
+    debug_legacy_col: str = "cell_id_finetuned_2",
     show_progress: bool = True,
     in_place: bool = False,
 ):
@@ -714,19 +763,24 @@ def reassign_unassigned_to_nearby_entities(
         if n_reassigned > 0:
             print(f"  Mean distance: {mean_distance:.2f}, Max distance: {max_distance:.2f}")
 
+    if debug_stages and debug_legacy_col != out_col:
+        df[debug_legacy_col] = df[out_col].copy()
+
     return df, n_reassigned, stats
 
 def reassign_unassigned_to_nearby_entities_fast(
     df_spatial: pd.DataFrame,
     entity_summary: pd.DataFrame = None,
     *,
-    entity_col: str = "cell_id_spatial",
+    entity_col: str = "tracer_id",
     gene_col: str = "feature_name",
     coord_cols=("x", "y", "z"),
-    out_col: str = "cell_id_finetuned",
+    out_col: str = "tracer_id",
     dist_threshold: float = 20.0,
     unassigned_labels=None,
     only_partial_component: bool = True,
+    debug_stages: bool = False,
+    debug_legacy_col: str = "cell_id_finetuned_2",
     show_progress: bool = True,
     in_place: bool = False,
 ):
@@ -792,6 +846,8 @@ def reassign_unassigned_to_nearby_entities_fast(
         dist_threshold=dist_threshold,
         unassigned_labels=unassigned_labels,
         only_partial_component=only_partial_component,
+        debug_stages=debug_stages,
+        debug_legacy_col=debug_legacy_col,
         show_progress=show_progress,
         in_place=in_place,
     )

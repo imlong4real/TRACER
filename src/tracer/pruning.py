@@ -192,38 +192,48 @@ def prune_transcripts(
 def prune_transcripts_fast(
     df,
     npmi_df,
-    cell_id_col="cell_id",
-    gene_col="feature_name",
-    threshold=-0.1,
-    unassigned_id="-1",
+    *,
+    cell_id_col: str = "cell_id",
+    out_col: str = "tracer_id",
+    gene_col: str = "feature_name",
+    threshold: float = -0.1,
+    unassigned_id: str = "-1",
+    debug_stages: bool = False,
     n_jobs: int = 1,
     show_progress: bool = True,
     in_place: bool = False,
 ):
     """
-    Parallelized version of `prune_transcripts` with progress bars.
+    Two-pass NPMI pruning. Writes pass-2 result to `out_col` in place;
+    pass 1's intermediate state is internal-only unless `debug_stages` is
+    True. Status columns are also gated behind `debug_stages`.
 
-    - `n_jobs` is accepted for API compatibility but is a no-op — the
-      per-cell pruning runs as a single C-level batch inside
-      `_cy_prune.prune_cells`.
-    - `in_place`: if True, mutate the input DataFrame rather than copying
-      it. Lets callers avoid the 5–20 GB duplication at 100M-row scale.
-
-    Behavior and returned columns match `prune_transcripts`.
+    Parameters
+    ----------
+    out_col : str
+        Canonical output column name (default `"tracer_id"`). Each
+        pipeline stage writes its current best assignment here, in place,
+        so the column always reflects the latest stage's output.
+    debug_stages : bool
+        When True, additionally writes legacy snapshot columns for
+        inspection: `cell_id_npmi_cons_p1` (post pass 1), and
+        `cell_id_npmi_cons_p2` (post pass 2 = mirrors `out_col`), plus
+        the status columns `npmi_cons_p1_status` / `npmi_cons_p2_status`.
+        Default False keeps the output minimal for production use.
+    n_jobs : int
+        Accepted for back-compat; no-op (Cython batch).
+    in_place : bool
+        Skip the defensive `df.copy()` when caller hands ownership of
+        the df to this stage.
     """
     _ensure_reproducibility_seed()
     if not in_place:
         df = df.copy()
 
-    # Normalise `feature_name` → pd.Categorical. Idempotent. ~10× memory
-    # drop on a 100M-row gene column with only a few hundred unique names,
-    # plus it speeds up the .map(gene_to_idx) that follows because
-    # categorical.map() operates on the category vocabulary once rather
-    # than dispatching per row.
     prepare_transcript_df(df, gene_col=gene_col)
 
-    # `_cell_str`: a string view of cell_id used for the pid partial
-    # label concatenation (`f"{cid}-1"`) below. If cell_id is already
+    # `_cell_str`: a string view of cell_id used for the pid partial label
+    # concatenation (`f"{cid}-1"`) below. If cell_id is already
     # string/object, reuse the reference (no copy); otherwise cast once.
     if df[cell_id_col].dtype != "object":
         df["_cell_str"] = df[cell_id_col].astype(str)
@@ -233,17 +243,22 @@ def prune_transcripts_fast(
     genes, gene_to_idx, W = build_dense_npmi_matrix(npmi_df)
     df["_gene_idx"] = df[gene_col].map(gene_to_idx)
 
-    # ---------- PASS 1 (parallelizable) ----------
-    df["cell_id_npmi_cons_p1"] = df["_cell_str"]
-    # Pre-declare the full category vocabulary so `.loc[…, col] = "partial_p1"`
-    # below doesn't trigger a "not in categories" error. Categorical storage
-    # drops this column's memory from ~75 MiB to ~1.5 MiB at 1.4M rows (100×
-    # win — just int codes + a 3-label vocabulary).
-    _STATUS_P1_CATS = ["unassigned_input", "core", "partial_p1"]
-    df["npmi_cons_p1_status"] = pd.Categorical(
-        np.where(df["_cell_str"] == unassigned_id, "unassigned_input", "core"),
-        categories=_STATUS_P1_CATS,
-    )
+    # ---------- PASS 1 ----------
+    # Initialise the canonical output column with the raw cell_id labels;
+    # pass 1 will overwrite some entries with "{cid}-1" partials, and
+    # pass 2 may further demote some partials to `unassigned_id` ("-1").
+    # Working column = `out_col` itself (no separate intermediate).
+    df[out_col] = df["_cell_str"]
+    p1_status = None
+    if debug_stages:
+        # Pre-declare the full category vocabulary so `.loc[…, col] = "partial_p1"`
+        # below doesn't trigger a "not in categories" error. Categorical
+        # storage drops this column from ~75 MiB to ~1.5 MiB at 1.4M rows.
+        _STATUS_P1_CATS = ["unassigned_input", "core", "partial_p1"]
+        p1_status = pd.Categorical(
+            np.where(df["_cell_str"] == unassigned_id, "unassigned_input", "core"),
+            categories=_STATUS_P1_CATS,
+        )
 
     partial_map = {}
 
@@ -285,9 +300,10 @@ def prune_transcripts_fast(
         for cid, _ in results:
             partial_map[cid] = f"{cid}-1"
 
-    # Apply pass1 removals to df in a vectorized batch
+    # Apply pass1 removals — write `pid` partial labels into `out_col`
+    # for matching (cell, gene) rows. Status (when debug) marked as
+    # `partial_p1` for those rows.
     if results:
-        # build mapping table of (cell_str, gene_idx) -> pid
         rows = []
         for cid, removed in results:
             pid = partial_map[cid]
@@ -299,38 +315,45 @@ def prune_transcripts_fast(
 
             # prepare indexed view of original df for efficient merging
             df_idx = df.reset_index().rename(columns={"index": "_orig_index"})[["_orig_index", "_cell_str", "_gene_idx"]]
-            # coerce gene idx to pandas nullable Int to allow exact matching
             df_idx["_gene_idx"] = df_idx["_gene_idx"].astype("Int64")
             map_df["_gene_idx_map"] = map_df["_gene_idx_map"].astype("Int64")
 
             merged = pd.merge(
-                df_idx,
-                map_df,
+                df_idx, map_df,
                 left_on=["_cell_str", "_gene_idx"],
                 right_on=["_cell_str_map", "_gene_idx_map"],
                 how="inner",
             )
 
             if not merged.empty:
-                # assign in one vectorized operation
-                df.loc[merged["_orig_index"], "cell_id_npmi_cons_p1"] = merged["_pid"].values
-                df.loc[merged["_orig_index"], "npmi_cons_p1_status"] = "partial_p1"
+                df.loc[merged["_orig_index"], out_col] = merged["_pid"].values
+                if debug_stages and p1_status is not None:
+                    p1_status[merged["_orig_index"].to_numpy()] = "partial_p1"
 
-    # show that pass1 application is complete
+    # Snapshot pass-1 state if requested. Has to happen *before* pass 2
+    # mutates `out_col`.
+    if debug_stages:
+        df["cell_id_npmi_cons_p1"] = df[out_col].copy()
+        df["npmi_cons_p1_status"] = p1_status
+
     if show_progress:
         tqdm(desc="apply_pass1", total=1).update(1)
 
-    # ---------- PASS 2 (parallelizable over partials) ----------
-    df["cell_id_npmi_cons_p2"] = df["cell_id_npmi_cons_p1"]
-    _STATUS_P2_CATS = ["unchanged", "partial_p2", "unassigned_from_partial"]
-    df["npmi_cons_p2_status"] = pd.Categorical(
-        ["unchanged"] * len(df), categories=_STATUS_P2_CATS,
-    )
+    # ---------- PASS 2 ----------
+    # Pass 2 reads the partial labels currently in `out_col`, prunes their
+    # gene sets, and demotes failing rows to `unassigned_id` — in place
+    # on `out_col`. No separate `cell_id_npmi_cons_p2` column needed
+    # outside debug.
+    p2_status = None
+    if debug_stages:
+        _STATUS_P2_CATS = ["unchanged", "partial_p2", "unassigned_from_partial"]
+        p2_status = pd.Categorical(
+            ["unchanged"] * len(df), categories=_STATUS_P2_CATS,
+        )
 
     pids = sorted(set(partial_map.values()))
     if pids:
-        # prepare per-partial unique gene lists
-        grp_p = df[df["cell_id_npmi_cons_p1"].isin(pids)].groupby("cell_id_npmi_cons_p1")["_gene_idx"].apply(
+        grp_p = df[df[out_col].isin(pids)].groupby(out_col)["_gene_idx"].apply(
             lambda s: np.asarray(np.sort(pd.Index(s.dropna().astype(int)).unique()), dtype=np.int32)
         )
 
@@ -344,7 +367,6 @@ def prune_transcripts_fast(
 
         results2 = []
 
-        # Same batch Cython path as pass1 — Python fallback removed.
         pids = [pid for pid, _ in partial_items]
         g_arrays = [gl if (gl is not None and gl.size > 0) else None for _, gl in partial_items]
         removed_lists = _cy_prune.prune_cells(g_arrays, W, float(threshold))
@@ -356,12 +378,9 @@ def prune_transcripts_fast(
         if pbar2 is not None:
             pbar2.close()
 
-        # Deterministic ordering for pass2 application
         if results2:
             results2.sort(key=lambda x: str(x[0]))
 
-        # Apply pass2 changes in a vectorized fashion
-        # results2: list of (pid, removed)
         rows2 = []
         removed_pids = set()
         for pid, removed in results2:
@@ -369,33 +388,43 @@ def prune_transcripts_fast(
             for g in removed:
                 rows2.append((pid, int(g)))
 
-        # prepare df index view
-        df_idx2 = df.reset_index().rename(columns={"index": "_orig_index"})[["_orig_index", "cell_id_npmi_cons_p1", "_gene_idx"]]
+        # df index view: keys = (current partial label in out_col, _gene_idx).
+        df_idx2 = df.reset_index().rename(columns={"index": "_orig_index"})[["_orig_index", out_col, "_gene_idx"]]
         df_idx2["_gene_idx"] = df_idx2["_gene_idx"].astype("Int64")
 
         if rows2:
             map2 = pd.DataFrame(rows2, columns=["_pid_map", "_gene_idx_map"]).astype({"_gene_idx_map": "Int64"})
             merged2 = pd.merge(
-                df_idx2,
-                map2,
-                left_on=["cell_id_npmi_cons_p1", "_gene_idx"],
+                df_idx2, map2,
+                left_on=[out_col, "_gene_idx"],
                 right_on=["_pid_map", "_gene_idx_map"],
                 how="inner",
             )
 
             if not merged2.empty:
-                # these rows should be unassigned_from_partial
-                df.loc[merged2["_orig_index"], "cell_id_npmi_cons_p2"] = unassigned_id
-                df.loc[merged2["_orig_index"], "npmi_cons_p2_status"] = "unassigned_from_partial"
+                # demote: out_col → unassigned sentinel for these rows
+                df.loc[merged2["_orig_index"], out_col] = unassigned_id
+                if debug_stages and p2_status is not None:
+                    p2_status[merged2["_orig_index"].to_numpy()] = "unassigned_from_partial"
 
-        # Mark remaining rows for all partial pids as partial_p2 in one vectorized operation
-        if pids:
+        # Mark "still-partial" rows in pass 2 status (debug only). A row
+        # has pass-2 status = "partial_p2" iff its post-pass-1 label was
+        # a partial pid AND pass 2 did not demote it. The pre-pass-2
+        # label snapshot is `df["cell_id_npmi_cons_p1"]` (set above
+        # when debug_stages was True).
+        if debug_stages and p2_status is not None and pids:
             pids_set = set(pids)
-            mask_pid_any = df["cell_id_npmi_cons_p1"].isin(pids_set)
-            mask_unassigned = df["npmi_cons_p2_status"] == "unassigned_from_partial"
-            mask_keep_any = mask_pid_any & (~mask_unassigned)
-            if mask_keep_any.any():
-                df.loc[mask_keep_any, "npmi_cons_p2_status"] = "partial_p2"
+            pre_p2 = df["cell_id_npmi_cons_p1"].astype(str)
+            still_partial = pre_p2.isin(pids_set) & (df[out_col].astype(str) != unassigned_id)
+            kept_partial_idx = np.where(still_partial.to_numpy())[0]
+            if kept_partial_idx.size:
+                p2_status[kept_partial_idx] = "partial_p2"
+
+    if debug_stages:
+        # Snapshot pass-2 state under the legacy name. Mirrors `out_col`.
+        df["cell_id_npmi_cons_p2"] = df[out_col].copy()
+        if p2_status is not None:
+            df["npmi_cons_p2_status"] = p2_status
 
     df.drop(columns=["_cell_str", "_gene_idx"], inplace=True)
 
