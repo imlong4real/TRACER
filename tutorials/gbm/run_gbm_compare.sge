@@ -1,0 +1,68 @@
+#!/bin/bash
+#$ -S /bin/bash
+#$ -N tracer_gbm_compare
+#$ -cwd
+#$ -j y
+#$ -o logs/$JOB_NAME.$JOB_ID.log
+#$ -pe smp 4
+#$ -l h_rt=24:00:00
+#$ -l h_vmem=128G
+
+set -euo pipefail
+
+REPO=/mnt/storage/dept/medonc/beroukhim/youyun/BTC_GBM/code/TRACER
+SIF=$REPO/tracer_latest.sif
+MANIFEST=$REPO/tutorials/gbm/output/slide3_pieces/piece_run_manifest.csv
+NPMI=$REPO/tutorials/gbm/data/gbm_npmi.csv
+MERGED=$REPO/tutorials/gbm/output/slide3_tracer_merged.parquet
+OUTDIR=$REPO/tutorials/gbm/output/slide3_profile_comparison
+
+if [[ ! -f "$SIF" ]]; then
+    echo "Missing Apptainer container: $SIF" >&2
+    exit 1
+fi
+if [[ ! -f "$MANIFEST" ]]; then
+    echo "Missing piece run manifest: $MANIFEST" >&2
+    exit 1
+fi
+if [[ ! -f "$NPMI" ]]; then
+    echo "Missing NPMI file: $NPMI" >&2
+    exit 1
+fi
+
+mkdir -p "$REPO/logs" "$OUTDIR"
+
+source /mnt/storage/dept/medonc/beroukhim/youyun/util/miniforge3/etc/profile.d/conda.sh
+conda activate segmentation
+
+export PYTHONUNBUFFERED=1
+export OMP_NUM_THREADS=${NSLOTS:-4}
+export OPENBLAS_NUM_THREADS=${NSLOTS:-4}
+export MKL_NUM_THREADS=${NSLOTS:-4}
+export NUMEXPR_NUM_THREADS=${NSLOTS:-4}
+
+cd "$REPO"
+
+echo "=== Step 1: Merging 8 TRACER piece parquets ==="
+apptainer exec \
+    --bind "$REPO":/app \
+    --bind /mnt/storage:/mnt/storage \
+    --pwd /app \
+    "$SIF" \
+    python tutorials/gbm/merge_slide3_tracer.py \
+        --manifest /app/tutorials/gbm/output/slide3_pieces/piece_run_manifest.csv \
+        --tracer-dir /app/tutorials/gbm/output/slide3_tracer \
+        --output /app/tutorials/gbm/output/slide3_tracer_merged.parquet
+
+echo "=== Step 2: Comparing original vs TRACER-refined profiles ==="
+apptainer exec \
+    --bind "$REPO":/app \
+    --bind /mnt/storage:/mnt/storage \
+    --pwd /app \
+    "$SIF" \
+    python tutorials/gbm/compare_profiles.py \
+        --input /app/tutorials/gbm/output/slide3_tracer_merged.parquet \
+        --npmi /app/tutorials/gbm/data/gbm_npmi.csv \
+        --outdir /app/tutorials/gbm/output/slide3_profile_comparison
+
+echo "=== Done. Outputs written to $OUTDIR ==="

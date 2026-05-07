@@ -6,12 +6,17 @@ Compare original and TRACER-refined GBM whole-cell profiles.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 from pathlib import Path
 import sys
 
 
 REQUIRED_COLUMNS = {"feature_name", "cell_id", "cell_id_finetuned"}
 EXCLUDE_IDS = {"-1", "DROP", "nan"}
+
+
+def _log(msg: str) -> None:
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -45,6 +50,7 @@ def _run_scanpy_pipeline(adata, *, prefix: str, n_neighbors: int, leiden_resolut
     if adata.n_obs < 2 or adata.n_vars < 2:
         raise ValueError(f"{prefix}: not enough cells or genes after QC for Scanpy analysis.")
 
+    _log(f"  [{prefix}] normalize_total ...")
     adata.layers["counts"] = adata.X.copy()
     sc.pp.normalize_total(adata, inplace=True)
     sc.pp.log1p(adata)
@@ -53,20 +59,25 @@ def _run_scanpy_pipeline(adata, *, prefix: str, n_neighbors: int, leiden_resolut
     if n_pcs < 2:
         raise ValueError(f"{prefix}: PCA requires at least two components after QC.")
 
+    _log(f"  [{prefix}] PCA (n_comps={n_pcs}) ...")
     sc.pp.pca(adata, n_comps=n_pcs)
-    sc.pp.neighbors(
-        adata,
-        n_neighbors=min(n_neighbors, max(2, adata.n_obs - 1)),
-        n_pcs=min(n_pcs, adata.obsm["X_pca"].shape[1]),
-    )
+
+    n_neighbors_actual = min(n_neighbors, max(2, adata.n_obs - 1))
+    _log(f"  [{prefix}] neighbors (k={n_neighbors_actual}) ...")
+    sc.pp.neighbors(adata, n_neighbors=n_neighbors_actual, n_pcs=min(n_pcs, adata.obsm["X_pca"].shape[1]))
+
+    _log(f"  [{prefix}] UMAP ...")
     sc.tl.umap(adata)
 
     leiden_key = f"{prefix}_leiden"
+    _log(f"  [{prefix}] Leiden (resolution={leiden_resolution}) ...")
     sc.tl.leiden(adata, resolution=leiden_resolution, key_added=leiden_key)
     n_clusters = adata.obs[leiden_key].nunique()
+    _log(f"  [{prefix}] {n_clusters} clusters found")
     if n_clusters < 2:
         raise ValueError(f"{prefix}: Leiden returned fewer than two clusters; cannot rank markers.")
 
+    _log(f"  [{prefix}] rank_genes_groups (Wilcoxon) ...")
     sc.tl.rank_genes_groups(adata, groupby=leiden_key, method="wilcoxon")
     adata.uns["leiden_key"] = leiden_key
     return adata
@@ -123,21 +134,29 @@ def main() -> None:
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
-    df = pd.read_parquet(input_path)
+    _log(f"Reading parquet (columns: {sorted(REQUIRED_COLUMNS)}) from {input_path} ...")
+    df = pd.read_parquet(input_path, columns=list(REQUIRED_COLUMNS))
+    _log(f"Loaded {len(df):,} rows, {df.shape[1]} columns  "
+         f"(mem: {df.memory_usage(deep=True).sum() / 1e9:.2f} GB)")
+
     _validate_columns(df, REQUIRED_COLUMNS)
-    df = df.copy()
+    _log("Casting column dtypes to str ...")
     df["feature_name"] = df["feature_name"].astype(str).str.strip()
     df["cell_id"] = df["cell_id"].astype(str)
     df["cell_id_finetuned"] = df["cell_id_finetuned"].astype(str)
+    _log(f"After cast  (mem: {df.memory_usage(deep=True).sum() / 1e9:.2f} GB)")
 
     repo_root = Path(__file__).resolve().parents[2]
     sys.path.insert(0, str(repo_root / "src"))
 
     from tracer.metrics import compute_purity_and_conflict
-    from tracer.plot import is_whole_cell_id, make_adata
+    from tracer.plot import make_adata
 
+    _log(f"Reading NPMI from {npmi_path} ...")
     npmi_df = pd.read_csv(npmi_path)
+    _log(f"NPMI table: {len(npmi_df):,} rows")
 
+    _log("Building AnnData for original whole cells ...")
     adata_orig = make_adata(
         df,
         cell_col="cell_id",
@@ -145,9 +164,19 @@ def main() -> None:
         name="Original whole cells",
         exclude_ids=EXCLUDE_IDS,
     )
+    _log(f"adata_orig: {adata_orig.n_obs:,} cells × {adata_orig.n_vars:,} genes")
 
+    _log("Filtering to TRACER finetuned whole cells ...")
     finetuned = df["cell_id_finetuned"].astype(str)
-    df_ft_whole = df[is_whole_cell_id(finetuned)].copy()
+    exclude_mask = (
+        finetuned.isin(EXCLUDE_IDS)
+        | finetuned.str.startswith("UNASSIGNED")
+        | (finetuned.str.count("-") > 1)
+    )
+    df_ft_whole = df[~exclude_mask].copy()
+    _log(f"Finetuned whole-cell transcripts: {len(df_ft_whole):,}")
+
+    _log("Building AnnData for TRACER finetuned whole cells ...")
     adata_ft = make_adata(
         df_ft_whole,
         cell_col="cell_id_finetuned",
@@ -155,7 +184,9 @@ def main() -> None:
         name="TRACER finetuned whole cells",
         exclude_ids=EXCLUDE_IDS,
     )
+    _log(f"adata_ft: {adata_ft.n_obs:,} cells × {adata_ft.n_vars:,} genes")
 
+    _log("Computing purity/conflict for original cells ...")
     compute_purity_and_conflict(
         filtered_df=df,
         nucleus_npmi_long=npmi_df,
@@ -167,6 +198,7 @@ def main() -> None:
         conflict_percentile=80.0,
         exclude_ids=EXCLUDE_IDS,
     )
+    _log("Computing purity/conflict for finetuned cells ...")
     compute_purity_and_conflict(
         filtered_df=df_ft_whole,
         nucleus_npmi_long=npmi_df,
@@ -179,23 +211,20 @@ def main() -> None:
         exclude_ids=EXCLUDE_IDS,
     )
 
-    adata_orig = _filter_qc(
-        adata_orig,
-        min_transcripts=args.min_transcripts,
-        min_genes=args.min_genes,
-    )
-    adata_ft = _filter_qc(
-        adata_ft,
-        min_transcripts=args.min_transcripts,
-        min_genes=args.min_genes,
-    )
+    _log(f"QC filter: min_transcripts={args.min_transcripts}, min_genes={args.min_genes} ...")
+    adata_orig = _filter_qc(adata_orig, min_transcripts=args.min_transcripts, min_genes=args.min_genes)
+    adata_ft = _filter_qc(adata_ft, min_transcripts=args.min_transcripts, min_genes=args.min_genes)
+    _log(f"After QC — original: {adata_orig.n_obs:,} cells  |  finetuned: {adata_ft.n_obs:,} cells")
 
+    _log("Running Scanpy pipeline for original cells ...")
     adata_orig = _run_scanpy_pipeline(
         adata_orig,
         prefix="original",
         n_neighbors=args.n_neighbors,
         leiden_resolution=args.leiden_resolution,
     )
+
+    _log("Running Scanpy pipeline for finetuned cells ...")
     adata_ft = _run_scanpy_pipeline(
         adata_ft,
         prefix="finetuned",
@@ -203,32 +232,28 @@ def main() -> None:
         leiden_resolution=args.leiden_resolution,
     )
 
+    _log("Extracting top markers ...")
     orig_markers = _extract_top_markers(adata_orig, n_top=args.top_markers)
     ft_markers = _extract_top_markers(adata_ft, n_top=args.top_markers)
 
+    _log(f"Writing outputs to {outdir} ...")
     summary = pd.DataFrame(
         [
             _summary_row("original", adata_orig),
             _summary_row("finetuned", adata_ft),
         ]
     )
-
     summary.to_csv(outdir / "profile_summary.csv", index=False)
     orig_markers.to_csv(outdir / "original_top_markers.csv", index=False)
     ft_markers.to_csv(outdir / "finetuned_top_markers.csv", index=False)
 
-    _save_matrixplot(
-        adata_orig,
-        outdir / "original_marker_matrixplot.png",
-        n_genes=args.matrixplot_genes,
-    )
-    _save_matrixplot(
-        adata_ft,
-        outdir / "finetuned_marker_matrixplot.png",
-        n_genes=args.matrixplot_genes,
-    )
+    _log("Saving matrixplot for original cells ...")
+    _save_matrixplot(adata_orig, outdir / "original_marker_matrixplot.png", n_genes=args.matrixplot_genes)
 
-    print(f"Saved comparison outputs to: {outdir}")
+    _log("Saving matrixplot for finetuned cells ...")
+    _save_matrixplot(adata_ft, outdir / "finetuned_marker_matrixplot.png", n_genes=args.matrixplot_genes)
+
+    _log(f"Done. Saved comparison outputs to: {outdir}")
 
 
 if __name__ == "__main__":

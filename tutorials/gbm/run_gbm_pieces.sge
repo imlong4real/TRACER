@@ -1,0 +1,111 @@
+#!/bin/bash
+#$ -S /bin/bash
+#$ -N tracer_gbm_pieces
+#$ -cwd
+#$ -j y
+#$ -o logs/$JOB_NAME.$JOB_ID.$TASK_ID.log
+#$ -pe smp 4
+#$ -l h_rt=192:00:00
+#$ -l h_vmem=64G
+
+set -euo pipefail
+
+REPO=/mnt/storage/dept/medonc/beroukhim/youyun/BTC_GBM/code/TRACER
+SIF=$REPO/tracer_latest.sif
+MANIFEST=$REPO/tutorials/gbm/output/slide3_pieces/piece_run_manifest.csv
+NPMI=$REPO/tutorials/gbm/data/gbm_npmi.csv
+
+if [[ -z "${SGE_TASK_ID:-}" ]]; then
+    echo "SGE_TASK_ID is missing. Submit with qsub -t 1-N tutorials/gbm/run_gbm_pieces.sge" >&2
+    exit 1
+fi
+if [[ ! -f "$SIF" ]]; then
+    echo "Missing Apptainer container: $SIF" >&2
+    exit 1
+fi
+if [[ ! -f "$MANIFEST" ]]; then
+    echo "Missing piece run manifest: $MANIFEST" >&2
+    exit 1
+fi
+if [[ ! -f "$NPMI" ]]; then
+    echo "Missing NPMI file: $NPMI" >&2
+    exit 1
+fi
+
+ROW=$(
+    python3 - "$MANIFEST" "$SGE_TASK_ID" <<'PY'
+import csv
+import sys
+
+manifest_path, task_id = sys.argv[1], sys.argv[2]
+columns = [
+    "task_id",
+    "sample_name",
+    "component_id",
+    "assigned_label",
+    "slide_tissue_id",
+    "input_piece_parquet",
+    "output_tracer_parquet",
+    "rows_written",
+]
+
+with open(manifest_path, newline="") as handle:
+    reader = csv.DictReader(handle)
+    missing = set(columns) - set(reader.fieldnames or [])
+    if missing:
+        raise SystemExit(
+            "Manifest is missing columns: " + ", ".join(sorted(missing))
+        )
+    for row in reader:
+        if row["task_id"] == task_id:
+            print("\t".join(row[column] for column in columns))
+            break
+    else:
+        raise SystemExit("No manifest row found for task_id={}".format(task_id))
+PY
+)
+
+IFS=$'\t' read -r \
+    TASK_ID SAMPLE_NAME COMPONENT_ID ASSIGNED_LABEL \
+    SLIDE_TISSUE_ID INPUT_REL OUTPUT_REL ROWS_WRITTEN <<< "$ROW"
+
+if [[ "$INPUT_REL" = /* || "$OUTPUT_REL" = /* ]]; then
+    echo "Manifest paths must be repository-relative, got input=$INPUT_REL output=$OUTPUT_REL" >&2
+    exit 1
+fi
+
+INPUT=$REPO/$INPUT_REL
+OUTPUT=$REPO/$OUTPUT_REL
+
+if [[ ! -f "$INPUT" ]]; then
+    echo "Missing task input parquet for task $SGE_TASK_ID: $INPUT" >&2
+    exit 1
+fi
+
+mkdir -p "$REPO/logs" "$(dirname "$OUTPUT")"
+
+source /mnt/storage/dept/medonc/beroukhim/youyun/util/miniforge3/etc/profile.d/conda.sh
+conda activate segmentation
+
+export PYTHONUNBUFFERED=1
+export OMP_NUM_THREADS=${NSLOTS:-1}
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+
+cd "$REPO"
+
+echo "Running Slide 3 piece task $TASK_ID: $SAMPLE_NAME $COMPONENT_ID"
+echo "Label: $ASSIGNED_LABEL tissue=$SLIDE_TISSUE_ID rows=$ROWS_WRITTEN"
+echo "Input: $INPUT_REL"
+echo "Output: $OUTPUT_REL"
+
+apptainer exec \
+    --bind "$REPO":/app \
+    --bind /mnt/storage:/mnt/storage \
+    --pwd /app \
+    "$SIF" \
+    python tutorials/gbm/run_gbm.py \
+        --input "/app/$INPUT_REL" \
+        --npmi /app/tutorials/gbm/data/gbm_npmi.csv \
+        --output "/app/$OUTPUT_REL"
