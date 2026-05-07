@@ -44,6 +44,8 @@ dependencies = [
   # Drop once requires-python bumps to >=3.11.
   "tomli>=2.0; python_version < '3.11'",
   "igraph>=0.11",
+  "leidenalg>=0.8",
+  "umap-learn>=0.5",
 ]
 
 [project.optional-dependencies]
