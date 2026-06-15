@@ -30,6 +30,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--leiden-resolution", type=float, default=1.0, help="Leiden resolution.")
     parser.add_argument("--top-markers", type=int, default=10, help="Top markers to save per cluster.")
     parser.add_argument("--matrixplot-genes", type=int, default=5, help="Genes per cluster in matrixplots.")
+    parser.add_argument("--annotations-csv", default=None,
+                        help="adata_obs_annotated.csv with 'cell_id' and 'annotation' columns.")
     return parser.parse_args()
 
 
@@ -186,6 +188,18 @@ def main() -> None:
     )
     _log(f"adata_ft: {adata_ft.n_obs:,} cells × {adata_ft.n_vars:,} genes")
 
+    if args.annotations_csv:
+        _log(f"Reading cell type annotations from {args.annotations_csv} ...")
+        anno = pd.read_csv(args.annotations_csv, usecols=["cell_id", "annotation"])
+        # Keep only Patient4 entries, then strip the "-P4" suffix to match parquet cell IDs.
+        anno = anno[anno["cell_id"].str.endswith("-P4")].copy()
+        anno["cell_id"] = anno["cell_id"].str.replace(r"-P\d+$", "", regex=True)
+        anno_map = anno.set_index("cell_id")["annotation"]
+        adata_orig.obs["cell_type"] = pd.Index(adata_orig.obs_names).map(anno_map).values
+        adata_ft.obs["cell_type"] = pd.Index(adata_ft.obs_names).map(anno_map).values
+        _log(f"  orig annotated: {adata_orig.obs['cell_type'].notna().sum():,} / {adata_orig.n_obs:,}")
+        _log(f"  ft   annotated: {adata_ft.obs['cell_type'].notna().sum():,}  / {adata_ft.n_obs:,}")
+
     _log("Computing purity/conflict for original cells ...")
     compute_purity_and_conflict(
         filtered_df=df,
@@ -252,6 +266,14 @@ def main() -> None:
 
     _log("Saving matrixplot for finetuned cells ...")
     _save_matrixplot(adata_ft, outdir / "finetuned_marker_matrixplot.png", n_genes=args.matrixplot_genes)
+
+    for adata in (adata_orig, adata_ft):
+        adata.obs.drop(columns=["cell_purity_bool", "is_conflict"], errors="ignore", inplace=True)
+
+    _log("Saving adata_orig.h5ad ...")
+    adata_orig.write_h5ad(outdir / "adata_orig.h5ad")
+    _log("Saving adata_ft.h5ad ...")
+    adata_ft.write_h5ad(outdir / "adata_ft.h5ad")
 
     _log(f"Done. Saved comparison outputs to: {outdir}")
 

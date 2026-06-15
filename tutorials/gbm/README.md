@@ -83,8 +83,9 @@ This chains two steps automatically:
    `tutorials/gbm/output/slide3_tracer_merged.parquet`, tagging each row with
    `piece_id` and `slide_tissue_id` from the manifest.
 2. `compare_profiles.py` — builds original and TRACER-finetuned cell profiles,
-   computes purity/conflict scores, runs Leiden clustering, and writes outputs to
-   `tutorials/gbm/output/slide3_profile_comparison/`.
+   computes purity/conflict scores, runs Leiden clustering, joins Patient4 cell
+   type annotations from `Xenium_Annotations/adata_obs_annotated.csv`, and writes
+   outputs to `tutorials/gbm/output/slide3_profile_comparison/`.
 
 Review these outputs:
 
@@ -94,7 +95,40 @@ tutorials/gbm/output/slide3_profile_comparison/original_top_markers.csv
 tutorials/gbm/output/slide3_profile_comparison/finetuned_top_markers.csv
 tutorials/gbm/output/slide3_profile_comparison/original_marker_matrixplot.png
 tutorials/gbm/output/slide3_profile_comparison/finetuned_marker_matrixplot.png
+tutorials/gbm/output/slide3_profile_comparison/adata_orig.h5ad
+tutorials/gbm/output/slide3_profile_comparison/adata_ft.h5ad
 ```
+
+The two h5ad files contain the full AnnData objects (UMAP, PCA, Leiden clusters,
+purity/conflict scores, cell type annotations) ready for interactive exploration.
+
+## Interactive Analysis
+
+`explore_slide3.qmd` is a Quarto notebook for visualizing and analysing the
+h5ad outputs. Install dependencies once in the `segmentation` conda environment:
+
+```bash
+conda install -c conda-forge quarto seaborn
+```
+
+Then render from the repo root:
+
+```bash
+conda activate segmentation
+quarto render tutorials/gbm/explore_slide3.qmd --to html
+```
+
+The self-contained `tutorials/gbm/explore_slide3.html` can be copied locally and
+opened in any browser. The notebook covers:
+
+1. **TRACER impact per cell type** — retention rate, transcript count delta, and
+   purity/conflict distributions by cell type.
+2. **UMAP visualizations** — original and finetuned cells coloured by cell type,
+   purity, conflict, and Leiden cluster.
+3. **Analysis A — cleaned out vs lumped in** — per-cell-type log2FC comparing
+   mean raw expression before and after TRACER refinement.
+4. **Analysis B — paired purity/conflict comparison** — Wilcoxon signed-rank
+   tests and scatter plots for matched whole cells.
 
 ## Notes
 

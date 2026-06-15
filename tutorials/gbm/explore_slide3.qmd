@@ -1,0 +1,507 @@
+---
+title: "GBM Slide 3 — TRACER segmentation analysis"
+format:
+  html:
+    toc: true
+    embed-resources: true
+execute:
+  echo: true
+  warning: false
+jupyter: python3
+---
+
+## Setup
+
+```{python}
+from pathlib import Path
+import numpy as np
+import pandas as pd
+import scanpy as sc
+import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy.stats import wilcoxon
+
+sc.settings.verbosity = 1
+sc.settings.set_figure_params(dpi=100, frameon=False)
+
+OUTDIR = Path("output/slide3_profile_comparison")
+adata_orig = sc.read_h5ad(OUTDIR / "adata_orig.h5ad")
+adata_ft   = sc.read_h5ad(OUTDIR / "adata_ft.h5ad")
+
+print("original :", adata_orig.n_obs, "cells ×", adata_orig.n_vars, "genes")
+print("finetuned:", adata_ft.n_obs,   "cells ×", adata_ft.n_vars,   "genes")
+print("orig obs columns :", list(adata_orig.obs.columns))
+```
+
+## Section 1 — TRACER impact per cell type
+
+### Retention rate
+
+Cells absent from `adata_ft` were split into TRACER-partial fragments and excluded from the
+whole-cell analysis. Retention rate = fraction of original cells that survived as whole cells.
+
+```{python}
+common = adata_orig.obs_names.intersection(adata_ft.obs_names)
+print(f"Retained whole cells: {len(common):,} / {adata_orig.n_obs:,} "
+      f"({100*len(common)/adata_orig.n_obs:.1f}%)")
+
+has_ct = "cell_type" in adata_orig.obs.columns
+
+if has_ct:
+    orig_counts = adata_orig.obs["cell_type"].value_counts()
+    retained_counts = adata_orig[common].obs["cell_type"].value_counts()
+    retention_df = pd.DataFrame({
+        "original": orig_counts,
+        "retained": retained_counts,
+    }).fillna(0).astype(int)
+    retention_df["retention_rate"] = retention_df["retained"] / retention_df["original"]
+    retention_df = retention_df.sort_values("original", ascending=False)
+
+    fig, ax = plt.subplots(figsize=(10, 7))
+    ax.barh(retention_df.index, retention_df["retention_rate"], color="steelblue")
+    ax.axvline(retention_df["retention_rate"].mean(), color="red", linestyle="--",
+               label=f"mean {retention_df['retention_rate'].mean():.2f}")
+    ax.set_xlabel("Fraction of original cells retained as whole")
+    ax.set_title("TRACER whole-cell retention rate by cell type")
+    ax.legend()
+    plt.tight_layout()
+    plt.show()
+
+    print(retention_df.to_string())
+else:
+    print("No cell_type column — skipping per-cell-type retention plot.")
+    print("Run compare_profiles.py with --annotations-csv to add cell type labels.")
+```
+
+### Transcript count change (retained cells)
+
+Positive delta = TRACER added transcripts (absorbed from neighbors).
+Negative delta = TRACER removed transcripts (reassigned to neighbors or dropped).
+
+```{python}
+paired_n = pd.DataFrame({
+    "orig_n":  adata_orig[common].obs["n_transcripts"].values,
+    "ft_n":    adata_ft[common].obs["n_transcripts"].values,
+}, index=common)
+paired_n["delta"]     = paired_n["ft_n"] - paired_n["orig_n"]
+paired_n["pct_delta"] = (paired_n["delta"] / paired_n["orig_n"].clip(lower=1)) * 100.0
+
+print(f"Δ counts — median: {paired_n['delta'].median():.1f}, "
+      f"mean: {paired_n['delta'].mean():.1f}")
+print(f"%Δ counts — median: {paired_n['pct_delta'].median():.1f}%, "
+      f"mean: {paired_n['pct_delta'].mean():.1f}%  "
+      f"(negative = pruned, positive = absorbed)")
+
+if has_ct:
+    paired_n["cell_type"] = adata_orig[common].obs["cell_type"].values
+    ct_order = (
+        paired_n.groupby("cell_type")["delta"]
+        .median()
+        .sort_values()
+        .index.tolist()
+    )
+    fig, axes = plt.subplots(2, 1, figsize=(11, 9), sharex=True)
+    sns.violinplot(data=paired_n, x="cell_type", y="delta", order=ct_order,
+                   inner="quartile", ax=axes[0], cut=0)
+    axes[0].axhline(0, color="red", linestyle="--")
+    axes[0].set_ylabel("Δ transcripts (count)")
+    axes[0].set_title("TRACER transcript gain/loss by cell type — absolute")
+    axes[0].set_xlabel("")
+
+    sns.violinplot(data=paired_n, x="cell_type", y="pct_delta", order=ct_order,
+                   inner="quartile", ax=axes[1], cut=0)
+    axes[1].axhline(0, color="red", linestyle="--")
+    axes[1].set_ylabel("%Δ transcripts (per cell)")
+    axes[1].set_title("TRACER transcript gain/loss by cell type — percent")
+    axes[1].set_ylim(-100, max(50, paired_n["pct_delta"].quantile(0.99)))
+    axes[1].set_xticklabels(axes[1].get_xticklabels(), rotation=45, ha="right")
+    plt.tight_layout()
+    plt.show()
+
+    # Summary table per cell type
+    summary = (
+        paired_n.groupby("cell_type")
+        .agg(n_cells=("delta", "size"),
+             median_delta=("delta", "median"),
+             median_pct=("pct_delta", "median"),
+             mean_pct=("pct_delta", "mean"))
+        .sort_values("median_pct")
+        .round(1)
+    )
+    print("\nMedian % transcript change per cell, by cell type:")
+    print(summary.to_string())
+else:
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+    axes[0].hist(paired_n["delta"].clip(-200, 200), bins=80, color="steelblue")
+    axes[0].axvline(0, color="red", linestyle="--")
+    axes[0].set_xlabel("Δ transcript count (TRACER − original)")
+    axes[1].hist(paired_n["pct_delta"].clip(-100, 100), bins=80, color="steelblue")
+    axes[1].axvline(0, color="red", linestyle="--")
+    axes[1].set_xlabel("%Δ transcript count (per cell)")
+    plt.tight_layout()
+    plt.show()
+```
+
+### Purity and conflict distributions by cell type
+
+```{python}
+if has_ct:
+    for metric, label in [("cell_purity", "Purity"), ("conflict_score", "Conflict")]:
+        fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharey=True)
+        for ax, (adata, title) in zip(
+            axes, [(adata_orig, "Original"), (adata_ft, "TRACER finetuned")]
+        ):
+            obs = adata.obs[["cell_type", metric]].dropna()
+            ct_order = (
+                obs.groupby("cell_type")[metric]
+                .median()
+                .sort_values(ascending=False)
+                .index.tolist()
+            )
+            sns.boxplot(data=obs, x="cell_type", y=metric, order=ct_order, ax=ax)
+            ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha="right")
+            ax.set_title(f"{label} — {title}")
+        plt.tight_layout()
+        plt.show()
+```
+
+## Section 2 — UMAP visualizations
+
+```{python}
+def make_distinct_palette(n):
+    base = list(plt.cm.tab20.colors) + list(plt.cm.tab20b.colors) + list(plt.cm.tab20c.colors)
+    if n <= len(base):
+        return base[:n]
+    return [plt.cm.hsv(i / n) for i in range(n)]
+
+if has_ct:
+    for adata in (adata_orig, adata_ft):
+        adata.obs["cell_type_coarse"] = adata.obs["cell_type"].str.split("_").str[0]
+
+    coarse_cats = sorted(adata_orig.obs["cell_type_coarse"].dropna().unique())
+    fine_cats   = sorted(adata_orig.obs["cell_type"].dropna().unique())
+    coarse_pal  = make_distinct_palette(len(coarse_cats))
+    fine_pal    = make_distinct_palette(len(fine_cats))
+
+    sc.pl.umap(adata_orig, color="cell_type_coarse", palette=coarse_pal,
+               title="Original — cell type (coarse)", legend_loc="right margin")
+    sc.pl.umap(adata_orig, color="cell_type", palette=fine_pal,
+               title="Original — cell type (detailed)", legend_loc="right margin")
+    sc.pl.umap(adata_ft,   color="cell_type_coarse", palette=coarse_pal,
+               title="TRACER finetuned — cell type (coarse)", legend_loc="right margin")
+    sc.pl.umap(adata_ft,   color="cell_type", palette=fine_pal,
+               title="TRACER finetuned — cell type (detailed)", legend_loc="right margin")
+else:
+    sc.pl.umap(adata_orig, color=adata_orig.uns.get("leiden_key", "original_leiden"),
+               title="Original — Leiden")
+    sc.pl.umap(adata_ft,   color=adata_ft.uns.get("leiden_key", "finetuned_leiden"),
+               title="TRACER finetuned — Leiden")
+```
+
+## Section 3 — Analysis A: MA plots of TRACER-induced expression changes
+
+For each cell type, Mann-Whitney U test per gene (TRACER finetuned vs original cells),
+FDR-adjusted with Benjamini-Hochberg. With ~10k–100k cells per type, p-values underflow
+to ~0 for hundreds of genes, so FDR carries no useful ranking signal — we use it only as
+a filter. The plot is therefore an **MA plot**: x = log10 mean expression,
+y = log2FC. Each gene gets a unique x (its mean expression), so labels spread out instead
+of stacking. Red = enriched (lumped in), blue = depleted (cleaned out). Significant genes
+(FDR < 0.05 AND |log2FC| > 0.5) are labelled, picked by |log2FC|.
+
+```{python}
+from scipy.stats import mannwhitneyu
+from statsmodels.stats.multitest import multipletests
+
+try:
+    from adjustText import adjust_text  # noqa: F401
+    _HAS_ADJUSTTEXT = True
+except ImportError:
+    _HAS_ADJUSTTEXT = False
+    print("Tip: `pip install adjustText` for collision-free gene labels.")
+
+FDR_THRESH   = 0.05
+LFC_THRESH   = 0.5
+N_LABEL      = 6        # max genes to label per direction per panel
+UP_COLOR     = "#d62728"
+DOWN_COLOR   = "#2b6cb0"
+NS_COLOR     = "#d9d9d9"
+
+# Labelling rule
+# --------------
+# 1. A gene is "significant" if fdr < FDR_THRESH AND |log2FC| > LFC_THRESH.
+# 2. Among significant genes, split by direction (up vs down).
+# 3. Rank each direction by `|log2FC| * log10(mean_count + 1)` — this combines
+#    fold-change magnitude with expression abundance, so we don't always pick the
+#    lowest-expression corner of the trumpet. Top N_LABEL per direction are labeled.
+# 4. If adjustText is installed, labels are repelled from each other and from
+#    points; otherwise a simple fixed-offset annotation is used.
+
+def ma_plot(df, ct, ax, x_lim=None, y_lim=None):
+    df = df.copy()
+    df["A"] = np.log10(((df["orig_mean"] + df["ft_mean"]) / 2.0) + 1.0)
+
+    sig  = (df["fdr"] < FDR_THRESH) & (df["log2FC"].abs() > LFC_THRESH)
+    up   = sig & (df["log2FC"] > 0)
+    down = sig & (df["log2FC"] < 0)
+
+    # Plot non-significant first so significant points sit on top.
+    ax.scatter(df.loc[~sig, "A"], df.loc[~sig, "log2FC"],
+               c=NS_COLOR, s=6, alpha=0.55, linewidths=0)
+    ax.scatter(df.loc[up,   "A"], df.loc[up,   "log2FC"],
+               c=UP_COLOR,  s=14, alpha=0.85, linewidths=0)
+    ax.scatter(df.loc[down, "A"], df.loc[down, "log2FC"],
+               c=DOWN_COLOR, s=14, alpha=0.85, linewidths=0)
+
+    ax.axhline( LFC_THRESH, color="grey", linestyle=":", linewidth=0.6, alpha=0.7)
+    ax.axhline(-LFC_THRESH, color="grey", linestyle=":", linewidth=0.6, alpha=0.7)
+    ax.axhline(0, color="black", linewidth=0.3, alpha=0.5)
+
+    for spine in ("top", "right"):
+        ax.spines[spine].set_visible(False)
+    ax.tick_params(axis="both", labelsize=8)
+    ax.grid(True, linestyle="-", linewidth=0.3, alpha=0.25)
+    ax.set_axisbelow(True)
+
+    if x_lim is not None:
+        ax.set_xlim(*x_lim)
+    if y_lim is not None:
+        ax.set_ylim(*y_lim)
+
+    ax.set_xlabel("log10(mean count + 1)", fontsize=9)
+    ax.set_ylabel("log2FC (TRACER / original)", fontsize=9)
+    ax.set_title(f"{ct}   (↑{int(up.sum())}  ↓{int(down.sum())})",
+                 fontsize=10, fontweight="bold", loc="left")
+
+    # Compose ranking score: |log2FC| × log10(mean_count + 1)
+    # → favours genes that combine fold-change magnitude with expression abundance,
+    #   so picks spread across the x-range instead of clustering at A≈0.
+    df["label_score"] = df["log2FC"].abs() * df["A"]
+
+    texts = []
+    for direction, color, mask in [(1, UP_COLOR, up), (-1, DOWN_COLOR, down)]:
+        if not mask.any():
+            continue
+        top = df.loc[mask].nlargest(N_LABEL, "label_score")
+        for _, row in top.iterrows():
+            if _HAS_ADJUSTTEXT:
+                txt = ax.text(
+                    row["A"], row["log2FC"], row["gene"],
+                    fontsize=7, color=color, fontweight="semibold",
+                    bbox=dict(boxstyle="round,pad=0.18", facecolor="white",
+                              edgecolor="none", alpha=0.85),
+                )
+                texts.append(txt)
+            else:
+                ax.annotate(
+                    row["gene"], (row["A"], row["log2FC"]),
+                    fontsize=7, color=color, fontweight="semibold",
+                    xytext=(4, 3), textcoords="offset points",
+                    bbox=dict(boxstyle="round,pad=0.18", facecolor="white",
+                              edgecolor="none", alpha=0.75),
+                )
+
+    if _HAS_ADJUSTTEXT and texts:
+        adjust_text(
+            texts, ax=ax,
+            arrowprops=dict(arrowstyle="-", color="grey", lw=0.4, alpha=0.7),
+            expand_points=(1.4, 1.4),
+            expand_text=(1.2, 1.4),
+            force_points=0.4,
+            force_text=0.6,
+            only_move={"points": "y", "text": "xy"},
+        )
+```
+
+```{python}
+if not has_ct:
+    print("Skipping Analysis A — no cell_type column in adata.obs.")
+else:
+    common_genes = adata_orig.var_names.intersection(adata_ft.var_names)
+    ao = adata_orig[:, common_genes]
+    af = adata_ft[:, common_genes]
+
+    cell_types = sorted(ao.obs["cell_type"].dropna().unique())
+    de_results = []
+
+    for ct in cell_types:
+        mask_o = ao.obs["cell_type"] == ct
+        mask_f = af.obs["cell_type"] == ct
+        n_o, n_f = mask_o.sum(), mask_f.sum()
+        if n_o < 10 or n_f < 10:
+            continue
+
+        X_o = np.array(ao[mask_o].layers["counts"].todense())
+        X_f = np.array(af[mask_f].layers["counts"].todense())
+
+        orig_mean = X_o.mean(axis=0)
+        ft_mean   = X_f.mean(axis=0)
+        lfc = np.log2((ft_mean + 0.1) / (orig_mean + 0.1))
+
+        pvals = np.array([
+            mannwhitneyu(X_f[:, g], X_o[:, g], alternative="two-sided").pvalue
+            for g in range(X_o.shape[1])
+        ])
+        _, fdr, _, _ = multipletests(pvals, method="fdr_bh")
+
+        de_results.append(pd.DataFrame({
+            "gene":          common_genes,
+            "log2FC":        lfc,
+            "pval":          pvals,
+            "fdr":           fdr,
+            "neg_log10_fdr": -np.log10(fdr + 1e-300),
+            "orig_mean":     orig_mean,
+            "ft_mean":       ft_mean,
+            "cell_type":     ct,
+            "n_orig":        n_o,
+            "n_ft":          n_f,
+        }))
+
+    de_all = pd.concat(de_results, ignore_index=True)
+    de_all.to_csv(OUTDIR / "celltype_de.csv", index=False)
+    print(f"DE table: {len(de_all):,} rows across {len(de_results)} cell types")
+```
+
+```{python}
+if has_ct and "de_all" in dir():
+    cts = sorted(de_all["cell_type"].unique())
+    ncols = 3
+    nrows = int(np.ceil(len(cts) / ncols))
+
+    # Shared axis ranges so panels are visually comparable.
+    A_all = np.log10(((de_all["orig_mean"] + de_all["ft_mean"]) / 2.0) + 1.0)
+    x_lim = (float(A_all.min()) - 0.1, float(A_all.max()) + 0.2)
+
+    y_max = float(de_all["log2FC"].abs().quantile(0.995))
+    y_lim = (-y_max - 0.5, y_max + 0.5)
+
+    fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 4.6, nrows * 4.0),
+                              sharex=True, sharey=True)
+    axes = axes.flatten()
+
+    for i, ct in enumerate(cts):
+        ma_plot(de_all[de_all["cell_type"] == ct].reset_index(drop=True),
+                ct, axes[i], x_lim=x_lim, y_lim=y_lim)
+
+    for j in range(len(cts), len(axes)):
+        axes[j].set_visible(False)
+
+    # Single legend for the whole figure.
+    legend_handles = [
+        plt.Line2D([0], [0], marker="o", color="w", markerfacecolor=UP_COLOR,
+                   markersize=7, label=f"Up in TRACER  (FDR<{FDR_THRESH}, |log2FC|>{LFC_THRESH})"),
+        plt.Line2D([0], [0], marker="o", color="w", markerfacecolor=DOWN_COLOR,
+                   markersize=7, label="Down in TRACER"),
+        plt.Line2D([0], [0], marker="o", color="w", markerfacecolor=NS_COLOR,
+                   markersize=7, label="n.s."),
+    ]
+    fig.legend(handles=legend_handles, loc="lower center", ncol=3,
+               frameon=False, bbox_to_anchor=(0.5, -0.01), fontsize=10)
+    fig.suptitle("TRACER expression changes by cell type (finetuned vs original)",
+                 y=1.005, fontsize=14, fontweight="bold")
+    plt.tight_layout(rect=(0, 0.02, 1, 1))
+    plt.savefig(OUTDIR / "ma_by_celltype.png", dpi=150, bbox_inches="tight",
+                facecolor="white")
+    plt.show()
+```
+
+## Section 4 — Analysis B: paired purity / conflict comparison
+
+Only cells retained as whole cells in both adatas are compared.
+
+```{python}
+paired = pd.DataFrame({
+    "orig_purity":   adata_orig[common].obs["cell_purity"].values,
+    "ft_purity":     adata_ft[common].obs["cell_purity"].values,
+    "orig_conflict": adata_orig[common].obs["conflict_score"].values,
+    "ft_conflict":   adata_ft[common].obs["conflict_score"].values,
+}, index=common)
+if has_ct:
+    paired["cell_type"] = adata_orig[common].obs["cell_type"].values
+
+paired.to_csv(OUTDIR / "paired_purity_conflict.csv")
+print(f"Paired cells: {len(paired):,}")
+print(paired[["orig_purity", "ft_purity", "orig_conflict", "ft_conflict"]].describe().round(3))
+```
+
+### Aggregate purity and conflict change
+
+```{python}
+stat_p, pval_p = wilcoxon(
+    paired["ft_purity"].dropna(),
+    paired["orig_purity"].loc[paired["ft_purity"].notna()],
+    alternative="greater",
+)
+stat_c, pval_c = wilcoxon(
+    paired["ft_conflict"].dropna(),
+    paired["orig_conflict"].loc[paired["ft_conflict"].notna()],
+    alternative="less",
+)
+print(f"Purity   Wilcoxon (ft > orig): stat={stat_p:.1f}, p={pval_p:.2e}")
+print(f"Conflict Wilcoxon (ft < orig): stat={stat_c:.1f}, p={pval_c:.2e}")
+
+fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+for ax, (col_o, col_f, label) in zip(axes, [
+    ("orig_purity",   "ft_purity",   "Purity"),
+    ("orig_conflict", "ft_conflict", "Conflict"),
+]):
+    ax.scatter(paired[col_o], paired[col_f], alpha=0.05, s=1, color="steelblue")
+    lim = [min(paired[col_o].min(), paired[col_f].min()),
+           max(paired[col_o].max(), paired[col_f].max())]
+    ax.plot(lim, lim, "r--", linewidth=1)
+    ax.set_xlabel(f"Original {label}")
+    ax.set_ylabel(f"TRACER {label}")
+    ax.set_title(f"Paired {label} comparison (n={len(paired):,})")
+plt.tight_layout()
+plt.show()
+```
+
+### Per-cell-type paired comparison
+
+```{python}
+if has_ct:
+    ct_order = (
+        paired.groupby("cell_type")["ft_purity"]
+        .median()
+        .sort_values(ascending=False)
+        .index.tolist()
+    )
+
+    for col_o, col_f, label in [
+        ("orig_purity",   "ft_purity",   "Purity"),
+        ("orig_conflict", "ft_conflict", "Conflict"),
+    ]:
+        df_melt = pd.concat([
+            paired[["cell_type", col_o]].rename(columns={col_o: "value"}).assign(source="Original"),
+            paired[["cell_type", col_f]].rename(columns={col_f: "value"}).assign(source="TRACER"),
+        ]).reset_index(drop=True)
+        fig, ax = plt.subplots(figsize=(12, 5))
+        sns.boxplot(data=df_melt, x="cell_type", y="value", hue="source",
+                    order=ct_order, ax=ax)
+        ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha="right")
+        ax.set_ylabel(label)
+        ax.set_title(f"Paired {label}: Original vs TRACER by cell type")
+        plt.tight_layout()
+        plt.show()
+
+    # Per-cell-type Wilcoxon test summary
+    rows = []
+    for ct in ct_order:
+        sub = paired[paired["cell_type"] == ct].dropna(subset=["orig_purity", "ft_purity"])
+        if len(sub) < 10:
+            continue
+        _, p_pur = wilcoxon(sub["ft_purity"], sub["orig_purity"], alternative="greater")
+        _, p_con = wilcoxon(sub["ft_conflict"], sub["orig_conflict"], alternative="less")
+        rows.append({
+            "cell_type": ct,
+            "n_cells": len(sub),
+            "orig_purity_median":   sub["orig_purity"].median(),
+            "ft_purity_median":     sub["ft_purity"].median(),
+            "purity_wilcoxon_p":    p_pur,
+            "orig_conflict_median": sub["orig_conflict"].median(),
+            "ft_conflict_median":   sub["ft_conflict"].median(),
+            "conflict_wilcoxon_p":  p_con,
+        })
+    stats_df = pd.DataFrame(rows)
+    stats_df.to_csv(OUTDIR / "paired_stats_by_celltype.csv", index=False)
+    print(stats_df.to_string(index=False))
+```
