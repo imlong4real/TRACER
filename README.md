@@ -1,7 +1,3 @@
-<p align="center">
-  <img src="assets/images/logo.png" alt="TRACER" width="280"/>
-</p>
-
 <h1 align="center">TRACER</h1>
 <p align="center"><b>Reconstructing biologically coherent cellular profiles from spatial transcriptomics</b></p>
 
