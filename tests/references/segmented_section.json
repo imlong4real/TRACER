@@ -1,0 +1,110 @@
+{
+  "ami_vs_truth": 0.9768,
+  "ari_vs_truth": 0.9734,
+  "coverage_pct": 84.82,
+  "n_cells": 7,
+  "n_clipped_cells": 7,
+  "n_components": 0,
+  "n_partials": 0,
+  "n_unassigned_tx": 17,
+  "stage_progression": [
+    {
+      "n_cells": 8,
+      "n_components": 0,
+      "n_partials": 0,
+      "n_unassigned_tx": 0,
+      "stage": "input"
+    },
+    {
+      "n_cells": 8,
+      "n_components": 0,
+      "n_partials": 6,
+      "n_unassigned_tx": 6,
+      "stage": "Prune"
+    },
+    {
+      "n_cells": 8,
+      "n_components": 0,
+      "n_partials": 6,
+      "n_unassigned_tx": 6,
+      "stage": "Split-Phase1"
+    },
+    {
+      "n_cells": 7,
+      "n_components": 0,
+      "n_partials": 1,
+      "n_unassigned_tx": 14,
+      "stage": "Phase1-QC"
+    },
+    {
+      "n_cells": 7,
+      "n_components": 0,
+      "n_partials": 1,
+      "n_unassigned_tx": 14,
+      "stage": "Phase1-Maha-Remerge"
+    },
+    {
+      "n_cells": 7,
+      "n_components": 0,
+      "n_partials": 2,
+      "n_unassigned_tx": 14,
+      "stage": "Split"
+    },
+    {
+      "n_cells": 7,
+      "n_components": 0,
+      "n_partials": 2,
+      "n_unassigned_tx": 13,
+      "stage": "Rescue"
+    },
+    {
+      "n_cells": 7,
+      "n_components": 0,
+      "n_partials": 3,
+      "n_unassigned_tx": 10,
+      "stage": "Group"
+    },
+    {
+      "n_cells": 7,
+      "n_components": 0,
+      "n_partials": 2,
+      "n_unassigned_tx": 11,
+      "stage": "Mid-QC"
+    },
+    {
+      "n_cells": 7,
+      "n_components": 0,
+      "n_partials": 2,
+      "n_unassigned_tx": 11,
+      "stage": "Post-Group Rescue"
+    },
+    {
+      "n_cells": 7,
+      "n_components": 0,
+      "n_partials": 2,
+      "n_unassigned_tx": 11,
+      "stage": "Stitch"
+    },
+    {
+      "n_cells": 7,
+      "n_components": 0,
+      "n_partials": 0,
+      "n_unassigned_tx": 17,
+      "stage": "Demote"
+    },
+    {
+      "n_cells": 7,
+      "n_components": 0,
+      "n_partials": 0,
+      "n_unassigned_tx": 17,
+      "stage": "Final Rescue"
+    },
+    {
+      "n_cells": 7,
+      "n_components": 0,
+      "n_partials": 0,
+      "n_unassigned_tx": 17,
+      "stage": "Finalize"
+    }
+  ]
+}

@@ -1,0 +1,389 @@
+# TRACER pipeline defaults — production Xenium 3D config.
+#
+# This file mirrors the dataclass defaults in `src/tracer/config.py`.
+# Values here are loaded by `load_config()` as the base layer; platform
+# presets and user overrides patch keys on top.
+#
+# Tests verify defaults.toml values match the dataclass defaults — keep
+# the two in lock-step.
+
+# ---------------------------------------------------------------------
+# Phase 1 — nuclear-anchored greedy bad-edge prune + admission.
+# ---------------------------------------------------------------------
+[phase1]
+# PMI cutoff for "compatible" gene pairs in the bad-edge graph.
+# 2026-05-13: raised 0.05 → 0.2 (= 1.22× chance in natural-log PMI space).
+# Validated on PDAC+lung full-tissue: cell C mean 0.80→0.93, p10 0.57→0.82.
+pmi_threshold = 0.2
+
+# Minimum mean-PMI within a Phase-1c sub-seed for it to be accepted.
+# Rejects degenerate small seeds (e.g. a 4-gene cluster carried by a
+# single noisy-PMI edge).
+seed_coherence_floor = 0.10
+
+# Tx-weighted greedy prune: score[i] = sum_j(bad[i,j] * n_tx[j]) with
+# the safeguard "skip if n_tx[i] > score[i]". Prevents a single
+# multi-tx gene from being killed by a peer module.
+tx_weighted_prune = true
+
+# Restrict Phase-1b/1c admission to nuclear tx; cytoplasmic tx are
+# left for Rescue. Cuts Phase-1 cost ~50% on segmented data.
+nuclear_only_admit = true
+
+# Phase 1b admission gate. "hybrid" (default) = real-signal +
+# unanimous-min + percentile-aggregator gate (mirrors Rescue) — catches
+# cross-lineage dilution admits the mean test misses (e.g. EPCAM into a
+# macrophage-leaning seed). "mean" = legacy (mean-PMI vs pmi_threshold).
+# "min" = veto on any strongly-negative seed pair.
+veto_mode = "hybrid"
+mean_admit_threshold = 0.2
+min_admit_threshold = 0.0
+aggregator_percentile = 25.0
+real_signal_threshold = 0.05
+neg_npmi_threshold = -0.2
+
+# Phase-1-time Mahalanobis-gated remerge. Sibling of
+# stitch.mahalanobis_d_rescue, applied between Phase1-QC and Rescue.
+# Each candidate entity pair sharing a bin neighborhood is unioned via
+# DSU when:
+#     maha_remerge_delta_c_floor < ΔC < 0   AND   D ≤ maha_remerge_d
+# Comment the line below (or set to "off" via code) to disable.
+maha_remerge_d = 1.0
+maha_remerge_delta_c_floor = -0.2
+
+
+# ---------------------------------------------------------------------
+# Split-Phase1 — z-gap-based splitter for Phase-1 entities.
+# (No-op when the z column is absent; auto-detected at runtime.)
+# ---------------------------------------------------------------------
+[split_phase1]
+# Sort tx of each entity by z; if a consecutive Δz exceeds this (µm),
+# split into two sub-entities at that gap.
+dz_threshold_um = 2.0
+
+# Minimum tx count for a split-out sub-cluster to be retained.
+min_tx = 1
+
+# Entity below this size is not split (keeps singletons / pairs intact).
+min_entity_size = 2
+
+
+# ---------------------------------------------------------------------
+# Phase1-QC — post-split QC; demotes any Phase-1 entity smaller than
+# `min_tx`. Catches singleton seeds on sparse cells.
+# ---------------------------------------------------------------------
+[phase1_qc]
+min_tx = 3
+
+
+# ---------------------------------------------------------------------
+# Phase1-Rerank — opt-in; within each parent cell, re-rank depth-1
+# entities by nuclear-tx count and promote the largest to the main
+# `{cell_id}` label. Defuses Phase 1's greedy 1a→1b→1c privilege.
+# Default off; flip after a bench shows demonstrable cell-count
+# recovery without coherence regression.
+# ---------------------------------------------------------------------
+[phase1_rerank]
+# 2026-05-13: enabled flipped false → true after PDAC + lung cross-tissue
+# validation (89%/67% retention; cell C mean 0.93 with strict-PMI).
+enabled = true
+margin_tx = 1
+
+
+# ---------------------------------------------------------------------
+# Phase 1 post-1c nuclear reassignment (Gap-B fix).
+# Nuclear tx weakly admitted to the main seed but strong-fit to a 1c
+# partial sub-seed get moved to the partial. Default-on since 2026-05-11
+# (Cython kernel landed 2026-05-13).
+# ---------------------------------------------------------------------
+[phase1_reassign]
+enabled = true
+margin = 0.05
+
+# ---------------------------------------------------------------------
+# Demote — drop entities smaller than min_size after Stitch.
+# ---------------------------------------------------------------------
+[demote]
+min_size = 5
+
+
+# ---------------------------------------------------------------------
+# Rescue — spatial-prior reassignment of Phase-1 unassigned tx.
+# Used by both the main 3-pass Rescue and the post-Demote Final Rescue.
+# ---------------------------------------------------------------------
+[rescue]
+# Veto mode: "min" | "mean" | "hybrid".
+#   min:    legacy — reject if any g' in E has PMI(g, g') ≤ neg_threshold.
+#   mean:   reject if mean PMI(g, E.genes \ {g}) ≤ mean_admit_threshold.
+#   hybrid: g ∈ E.genes → admit; else min > min_admit → admit;
+#           else mean > mean_admit → admit; else reject.
+veto_mode = "hybrid"
+
+# Hybrid: unanimous-positive fast-pass cutoff. Every g' in E with
+# finite PMI(g, g') > this → admit without computing the mean.
+min_admit_threshold = 0.0
+
+# Hybrid/mean: aggregate-positive slow-pass cutoff. Admit if mean PMI
+# exceeds this. Setting > 0 demands real evidence (not just "absence
+# of negative evidence") for cross-gene admission.
+mean_admit_threshold = 0.5
+
+# Min-mode veto cutoff and cluster-guard threshold.
+# Paired with phase1.pmi_threshold (both 0.2 on PMI scale).
+neg_threshold = -0.2
+
+# Iterative rescue cap. Pipeline early-stops if a pass admits zero tx.
+max_passes = 3
+
+# Spatial-gate xy bin size in µm. The 9-cell Moore neighborhood at
+# this scale defines the candidate-tx pool; candidates outside the
+# z_bound are dropped.
+bin_size_um = 2.0
+
+# Maximum |Δz| from unassigned tx to candidate tx in µm.
+# Omitted (or set null) → use bin_size_um * sqrt(2), matching the
+# implicit xy reach of the bin neighborhood.
+# z_bound_um = 2.83
+
+# Cluster-guard: if an unassigned tx has ≥ N same-bin same-gene peers,
+# shield it from Rescue so Stage 2 (Group) can form an UNASSIGNED_*
+# component instead. 0 disables the guard.
+cluster_guard_n = 3
+
+# Mean-mode small-entity fallback: if an entity has fewer than this
+# many observed-PMI pairs against g, fall back to min-mode for that
+# entity. 0 disables (pure mean / hybrid). Main Rescue uses 0 here.
+small_entity_guard_n = 0
+
+# Hybrid/mean mode: percentile of real-signal PMIs used as the gate.
+# 50 = median; lower = stricter (more pairs must be positive).
+# 2026-05-13: lowered 50 → 25 (stricter; mean over bottom quartile).
+aggregator_percentile = 25.0
+
+# Real-players gate (cross-cutting, but Rescue-overridable). Pairs
+# with |PMI| ≤ this contribute neither to mean nor to count gates.
+# Default 0.05 matches the cross-cutting REAL_SIGNAL_THRESHOLD.
+real_signal_threshold = 0.05
+
+# Rank policy — how a non-vetoed candidate is chosen among the entities
+# in the 9-bin × z-bound neighborhood of an orphan tx.
+#   "distance" : nearest-tx distance wins (legacy).
+#   "witness"  : count of supporting tx (capped) wins; tie broken by
+#                witness_tiebreak. Inspired by Stitch's witness gate.
+# 2026-05-15: promoted "distance" → "witness" after Cython port.
+# Witness improves small-cell ARI in NOSEG and lifts SEG cell-level
+# coherence p10/p25, at ~11% wall overhead vs distance Cython.
+rank_policy = "witness"
+
+# Witness-mode parameters (used only when rank_policy = "witness"):
+# Minimum (capped) witness count required to admit an orphan tx.
+witness_min_admit = 3
+# Per-entity hard cap on witness contribution.
+witness_cap = 3
+# Small-component damper: an entity contributes at most
+# ceil(entity_size / witness_small_component_cap_divisor) witnesses.
+witness_small_component_cap_divisor = 2
+# Tie-breaker among candidates with equal (capped) witness count:
+#   "distance" : nearest-tx wins.
+#   "gene_fit" : highest mean PMI(orphan gene, entity seed) wins.
+witness_tiebreak = "gene_fit"
+
+# Convergence-aware early exit. After each rescue pass, the loop
+# compares n_reassigned to the pre-pass unassigned-pool size; if the
+# ratio falls below this threshold, break before the next pass.
+# 0.0 = disabled (legacy: only break on zero admits). Set > 0 for a
+# defensive guard against high-max_passes misconfigs; otherwise leave
+# at 0.0 and use max_passes as the explicit cap.
+early_exit_admit_ratio = 0.0
+
+# Post-Group Rescue passes. SEG default 3. NOSEG platform preset
+# raises to 5 — NOSEG enters Post-Group with a much larger orphan pool
+# (no Xenium prior anchored Phase-1). Each pass is bounded by zero-
+# admit exit anyway. Set 0 to disable the Post-Group stage entirely.
+post_group_passes = 3
+
+
+# ---------------------------------------------------------------------
+# Group — entity grouping. Two backends, selected per-pipeline by
+# `seg_residual_cascade` / `noseg_cascade`:
+#
+#   Cascade (default since 2026-05-07/2026-05-09): density-anchor +
+#   Phase-1a/b purity prune. Auto-floor selects density-threshold floor
+#   from runtime tx-coverage. Emits `cascade_<n>-1` partials.
+#
+#   Legacy spatial-CC (when *_cascade=false): annotate_unassigned_
+#   components_fast with G=8 µm self-bin connectivity. Emits
+#   UNASSIGNED_<n> components. Retained as fallback for parity with
+#   pre-cascade pipeline state.
+#
+# Cascade internals (bin size, territory radius, PMI threshold,
+# min anchor tx) are shared between SEG and NOSEG paths. Auto-floor
+# params (target_cov, hard_min) are per-pipeline because SEG-residual
+# is sparser than the full NOSEG pool — auto-floor selects different
+# floors in those regimes.
+# ---------------------------------------------------------------------
+[group]
+# Backend selection (per pipeline)
+seg_residual_cascade = true
+noseg_cascade = true
+
+# Cascade auto-floor — per pipeline (different residual density regimes)
+seg_cascade_target_cov = 0.65
+seg_cascade_hard_min = 2
+noseg_cascade_target_cov = 0.65
+noseg_cascade_hard_min = 2
+
+# Cascade internal params — shared between SEG and NOSEG paths
+cascade_bin_size_um = 2.0           # G in cascade_as_residual_handler
+cascade_territory_radius_bins = 1    # Moore radius (3×3 = 9 bins)
+cascade_pmi_threshold = 0.2          # mirrors phase1.pmi_threshold
+cascade_min_anchor_tx = 3
+
+# Legacy spatial-CC fallback — used when *_cascade=false
+legacy_bin_size_um = 8.0             # G in build_grid_graph_xy
+legacy_neighborhood = "self"
+legacy_k = 8
+legacy_dist_threshold = 1.5
+legacy_min_comp_size = 5
+legacy_npmi_threshold = -0.1         # post-prune negative cutoff
+
+
+# ---------------------------------------------------------------------
+# Stitch, Demote — NOT yet config-driven.
+#
+# Stitch's knob set is still being tuned (e.g. `deltaC_min` was
+# raised from 0.0 to 0.03 on 2026-05-09 to prevent NOSEG supercell
+# formation; the decomposable-coherence + DSU + heap path is planned
+# as opt-in). Demote is essentially the size-floor `min_size=5` —
+# small surface area, low priority for typed config until Stitch
+# settles. Their parameters remain as kwargs at the call site in
+# tests/_pipeline_runner.py until they freeze.
+#
+# ---------------------------------------------------------------------
+# Stitch — Phase 4 hierarchical entity merge. Mirrors the production
+# call in `tests/_pipeline_runner.py::run_segmented_pipeline` (and the
+# symmetric NOSEG path) at the time of typing (2026-05-14).
+#
+# Acceptance pipeline:
+#   Candidate pair → witness gate (min_local_tx_per_entity)
+#     → ΔC ≥ deltaC_min ?
+#        YES → accept
+#        NO  → C(union) ≥ c_union_bypass AND merged n_tx ≤ bypass_max_n_tx ?
+#               YES → bypass-accept   NO → reject
+#   Plus: post-acceptance merger-tree depth ≤ max_merger_depth.
+# ---------------------------------------------------------------------
+[stitch]
+# Coherence-metric knobs.
+mode = "count"
+metric = "pmi"
+penalize_simplicity = true
+
+# Primary acceptance gate. 2026-05-09: raised 0.0 → 0.03 to prevent
+# NOSEG supercell formation; SEG insensitive.
+deltaC_min = 0.03
+
+# C(union) bypass for ΔC-failing pairs. 0.9 is the recommended setting
+# from the 2026-05-14 stitch-dist-threshold-fix bench. Use null to
+# disable the bypass entirely (reverts to ΔC-only gate).
+c_union_bypass = 0.9
+
+# Size cap on the bypass: only fires when the merged entity stays at
+# ≤ N tx. Keeps the bypass targeted at within-cell fragment
+# consolidation rather than cross-compartment bridging.
+c_union_bypass_max_n_tx = 50
+
+# Post-acceptance merger-tree depth cap. Blocks chain-style growth.
+# Set to null to disable.
+max_merger_depth = 3
+
+# Spatial gate — candidate pair enumeration.
+candidate_source = "grid"
+bin_size_um = 2.0
+g_z_um = 1.0
+z_neighbor_depth = 1
+neighborhood = "8"
+dist_threshold_um = 5.0
+
+# Per-entity witness floor in the shared bin neighborhood (capped at
+# min(threshold, entity n_tx) internally — landed 2026-05-14).
+min_local_tx_per_entity = 3
+
+# Mahalanobis-D RESCUE on borderline-ΔC pairs.
+#
+# The loop OVERRIDES a ΔC reject for candidate pairs whose:
+#     rescue_delta_c_floor < ΔC < 0   AND   D ≤ mahalanobis_d_rescue
+# i.e. when composition borderline-rejects AND the two tx clouds are
+# geometrically enmeshed (low Mahalanobis D relative to the pooled
+# covariance structure). Recovers EMT-like cells where the panel's
+# epi/mes anti-correlation makes ΔC reject a legitimate single-cell
+# merge. The ΔC floor protects against fusing engulfment doublets
+# where composition rejects strongly (e.g. jikammne ΔC = -0.49 with
+# D ≈ 0.5 stays split because -0.49 < -0.2 floor).
+#
+# An earlier veto-direction Maha implementation was superseded — the
+# witness floor `min_local_tx_per_entity` already gates the accept
+# path adequately; geometry's useful contribution is the rescue,
+# not a veto.
+#
+# Default 1.0 ships the rescue on (PDAC 2 mm: ~1.8 k legitimate
+# cell-consolidations that ΔC alone misses). Comment out the line
+# below (or set to "off" via code) to disable.
+mahalanobis_d_rescue = 1.0
+rescue_delta_c_floor = -0.2
+
+
+# ---------------------------------------------------------------------
+# Final Rescue — post-Demote pass over remaining "-1" tx.
+# Inherits all keys from [rescue] then applies the deltas below.
+# ---------------------------------------------------------------------
+[final_rescue]
+inherit = "rescue"
+
+# Stricter than main Rescue: no fallback-to-min for small entities.
+# (Already 0 in [rescue], explicit here for documentation.)
+small_entity_guard_n = 0
+
+# 2026-05-15: SEG-friendly default — 3 passes, no gate. NOSEG users
+# should load via `load_config(platform="noseg")` which overrides to
+# 5 passes (NOSEG has a much larger residual orphan pool after
+# Stitch+Demote). See 2×2 PDAC ROI bench in
+# analysis/rescue-upgrades/rank_policy_2x2_snapshots/.
+max_passes = 3
+
+
+# ---------------------------------------------------------------------
+# Bootstrap — `compute_npmi_bootstrap` PMI/NPMI panel builder.
+# Defaults are the flavor-C "production" settings: PMI metric, per-gene
+# size-band filter, dual-tau, subsample bootstrap. The function's own
+# Python signature defaults stay backward-compatible (legacy NPMI, no
+# per-gene filter) so existing callers without explicit kwargs don't
+# break — but config-driven callers via `load_config()` get these.
+#
+# Platform presets (e.g. xenium.toml) layer column-dependent knobs on
+# top (e.g. `nuclear_only=true` requires `overlaps_nucleus` to exist).
+# ---------------------------------------------------------------------
+[bootstrap]
+# Pre-filter pipeline
+nuclear_only = false                                # platform-only (needs overlaps_nucleus)
+nucleus_col = "overlaps_nucleus"
+# percentile_filter         = [20.0, 80.0]          # global per-cell tx-count band; None = off
+per_gene_percentile_filter = [5.0, 95.0]            # per-gene size-band admittance — flavor-C
+memory_optimize = true
+
+# Bootstrap engine
+metric = "pmi"                                       # flavor-C: PMI for direct interpretability
+tau_low = 0.05
+tau_high = 0.20                                      # flavor-C dual-tau (pos_strong / pos_weak split)
+alpha = 0.1                                          # Beta(α, α) Jeffreys-style smoothing
+ci_level = 0.95
+max_bootstraps = 10000
+coarse_block = 200
+refine_block = 500
+min_samples_for_ci = 30
+subsample_size = 25000                               # flavor-C: 25k subsample (vs full pop)
+
+# Evidence gates
+min_occurrences_per_context = 2
+min_expected_cooccur_for_evidence = 10.0
+min_expected_cooccur_for_bootstrap = 10.0            # flavor-C: explicit (= evidence threshold)
+set_neg_one = true                                   # k=0 + E_full≥thr → neg_one sentinel

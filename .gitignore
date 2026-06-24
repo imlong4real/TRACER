@@ -1,0 +1,116 @@
+# ─────────────────────────────────────────────────────────────────────
+# TRACER .gitignore — publication tree
+# Tracked: package (src/), tests/, examples/, configs/, the released CLI
+# entry points + scripts/reproducibility/, docs, build/CI, license.
+# Everything below is generated output, large data, or non-core /
+# exploratory material kept on disk but out of the published repo.
+# ─────────────────────────────────────────────────────────────────────
+
+# macOS / editor junk
+.DS_Store
+**/.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+
+# Packaging / build
+*.egg-info/
+build/
+dist/
+.pyxbld/
+
+# Cython build artifacts (generated from .pyx — the .pyx are tracked)
+src/tracer/_cy_*.c
+*.html
+
+# Generated data & outputs
+results/
+datasets/
+outputs/
+output/
+cache/
+tutorials/
+
+# Large data files
+**/data/*.parquet
+**/data/*.xlsx
+**/*.zarr/
+**/*.zarr/**
+*.csv.gz
+*.tsv
+
+# Output artifacts
+**/output/*.parquet
+**/output/*.csv
+**/output/*.h5ad
+**/output/*.json
+scripts/reproducibility/fig4/source_data/
+
+# Plots — exclude all PNG except the few referenced in docs
+*.png
+!assets/images/logo.png
+**/plot/*.png
+**/plot/**/*.png
+
+# Logs & temp
+*.log
+/tmp/
+
+# Notebook checkpoints
+.ipynb_checkpoints/
+
+# ── Non-core / exploratory (untracked from the publication tree; on disk) ──
+benchmarks/
+docs/superpowers/
+docs/sync/
+
+# Exploratory analysis & one-off scripts (not part of the released CLI)
+scripts/atera_diagnostic/
+scripts/diagnostics/
+scripts/lung_scrna_prep/
+scripts/kidney_visiumhd_prep/
+scripts/pdac_scrna_prep/
+scripts/annotate_*.py
+scripts/annotate_*.R
+scripts/format_*.py
+scripts/filter_*.py
+scripts/kidney_*.py
+scripts/marker_admix_analysis.py
+scripts/build_lung_scrna_h5ad.py
+scripts/run_bin2cell.py
+scripts/run_umap.py
+scripts/run_ovrlpy_tracer_overlap.py
+scripts/run_tracer_legacy.py
+scripts/stardist_worker.py
+scripts/test_roi_single.py
+scripts/vis_utils.py
+scripts/visualize_3d_finite_thickness.py
+scripts/run_*_recompute_tracer.sh
+scripts/run_lung_xenium_*.sh
+scripts/run_xenium5k_*.sh
+scripts/*.bak
+
+# Planning / handoff / scratch markdowns
+BENCHMARKS.md
+IMPLEMENTATION_LOG.md
+density-cascade-handoff.md
+plan/
+slurm/
+
+# Top-level configs/ (only consumed by the untracked marker_admix analysis
+# script). The package's canonical configs live in src/tracer/configs/
+# (defaults.toml + platforms/*.toml) and remain tracked. Anchored to the
+# repo root so src/tracer/configs/ is unaffected.
+/configs/
+
+# examples/ — held out of the publication-ready tree for now; kept on disk
+# to be reintroduced later as clean tutorials / reproducibility examples.
+# Anchored to repo root.
+/examples/
+
+# Agent / tooling local state
+.claude/

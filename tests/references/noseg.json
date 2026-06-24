@@ -1,0 +1,74 @@
+{
+  "ami_vs_truth": NaN,
+  "ari_vs_truth": NaN,
+  "coverage_pct": 42.5,
+  "n_cells": 0,
+  "n_components": 0,
+  "n_partials": 3,
+  "n_unassigned_tx": 115,
+  "stage_progression": [
+    {
+      "n_cells": 0,
+      "n_components": 0,
+      "n_partials": 0,
+      "n_unassigned_tx": 200,
+      "stage": "input (cell_id all -1)"
+    },
+    {
+      "n_cells": 0,
+      "n_components": 0,
+      "n_partials": 0,
+      "n_unassigned_tx": 200,
+      "stage": "after init"
+    },
+    {
+      "n_cells": 0,
+      "n_components": 0,
+      "n_partials": 4,
+      "n_unassigned_tx": 121,
+      "stage": "Group"
+    },
+    {
+      "n_cells": 0,
+      "n_components": 0,
+      "n_partials": 4,
+      "n_unassigned_tx": 121,
+      "stage": "Mid-QC"
+    },
+    {
+      "n_cells": 0,
+      "n_components": 0,
+      "n_partials": 4,
+      "n_unassigned_tx": 115,
+      "stage": "Post-Group Rescue"
+    },
+    {
+      "n_cells": 0,
+      "n_components": 0,
+      "n_partials": 3,
+      "n_unassigned_tx": 115,
+      "stage": "Stitch"
+    },
+    {
+      "n_cells": 0,
+      "n_components": 0,
+      "n_partials": 3,
+      "n_unassigned_tx": 115,
+      "stage": "Demote"
+    },
+    {
+      "n_cells": 0,
+      "n_components": 0,
+      "n_partials": 3,
+      "n_unassigned_tx": 115,
+      "stage": "Final Rescue"
+    },
+    {
+      "n_cells": 0,
+      "n_components": 0,
+      "n_partials": 3,
+      "n_unassigned_tx": 115,
+      "stage": "Finalize"
+    }
+  ]
+}

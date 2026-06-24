@@ -1,0 +1,27 @@
+# NOSEG platform preset.
+#
+# Layered on top of `defaults.toml` via:
+#   load_config(platform="noseg")
+#
+# Differences from the SEG default:
+# The no-segmentation pipeline has no Xenium `cell_id` prior to anchor
+# Phase-1 entities. Group/cascade does the work of Phase-1, and the
+# residual orphan pool entering Post-Group and Final Rescue is
+# substantially larger (post-Stitch ~500k vs ~175k for SEG on PDAC
+# 2×2). The asymptotic rescue-admit tail therefore extends further.
+#
+# 2×2 PDAC ROI bench validation:
+#   Post-Group Rescue 3→5 passes: +99k admits in passes 4-5
+#   Final Rescue     3→5 passes: +13k admits in passes 4-5
+# Total ~112k extra rescues (~3.2% of all ROI tx) at ~+34% wall cost.
+# Going beyond 5 has diminishing returns (deep-FR-8 gives only ~5k
+# more vs FR=5 — see final_rescue_pass_sweep_10p.log).
+#
+# This preset does NOT change rank_policy (still "distance" default);
+# use additional overrides for that experiment.
+
+[rescue]
+post_group_passes = 5
+
+[final_rescue]
+max_passes = 5

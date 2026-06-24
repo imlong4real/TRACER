@@ -1,0 +1,29 @@
+# Xenium platform preset.
+#
+# Layered on top of `defaults.toml`. The defaults file already encodes
+# flavor-C ("production") bootstrap settings (PMI metric, per-gene
+# size-band filter, dual-tau, subsample bootstrap, neg_one sentinel).
+# This file adds the Xenium-specific bits that depend on column
+# availability or imaging-modality conventions.
+#
+# Loaded via:
+#   load_config(platform="xenium")
+# or
+#   load_config(path="user_override.toml", platform="xenium")
+#
+# Xenium-specific assumptions:
+#   - `overlaps_nucleus` column is present in the transcripts df
+#     (10x Xenium standard output)
+#   - cell_id="UNASSIGNED" is the 10x convention for unassigned tx
+#     (already handled by default exclude_contexts in the bootstrap)
+
+# ---------------------------------------------------------------------
+# Bootstrap PMI panel — Xenium-specific overrides.
+# ---------------------------------------------------------------------
+[bootstrap]
+# Restrict to nucleus-overlapping tx. Drops cytoplasmic spillover and
+# limits the analysis to where Xenium segmentation is most reliable.
+# This is column-dependent (requires `overlaps_nucleus` field) so it
+# lives in the platform preset rather than the global defaults.
+nuclear_only = true
+nucleus_col = "overlaps_nucleus"

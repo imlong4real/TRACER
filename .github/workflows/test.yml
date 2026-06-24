@@ -1,0 +1,57 @@
+name: tests
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  pytest:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # windows-latest is excluded: pymetis (a hard tracer dep) bundles
+        # METIS C source that uses POSIX-only headers (sys/resource.h),
+        # which fails on Windows. Easier to drop than to maintain a
+        # Windows-specific pymetis fork.
+        os: [ubuntu-latest, macos-latest]
+        python: ['3.10', '3.11']
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Upgrade pip + build tooling
+        run: |
+          python -m pip install --upgrade pip wheel setuptools
+
+      - name: Install libomp (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install libomp
+          # Expose the prefix so subsequent steps / setup.py can find it.
+          echo "LIBOMP_PREFIX=$(brew --prefix libomp)" >> "$GITHUB_ENV"
+
+      - name: Install package + dev extras
+        # macOS: pin the build to the runner's native arch (arm64).
+        # The python.org framework Python defaults to a universal2
+        # (arm64 + x86_64) build, but Homebrew libomp on an Apple
+        # Silicon runner is arm64-only — a universal2 link would fail
+        # on the x86_64 slice. ARCHFLAGS is ignored on Linux builds.
+        env:
+          ARCHFLAGS: ${{ runner.os == 'macOS' && '-arch arm64' || '' }}
+        run: |
+          pip install -e ".[dev]"
+
+      - name: Run tests
+        run: |
+          pytest tests/
