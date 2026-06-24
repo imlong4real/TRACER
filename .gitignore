@@ -53,6 +53,8 @@ scripts/reproducibility/fig4/source_data/
 # Plots — exclude all PNG except the few referenced in docs
 *.png
 !assets/images/logo.png
+!assets/images/tracer_conceptual_failure_mode.png
+!assets/images/tracer_workflow.png
 **/plot/*.png
 **/plot/**/*.png
 

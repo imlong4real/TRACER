@@ -1,165 +1,169 @@
-# TRACER 
+<p align="center">
+  <img src="assets/images/logo.png" alt="TRACER" width="280"/>
+</p>
+
+<h1 align="center">TRACER</h1>
+<p align="center"><b>Reconstructing biologically coherent cellular profiles from spatial transcriptomics</b></p>
+
+<!-- badges: start -->
+<p align="center">
+
+[![Tests](https://github.com/imlong4real/TRACER/actions/workflows/test.yml/badge.svg)](https://github.com/imlong4real/TRACER/actions/workflows/test.yml)
+[![Docker](https://github.com/imlong4real/TRACER/actions/workflows/build-docker.yml/badge.svg)](https://github.com/imlong4real/TRACER/actions/workflows/build-docker.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![bioRxiv](https://img.shields.io/badge/bioRxiv-10.64898%2F2026.03.08.710395-B31B1B)](https://www.biorxiv.org/content/10.64898/2026.03.08.710395v1)
+[![ISMB 2026](https://img.shields.io/badge/ISMB-2026-purple)](https://www.iscb.org/ismb2026/whats-happening/track-details)
+[![Statistical Bioinformatics Seminar](https://img.shields.io/badge/Statistical%20Bioinformatics-Seminar-red)](https://www.youtube.com/watch?v=CugrfP88tAk)
+
+</p>
+<!-- badges: end -->
+
+TRACER is a **reference-optional framework for refining mixed spatial transcriptomic
+profiles and reconstructing coherent anuclear or partial cells** from imaging- and
+sequencing-based spatial transcriptomics. It learns a gene–gene coherence prior from
+the data itself (or, optionally, a single-cell reference), prunes conflicting transcript
+assignments, and rebuilds biologically consistent whole and partial cells.
+
+---
+
+## Why TRACER?
+
+Modern spatial assays localize transcripts with high accuracy, yet the *cellular
+profiles* derived from them are often **mixed, incomplete, or missing**. Tissue
+thickness and 3D overlap blend neighboring cells; nuclear-anchored segmentation drops
+anuclear fragments; rigid binning splits cells across bins; and segmentation errors
+leak transcripts across boundaries. The result is a cell-by-gene matrix that
+misrepresents the underlying biology.
 
 <p align="center">
-  <img src="assets/images/logo.png" alt="TRACER Logo" width="300"/>
+  <img src="assets/images/tracer_conceptual_failure_mode.png" alt="Spatial profiling failure modes addressed by TRACER" width="820"/>
 </p>
-Tissue Reconstruction via Associative Clique Extraction and Relation-mapping (TRACER)
 
-Overview
---------
-TRACER is a Python package for imaging-based spatial transcriptomics, enabling 3D tissue reconstruction, segmentation refinement, and partial pseudo-cell inference.
+TRACER targets these failure modes directly — recovering coherent profiles without
+requiring a matched reference atlas.
 
-The software is implemented and distributed under the package name `tracer`, providing high-order transcriptomic reconstruction with NPMI-enhanced reconstruction and Delaunay-stitching.
+## How TRACER works
 
-- Partition large tissue spatially using Metis on a kNN graph built from cell centroids.
-- Compute gene co-occurrence statistics (PMI / NPMI) and derive per-cell purity and conflict metrics.
-- Utilities to refine cell segmentation using a 3D transcript graph and identify 3D partial (pseudo) cells.
+TRACER scores transcript-to-cell assignments against a learned gene–gene coherence
+prior, removes conflicting transcripts, and reconstructs residual/partial cells from
+the leftover signal — preserving the input segmentation where it is trustworthy.
 
-Quick start
------------
-Install the package (editable for development):
+<p align="center">
+  <img src="assets/images/tracer_workflow.png" alt="TRACER algorithm workflow" width="900"/>
+</p>
 
-```bash
-python3 -m pip install -e '.[dev]'
-```
+## Features
 
-Cython acceleration (Recommended)
-------------------------------
-TRACER ships a Cython module to accelerate greedy NPMI pruning. To build and install a wheel that compiles the Cython extension, ensure you have a C compiler and `Cython` available.
+- **Segmentation-mode refinement** — correct and clean profiles starting from existing cell masks.
+- **No-segmentation reconstruction** — rebuild profiles from bins or local transcript neighborhoods (e.g. VisiumHD-style binned data).
+- **Coherence-prior learning** — derive a PMI/NPMI gene–gene prior from the dataset itself, or optionally from a single-cell reference.
+- **Conflict pruning** — demote transcripts whose genes are incompatible with the rest of their assigned cell.
+- **Partial-cell reconstruction** — assemble coherent residual/partial cells from pruned and unassigned transcripts.
+- **Broad input support** — designed for imaging-based platforms (Xenium, Xenium 5K, CosMx, MERFISH) via a standardized transcript table, and for VisiumHD-style binned data via the no-segmentation pipeline.
+- **Laptop-friendly** — Cython-accelerated kernels keep typical ROIs runnable on CPU.
 
-macOS prerequisites:
+## Installation
 
-- Install Xcode command line tools if not already present:
-
-```bash
-xcode-select --install
-```
-
-- Install build tools and Cython in your Python environment:
+Requires Python ≥ 3.9 and a C compiler (TRACER ships Cython extensions).
 
 ```bash
-python -m pip install --upgrade pip build wheel setuptools Cython
+# development install (editable, with dev/test extras)
+pip install -e ".[dev]"
+
+# plain local install
+pip install .
 ```
 
-Build a wheel (recommended for reproducible builds):
+> PyPI release: _coming soon._
+
+**Cython notes.** The extensions (`_cy_*.pyx`) compile automatically during install,
+so a C toolchain must be present. On macOS, install the command-line tools first
+(`xcode-select --install`). For a reproducible, faster-importing build you can build a
+wheel instead: `python -m build --wheel` then `pip install dist/tracer-*.whl`.
+
+Run the test suite:
 
 ```bash
-python -m build --wheel --no-isolation -o dist
-# or: python -m pip wheel . -w dist
+python -m pytest
 ```
 
-Install the built wheel:
+## Quick start
+
+TRACER consumes a **standardized transcript table** plus a **gene–gene NPMI panel**
+(both produced by the helper scripts in `scripts/`).
+
+**Segmentation mode** — refine an existing segmentation:
 
 ```bash
-python -m pip install dist/tracer-*.whl
+python scripts/run_tracer.py \
+  --transcripts transcripts.parquet \
+  --npmi        npmi_panel.csv.gz \
+  --platform    xenium \
+  --outdir      results/tracer_seg \
+  --sample-name my_sample \
+  --seed 1
 ```
 
-Editable / development install (dynamic compilation fallback):
-
-If you prefer editable installs during development, you can still use the pyximport fallback which will attempt to compile the `.pyx` at import time when `Cython` is present:
+**No-segmentation mode** — reconstruct profiles from VisiumHD-style bins:
 
 ```bash
-python -m pip install -e '.[dev]'
-# Make sure Cython is installed in the same environment so pyximport can compile on-demand
-python -m pip install Cython
+python -m tracer.noseg_pipeline \
+  --visiumhd-matrix path/to/binned_outputs/square_002um/filtered_feature_bc_matrix \
+  --spatial-dir     path/to/binned_outputs/square_002um/spatial \
+  --npmi            npmi_panel.csv.gz \
+  --platform-config src/tracer/configs/platforms/noseg.toml \
+  --outdir          results/tracer_noseg \
+  --sample-name     my_visiumhd_sample \
+  --bin-size-um 2 --seed 1
 ```
 
-Notes:
+See the available options with `python scripts/run_tracer.py --help`. Add `--smoke`
+to the no-segmentation run for a fast ROI-limited end-to-end check.
 
-- Building wheels is recommended for reproducible, faster imports (no on-the-fly compilation).
-- If a wheel is not available or Cython isn't installed, TRACER falls back to pure-Python implementations (behaviorally identical, slower).
+## Inputs
 
-Import and inspect available functions:
+- **Transcript table** (`--transcripts`, Parquet): one row per transcript with
+  spatial coordinates (`x`, `y`, and `z` for 3D; `z` is synthesized for 2D data),
+  a gene name (`feature_name`), an initial segmentation label (`cell_id`; unassigned
+  transcripts are allowed), and a `transcript_id`. An optional `overlaps_nucleus`
+  flag enables nuclear-aware steps. Standardize raw vendor exports with
+  `scripts/preprocess_xenium.py`.
+- **NPMI panel** (`--npmi`, CSV/CSV.gz): long-format gene–gene co-occurrence statistics
+  (`gene_i`, `gene_j`, `PMI`, `NPMI`), built with `scripts/build_npmi_from_scrna.py`
+  from the dataset or a single-cell reference.
+- **No-segmentation mode** additionally takes a VisiumHD feature–barcode matrix and its
+  `spatial/` directory in place of a transcript table.
 
-```python
-import tracer
-print(tracer.__version__)
-print(sorted(tracer.__all__))
-```
+## Outputs
 
-Example
--------
-The `examples/` and `tutorials/` folders contain runnable demonstrations that show how TRACER can refine an initial segmentation produced by the 10X Xenium platform.
+Written under `--outdir/outputs/`:
 
-### Breast Cancer Example (3D Refinement)
+- **`transcripts_tracer_refined.parquet`** — per-transcript fate table: final entity
+  label (`stitched`/`tracer_id`), entity type `_etype` (`cell` = refined whole cell,
+  `partial` = reconstructed partial/residual cell, `unknown` = unassigned), and the
+  original `cell_id` for reassignment auditing.
+- **`cell_by_gene_tracer.h5ad`** — reconstructed cell-by-gene matrix over refined whole
+  cells and reconstructed partial cells.
+- **`cell_scores.tsv.gz`** — per-cell QC: purity and conflict (coherence) metrics.
 
-- Original segmentation (10X Xenium V1, breast cancer):
+Each run also records `run_summary.md` (stage-by-stage cell/partial/unassigned counts),
+`config_receipt.json` (exact resolved config), and `runtime_memory.json`.
 
-![Original segmentation](examples/output/10X_transcripts.png)
+## Citation
 
-- After refining segmentation with TRACER, we can identify Z-axis overlap at single-cell level:
+If you use TRACER, please cite:
 
-![Refined segmentation (TRACER)](examples/output/cell_124838_concave_refinement.png)
+> **Reconstructing biologically coherent cellular profiles from imaging-based spatial transcriptomics**
+> Long Yuan, Youyun Zheng, Shuming Zhang, Rameen Beroukhim, Atul Deshpande.
+> bioRxiv (2026). DOI: [10.64898/2026.03.08.710395](https://doi.org/10.64898/2026.03.08.710395)
 
-Run the example locally:
+## Contact
 
-```bash
-pip install -e .
-python examples/refine_segmentation.py
-```
+For questions or collaboration:
 
-### Breast Cancer Tutorial (Large-Scale 3D Refinement & Quality Metrics)
+- Long Yuan — `lyuan13[at]jhmi.edu`
+- Atul Deshpande — `adeshpande[at]jhu.edu`
 
-TRACER demonstrates exceptional performance on a large-scale Xenium v1 breast cancer dataset (~28M transcripts) with dramatic quality improvements:
+## License
 
-![Purity and Conflict Scores](tutorials/breast_cancer/plot/breast_cancer_mean_purity_conflict_transcript_scores.png)
-
-**Quantitative Improvements on Standard Xenium Segmentation:**
-- **Purity Score** (gene co-expression consistency): 0.457 → 0.686 (TRACER Stitched) → **0.708** (TRACER Stitched + Fine-tuned) — **+55% improvement**
-- **Conflict Score** (incompatible gene signatures): 0.055 → 0.005 (TRACER Stitched) → **0.004** (TRACER Stitched + Fine-tuned) — **-93% reduction**
-
-**Enhanced Cell Type Clustering with Author-Annotated Cell Types:**
-
-The refined segmentation produces significantly improved UMAP embeddings with clear lineage separation and enhanced within-cell-type cohesion:
-
-![UMAP with Cell Type Overlay](tutorials/breast_cancer/plot/breast_cancer_umap_whole_cell_supervised_overlay.png)
-
-See the [breast cancer tutorial](tutorials/breast_cancer/) for complete analysis details.
-
-### Lung Cancer Tutorial (Quality Metrics & UMAP Enhancement)
-
-TRACER significantly improves cell segmentation quality, as demonstrated on a lung cancer biopsy sample using NPMI-based purity and conflict scores:
-
-![Purity and Conflict Scores](tutorials/lung_cancer/plot/lung_cancer_mean_purity_conflict_transcript_scores.png)
-
-**Quantitative Improvements:**
-- **Purity Score** (gene co-expression consistency): 0.292 → 0.356 (TRACER Stitched) → **0.373** (TRACER Stitched + Fine-tuned) — **+28% improvement**
-- **Conflict Score** (incompatible gene signatures): 0.032 → 0.009 (TRACER Stitched) → **0.008** (TRACER Stitched + Fine-tuned) — **-75% reduction**
-
-**Enhanced UMAP Interpretability:**
-
-The improved segmentation quality translates to clearer, more biologically interpretable UMAP embeddings with better-defined cell clusters:
-
-![UMAP Comparison](tutorials/lung_cancer/plot/lung_cancer_umap_whole_cell.png)
-
-See the [lung cancer tutorial](tutorials/lung_cancer/) for detailed analysis.
-
-Design notes
-------------
-- Source layout: `src/` package layout.
-- Runtime dependencies include `numpy`, `pandas`, `geopandas`, `shapely`, `scikit-learn`, `pymetis`, `open3d`, and `matplotlib`.
-
-Citation
---------
-If you used this work, please cite:
-
-Reconstructing biologically coherent cellular profiles from imaging-based spatial transcriptomics  
-Long Yuan, Youyun Zheng, Shuming Zhang, Rameen Beroukhim, Atul Deshpande  
-doi: https://doi.org/10.64898/2026.03.08.710395  
-bioRxiv: https://www.biorxiv.org/content/10.64898/2026.03.08.710395v1
-
-Contact
--------
-For questions or collaboration, please contact:
-- Long Yuan — lyuan13[at]jhmi.edu
-- Atul Deshpande — adeshpande[at]jhu.edu
-
-Repository
-----------
-https://github.com/imlong4real/TRACER
-
-License
--------
-Apache License 2.0 (see LICENSE)
-
-
+Apache License 2.0 — see [LICENSE](LICENSE).
