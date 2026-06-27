@@ -1,0 +1,30 @@
+# MERFISH (Vizgen) platform preset.
+#
+# Layered on top of `defaults.toml` via:
+#   load_config(platform="merfish")
+#
+# Why this preset exists
+# ----------------------
+# MERFISH images DISCRETE z-planes. On the mouse-ileum ROI used for
+# benchmarking the planes are spaced 1.5 µm apart (z ∈ {2.5, 4.0, 5.5,
+# ... 14.5}, 9 planes, all in µm). With the global default
+# `stitch.g_z_um = 1.0` µm and `z_neighbor_depth = 1`, adjacent planes
+# land up to TWO z-bins apart (floor(2.5/1)=2 vs floor(4.0/1)=4) and so
+# never connect — every z-plane becomes an island and within-cell z
+# structure is lost. Setting g_z_um to the 1.5 µm plane spacing makes
+# consecutive planes map to consecutive z-bins (one bin apart), so they
+# connect at `z_neighbor_depth = 1`.
+#
+# Set `g_z_um = "auto"` instead to derive this from the observed z
+# distribution at run time (recommended if plane spacing varies across
+# MERFISH panels / acquisitions).
+
+[bootstrap]
+# Vizgen exports a nucleus-overlap flag; restrict the PMI panel to
+# nucleus-overlapping tx.
+nuclear_only = true
+nucleus_col = "overlaps_nucleus"
+
+[stitch]
+# z-plane spacing on MERFISH ≈ 1.5 µm. See header.
+g_z_um = 1.5

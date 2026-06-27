@@ -1,0 +1,29 @@
+# CosMx (NanoString / Bruker) platform preset.
+#
+# Layered on top of `defaults.toml` via:
+#   load_config(platform="cosmx")
+#
+# Why this preset exists
+# ----------------------
+# CosMx images a stack of DISCRETE optical z-planes. On the NSCLC ROI
+# used for benchmarking the planes are spaced ~0.8 µm apart
+# (z ∈ {-0.8, 0.0, 0.8, 1.6, ... 7.2}, 11 planes). The global default
+# `stitch.g_z_um = 1.0` µm is misaligned with that 0.8 µm grid: some
+# adjacent planes collapse into one z-bin while others split, giving
+# uneven z-connectivity in Stitch. Setting g_z_um to the plane spacing
+# makes consecutive planes map to consecutive z-bins (exactly one bin
+# apart), so they connect cleanly at `z_neighbor_depth = 1`.
+#
+# Set `g_z_um = "auto"` instead to derive this from the observed z
+# distribution at run time (recommended if plane spacing varies across
+# CosMx instruments / panels).
+
+[bootstrap]
+# CosMx exports an `overlaps_nucleus`-equivalent flag; restrict the PMI
+# panel to nucleus-overlapping tx (most reliable assignment).
+nuclear_only = true
+nucleus_col = "overlaps_nucleus"
+
+[stitch]
+# z-plane spacing on CosMx ≈ 0.8 µm. See header.
+g_z_um = 0.8

@@ -75,6 +75,23 @@ for _p in (str(_REPO_ROOT / "src"), str(_REPO_ROOT)):
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+def _g_z_um_arg(value: str):
+    """argparse type for --g-z-um: a positive float or the string 'auto'."""
+    if value.strip().lower() == "auto":
+        return "auto"
+    try:
+        f = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"--g-z-um must be a positive float or 'auto'; got {value!r}"
+        )
+    if f <= 0:
+        raise argparse.ArgumentTypeError(
+            f"--g-z-um must be > 0 (or 'auto'); got {f}"
+        )
+    return f
+
+
 def build_argparser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -87,7 +104,12 @@ def build_argparser() -> argparse.ArgumentParser:
                    help="Override the in-pipeline PMI threshold (default: from "
                         "platform/user config).")
     p.add_argument("--platform", default="xenium",
-                   help="Platform preset name (matches src/tracer/configs/platforms/<name>.toml).")
+                   help="Platform preset name (matches src/tracer/configs/platforms/<name>.toml). "
+                        "Built-ins include xenium, atera, cosmx, merfish, noseg.")
+    p.add_argument("--g-z-um", default=None, type=_g_z_um_arg,
+                   help="Override the z-bin size (µm). Accepts a positive float, or "
+                        "'auto' to derive it from the observed z-plane spacing. "
+                        "Precedence: this flag > user config > platform preset > default.")
     p.add_argument("--defaults-config", type=Path, default=None,
                    help="Documentation/provenance — currently informational.")
     p.add_argument("--platform-config", type=Path, default=None,
@@ -252,12 +274,26 @@ def load_npmi_panel(path: Path, log: logging.Logger) -> pd.DataFrame:
 def run_tracer(df: pd.DataFrame, panel: pd.DataFrame, *,
                platform_name: str, user_config: Path | None,
                pmi_threshold_override: float | None,
+               g_z_um_override: float | str | None,
                log: logging.Logger):
     """Apply config + invoke the canonical SEG pipeline."""
+    import dataclasses
     from tracer.config import load_config
     import tracer.pipeline as pipeline
 
+    # Layering inside load_config: default < platform preset < user config.
     cfg = load_config(path=user_config, platform=platform_name)
+    if g_z_um_override is not None:
+        # Highest-precedence layer: explicit CLI override of stitch.g_z_um
+        # (explicit CLI > user config > platform preset > default). The
+        # pipeline resolves "auto" against the observed z at run time.
+        cfg = dataclasses.replace(
+            cfg, stitch=dataclasses.replace(cfg.stitch, g_z_um=g_z_um_override)
+        )
+        log.info("g_z_um override (CLI): stitch.g_z_um = %r", g_z_um_override)
+    else:
+        log.info("g_z_um from %s: stitch.g_z_um = %r",
+                 "user config/platform preset/default", cfg.stitch.g_z_um)
     if pmi_threshold_override is not None:
         # PMI threshold lives at the module level (`pipeline.PMI_THR`) for
         # legacy reasons; mirror it onto the config so the receipt reflects
@@ -482,6 +518,7 @@ def main() -> int:
             platform_name=args.platform,
             user_config=args.user_config,
             pmi_threshold_override=args.pmi_threshold,
+            g_z_um_override=args.g_z_um,
             log=log,
         )
     with timer.time("build_outputs"):

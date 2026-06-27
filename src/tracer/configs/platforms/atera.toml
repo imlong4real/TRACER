@@ -1,0 +1,20 @@
+# Atera / Xenium-5k platform preset (cervical-cancer panel).
+#
+# Layered on top of `defaults.toml` via:
+#   load_config(platform="atera")
+#
+# Atera data is acquired on the 10x Xenium platform (5k panel), so its z
+# coordinate is a near-CONTINUOUS optical depth in µm (thousands of
+# distinct values over a ~10-20 µm span), exactly like standard Xenium.
+# The global default `stitch.g_z_um = 1.0` µm is appropriate and is kept
+# explicit here for clarity. This preset exists mainly so that
+# `--platform atera` selects the same nucleus-restricted PMI panel as
+# Xenium without surprising the user with a z-scaling change.
+
+[bootstrap]
+nuclear_only = true
+nucleus_col = "overlaps_nucleus"
+
+[stitch]
+# Continuous Xenium-style z — keep the historical 1.0 µm bin.
+g_z_um = 1.0

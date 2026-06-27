@@ -12,6 +12,7 @@ grid_3d Stage 4, same-bin Stage 2 at G=8, post-S5 G=2.
 """
 from __future__ import annotations
 
+import logging
 import math
 from typing import Any
 
@@ -19,6 +20,7 @@ import numpy as np
 import pandas as pd
 
 from tracer.graph import build_grid_graph_xy, build_grid_graph_xyz
+from tracer.zscale import resolve_g_z_um
 from tracer.pruning import prune_transcripts_fast, prune_genes_by_npmi_greedy
 from tracer.spatial import (
     annotate_unassigned_components_fast,
@@ -35,6 +37,39 @@ from tracer.stitching import (
     estimate_within_cell_dz_threshold,
 )
 from tracer.density_cascade import cascade_as_residual_handler
+
+_log = logging.getLogger("tracer.pipeline")
+
+
+def _resolve_stitch_g_z(df: pd.DataFrame, cfg, auto_Gz: float,
+                        coord_cols=("x", "y", "z")) -> tuple[float, int]:
+    """Resolve the Stitch z-bin (``g_z_um``) and z-neighbor depth from the
+    config request against the observed z distribution.
+
+    Centralizes the platform-aware z-scaling for both the segmented and
+    no-seg runners. Returns ``(g_z_um, z_neighbor_depth)`` ready to hand to
+    ``apply_stitching_to_transcripts_memory_efficient``. The resolved value
+    and the reason it was chosen are logged; any warnings (e.g. an explicit
+    g_z_um smaller than the platform's z-plane spacing) are surfaced at
+    WARNING level so misconfigured discrete-plane runs are not silent.
+    """
+    z_col = coord_cols[2] if len(coord_cols) >= 3 else None
+    z_vals = df[z_col].to_numpy() if (z_col and z_col in df.columns) else None
+    res = resolve_g_z_um(
+        z_vals, cfg.stitch.g_z_um,
+        z_neighbor_depth=cfg.stitch.z_neighbor_depth,
+    )
+    _log.info("z-scale resolution: %s", res.reason)
+    for w in res.warnings:
+        _log.warning("z-scale: %s", w)
+    # None g_z_um means "use the legacy within-cell estimator" (auto_Gz).
+    g_z = res.g_z_um if res.g_z_um is not None else float(auto_Gz)
+    z_depth = (
+        res.z_neighbor_depth_override
+        if res.z_neighbor_depth_override is not None
+        else cfg.stitch.z_neighbor_depth
+    )
+    return float(g_z), int(z_depth)
 
 
 # Modern config — matches segmented_workflow.ipynb / noseg_workflow.ipynb.
@@ -1689,6 +1724,8 @@ def run_segmented_pipeline(df: pd.DataFrame,
     # entity_col reads `tracer_id` directly (the active partition column
     # after Post-Group Rescue); previous code aliased this as
     # "post_stage4", a stale name from the numbered-stages era.
+    _stitch_g_z, _stitch_z_depth = _resolve_stitch_g_z(
+        df_grouped, cfg, auto_Gz, coord_cols=("x", "y", "z"))
     df_stitched, _ = apply_stitching_to_transcripts_memory_efficient(
         df_final=df_grouped, aux=aux,
         entity_col="tracer_id", gene_col="feature_name",
@@ -1704,8 +1741,8 @@ def run_segmented_pipeline(df: pd.DataFrame,
         candidate_source=cfg.stitch.candidate_source,
         G=cfg.stitch.bin_size_um,
         stitch_neighborhood=cfg.stitch.neighborhood,
-        G_z=(cfg.stitch.g_z_um if cfg.stitch.g_z_um is not None else auto_Gz),
-        z_neighbor_depth=cfg.stitch.z_neighbor_depth,
+        G_z=_stitch_g_z,
+        z_neighbor_depth=_stitch_z_depth,
         min_local_tx_per_entity=cfg.stitch.min_local_tx_per_entity,
         mahalanobis_d_rescue=cfg.stitch.mahalanobis_d_rescue,
         rescue_delta_c_floor=cfg.stitch.rescue_delta_c_floor,
@@ -1896,6 +1933,10 @@ def run_noseg_pipeline(df: pd.DataFrame, npmi_panel: pd.DataFrame,
 
     # Stitch — entity_col reads `tracer_id` directly (was aliased as
     # "post_stage4" — a stale name from the numbered-stages era).
+    # NOSEG has no within-cell prior, so the legacy auto_Gz estimator is
+    # unavailable; the resolver falls back to 1.0 µm when g_z_um is null.
+    _stitch_g_z, _stitch_z_depth = _resolve_stitch_g_z(
+        df_grouped, cfg, auto_Gz=1.0, coord_cols=("x", "y", "z"))
     df_stitched, _ = apply_stitching_to_transcripts_memory_efficient(
         df_final=df_grouped, aux=aux,
         entity_col="tracer_id", gene_col="feature_name",
@@ -1911,8 +1952,8 @@ def run_noseg_pipeline(df: pd.DataFrame, npmi_panel: pd.DataFrame,
         candidate_source=cfg.stitch.candidate_source,
         G=cfg.stitch.bin_size_um,
         stitch_neighborhood=cfg.stitch.neighborhood,
-        G_z=(cfg.stitch.g_z_um if cfg.stitch.g_z_um is not None else 1.0),
-        z_neighbor_depth=cfg.stitch.z_neighbor_depth,
+        G_z=_stitch_g_z,
+        z_neighbor_depth=_stitch_z_depth,
         min_local_tx_per_entity=cfg.stitch.min_local_tx_per_entity,
         mahalanobis_d_rescue=cfg.stitch.mahalanobis_d_rescue,
         rescue_delta_c_floor=cfg.stitch.rescue_delta_c_floor,

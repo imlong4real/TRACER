@@ -299,6 +299,11 @@ max_merger_depth = 3
 # Spatial gate — candidate pair enumeration.
 candidate_source = "grid"
 bin_size_um = 2.0
+# z-bin size (µm). Default 1.0 is tuned for Xenium's near-continuous z.
+# Discrete-plane platforms need a value matching their plane spacing —
+# use a platform preset (cosmx=0.8, merfish=1.5) or set g_z_um = "auto"
+# to derive it from the observed z distribution at run time. Use null to
+# fall back to the legacy within-cell auto_Gz estimator.
 g_z_um = 1.0
 z_neighbor_depth = 1
 neighborhood = "8"
