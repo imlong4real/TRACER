@@ -100,7 +100,10 @@ python scripts/run_tracer.py \
   --seed 1
 ```
 
-**No-segmentation mode** — reconstruct profiles from VisiumHD-style bins:
+Useful extras: `--pmi-threshold`, `--g-z-um {<float>|auto}`, `--user-config
+<file.toml>`, `--tau`, `--min-tx-per-cell-for-scores`, `--overwrite`.
+
+**No-segmentation mode** — reconstruct profiles from VisiumHD-style bins, no nucleus prior:
 
 ```bash
 python -m tracer.noseg_pipeline \
@@ -115,6 +118,72 @@ python -m tracer.noseg_pipeline \
 
 See the available options with `python scripts/run_tracer.py --help`. Add `--smoke`
 to the no-segmentation run for a fast ROI-limited end-to-end check.
+
+**VisiumHD seg mode** — nucleus segmentation as the prior
+
+VisiumHD recently starts shipping 10x nucleus polygons. `prepare_visiumhd_seg_input.py`
+overlays the bin centers onto those polygons to derive an `overlaps_nucleus`
+seed per bin (the VisiumHD analogue of imaging `overlaps_nucleus`), then the
+**same** `run_tracer.py` seg pipeline refines it. Two steps:
+
+```bash
+# Step 1 — build a seg-mode transcript table from bins + nucleus masks.
+# Start with a small ROI (--roi-size-um) before scaling up.
+python scripts/prepare_visiumhd_seg_input.py \
+  --matrix-dir  path/to/segmented_outputs/binned_outputs/square_002um/filtered_feature_bc_matrix \
+  --spatial-dir path/to/segmented_outputs/binned_outputs/square_002um/spatial \
+  --geojson     path/to/segmented_outputs/graphclust_annotated_nucleus_segmentations.geojson \
+  --npmi        npmi.csv.gz \
+  --roi-size-um 300 \
+  --out         results/tracer/seg/roi.parquet
+
+# Step 2 — run the standard seg pipeline on the prepared input.
+python scripts/run_tracer.py \
+  --transcripts results/tracer/seg/roi.parquet \
+  --npmi        npmi.csv.gz \
+  --platform    xenium \
+  --outdir      results/tracer/seg/run \
+  --sample-name seg \
+  --seed 1
+```
+
+Step 1 also writes a `<out>.meta.json` (bins, transcript rows, genes, nuclei,
+assigned/unassigned fractions, overlap ambiguity rate). The nucleus-seeded
+input makes `run_tracer.py` take the nuclear-seed prune path (whole cells +
+reconstructed partials), unlike noseg mode. The `--multi-rule` flag
+(`nearest_centroid` | `smallest_id`) controls the tie-break when a bin center
+falls inside more than one nucleus.
+
+> VisiumHD is 2D (constant `z`), so the z-aware stages auto-degrade to 2D with
+> a logged warning — no `--g-z-um` tuning is needed.
+
+#### Platform presets and z-plane scaling
+
+`--platform` selects a preset under `src/tracer/configs/platforms/`. Built-ins:
+`xenium`, `atera` (Xenium 5K), `cosmx`, `merfish`, and `noseg`.
+
+A key per-platform knob is **`stitch.g_z_um`** — the z-bin size (µm) used when
+binning transcripts in z. Imaging platforms differ in how z is sampled:
+
+| Platform | z sampling | `g_z_um` |
+|---|---|---|
+| Xenium / Atera | near-continuous optical depth (~20 µm span) | `1.0` |
+| CosMx | discrete planes ~0.8 µm apart | `0.8` |
+| MERFISH | discrete planes ~1.5 µm apart | `1.5` |
+| VisiumHD / 2D | no z | auto-degrades to 2D |
+
+Pick the right value three ways, in increasing precedence:
+
+```bash
+# 1. platform preset (recommended)
+python scripts/run_tracer.py ... --platform merfish
+
+# 2. adaptive — derive g_z_um from the observed z-plane spacing at run time
+python scripts/run_tracer.py ... --g-z-um auto
+
+# 3. explicit override (wins over user config, preset, and default)
+python scripts/run_tracer.py ... --g-z-um 1.5
+```
 
 ## Inputs
 
