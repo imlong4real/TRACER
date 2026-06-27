@@ -236,6 +236,8 @@ def explode_to_transcripts(
     panel_genes: set[str],
     max_transcripts: int | None = None,
     id_offset: int = 0,
+    bin_cell_id: "pd.Series | None" = None,
+    bin_overlaps_nucleus: "pd.Series | None" = None,
 ) -> pd.DataFrame:
     """Explode the bin x gene count matrix into one row per transcript.
 
@@ -246,6 +248,17 @@ def explode_to_transcripts(
     Returns columns ``transcript_id, feature_name, cell_id, bin_id, x, y``
     where ``cell_id`` is the sentinel ``"-1"`` and ``bin_id`` preserves the
     originating bin for the bin->profile map.
+
+    SEG-mode hooks (default off → NOSEG behavior unchanged):
+
+    * ``bin_cell_id`` — Series indexed by barcode giving each bin's initial
+      label (e.g. the nucleus id its center falls in, or ``"-1"``). When
+      provided it replaces the hard-coded ``"-1"`` cell_id, turning the
+      explode into a *segmented* TRACER input (nucleus-seeded).
+    * ``bin_overlaps_nucleus`` — Series indexed by barcode (0/1) marking
+      bins whose center overlaps a nucleus. When provided, an
+      ``overlaps_nucleus`` column is emitted so ``run_segmented_pipeline``
+      takes the nuclear-seed prune path. Missing barcodes default to 0.
     """
     import scipy.sparse as sp
 
@@ -280,18 +293,34 @@ def explode_to_transcripts(
     xs = coords["x_um"].to_numpy()
     ys = coords["y_um"].to_numpy()
 
+    # Per-bin initial label. NOSEG default: every bin is "-1" (unassigned).
+    # SEG: a per-bin label Series (nucleus id) provided by the caller.
+    if bin_cell_id is None:
+        cell_id_per_tx = "-1"
+    else:
+        per_bin = bin_cell_id.reindex(barcodes).fillna("-1").astype(str).to_numpy()
+        cell_id_per_tx = per_bin[bin_idx]
+
     df = pd.DataFrame({
         # int64 transcript_id keeps the 13M-row full run within RAM
         # (str ids cost ~1 GB); offset makes ids globally unique across tiles.
         "transcript_id": np.arange(id_offset, id_offset + total, dtype=np.int64),
         "feature_name": genes[gene_idx],
-        "cell_id": "-1",
+        "cell_id": cell_id_per_tx,
         "bin_id": barcodes[bin_idx],
         "x": xs[bin_idx].astype(np.float32),
         "y": ys[bin_idx].astype(np.float32),
     })
+
+    if bin_overlaps_nucleus is not None:
+        ov = (bin_overlaps_nucleus.reindex(barcodes)
+              .fillna(0).astype(np.uint8).to_numpy())
+        df["overlaps_nucleus"] = ov[bin_idx]
+
     print(f"[explode] {n_keep:,} panel genes x {sub.n_obs:,} bins "
-          f"-> {total:,} transcripts")
+          f"-> {total:,} transcripts"
+          + ("" if bin_cell_id is None
+             else f" (seg: {int((per_bin != '-1').sum()):,} bins nucleus-seeded)"))
     return df
 
 
