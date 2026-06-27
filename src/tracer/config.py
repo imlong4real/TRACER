@@ -515,7 +515,14 @@ class StitchConfig:
     # Spatial gate
     candidate_source: Literal["grid", "delaunay"] = "grid"
     bin_size_um: float = 2.0                    # xy bin (G)
-    g_z_um: float | None = 1.0                  # z bin; None → auto_Gz from estimator
+    # z bin size (µm). Accepts:
+    #   - a positive float (explicit; the historical Xenium default 1.0),
+    #   - the string "auto" → resolved from the observed z-plane spacing at
+    #     run time (see tracer.zscale.resolve_g_z_um); required for
+    #     discrete-plane platforms (CosMx 0.8 µm, MERFISH 1.5 µm),
+    #   - None → legacy within-cell auto_Gz estimator.
+    # Platform presets set this (cosmx=0.8, merfish=1.5); Xenium/Atera keep 1.0.
+    g_z_um: float | str | None = 1.0
     z_neighbor_depth: int = 1                   # ±depth z bins
     neighborhood: Literal["4", "8"] = "8"       # xy Moore reach
     dist_threshold_um: float = 5.0              # max 3D distance for candidate pairs
@@ -568,9 +575,14 @@ class StitchConfig:
             raise ValueError(
                 f"stitch.bin_size_um must be > 0; got {self.bin_size_um}"
             )
-        if self.g_z_um is not None and self.g_z_um <= 0:
+        if isinstance(self.g_z_um, str):
+            if self.g_z_um.strip().lower() != "auto":
+                raise ValueError(
+                    f"stitch.g_z_um string must be 'auto'; got {self.g_z_um!r}"
+                )
+        elif self.g_z_um is not None and self.g_z_um <= 0:
             raise ValueError(
-                f"stitch.g_z_um must be > 0 (or None for auto); got {self.g_z_um}"
+                f"stitch.g_z_um must be > 0, 'auto', or null; got {self.g_z_um}"
             )
         if self.z_neighbor_depth < 0:
             raise ValueError(

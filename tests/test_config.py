@@ -239,3 +239,53 @@ def test_receipt_roundtrip(tmp_path: Path):
 def test_unknown_platform_raises():
     with pytest.raises(FileNotFoundError, match="Unknown platform"):
         load_config(platform="atlantis")
+
+
+# --------------------------------------------------------------------------
+# 8. Platform-aware g_z_um — presets, "auto", precedence, validation.
+# --------------------------------------------------------------------------
+
+
+def test_stitch_g_z_um_accepts_auto():
+    from tracer.config import StitchConfig
+    cfg = StitchConfig(g_z_um="auto")
+    assert cfg.g_z_um == "auto"
+
+
+def test_stitch_g_z_um_rejects_bad_string():
+    from tracer.config import StitchConfig
+    with pytest.raises(ValueError, match="must be 'auto'"):
+        StitchConfig(g_z_um="magic")
+
+
+def test_stitch_g_z_um_rejects_nonpositive():
+    from tracer.config import StitchConfig
+    with pytest.raises(ValueError, match="must be > 0"):
+        StitchConfig(g_z_um=0.0)
+
+
+@pytest.mark.parametrize("platform, expected_g_z", [
+    ("xenium", 1.0),
+    ("atera", 1.0),
+    ("cosmx", 0.8),
+    ("merfish", 1.5),
+])
+def test_platform_presets_set_g_z_um(platform, expected_g_z):
+    cfg = load_config(platform=platform)
+    assert cfg.stitch.g_z_um == pytest.approx(expected_g_z)
+
+
+def test_g_z_um_precedence_user_over_platform(tmp_path: Path):
+    """user config > platform preset (precedence within load_config)."""
+    user = tmp_path / "user.toml"
+    user.write_text("[stitch]\ng_z_um = 0.5\n")
+    # merfish preset sets 1.5; the user file must win.
+    cfg = load_config(path=user, platform="merfish")
+    assert cfg.stitch.g_z_um == pytest.approx(0.5)
+
+
+def test_g_z_um_auto_via_user_config(tmp_path: Path):
+    user = tmp_path / "user.toml"
+    user.write_text('[stitch]\ng_z_um = "auto"\n')
+    cfg = load_config(path=user, platform="xenium")
+    assert cfg.stitch.g_z_um == "auto"
