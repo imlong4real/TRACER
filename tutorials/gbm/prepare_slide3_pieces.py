@@ -1103,7 +1103,6 @@ def main() -> None:
     plot_path = outdir / "component_plot.png"
     write_component_summary(components, summary_path)
     write_component_summary(components, diagnostics_path, include_tiny=True)
-    write_component_approval_template(components, approval_path)
     write_component_plot(
         sample_cells_and_labels,
         components,
@@ -1115,7 +1114,6 @@ def main() -> None:
     print("\n".join(messages))
     print(f"Saved component summary to: {summary_path}")
     print(f"Saved component diagnostics to: {diagnostics_path}")
-    print(f"Saved component approval template to: {approval_path}")
     print(f"Saved component plot to: {plot_path}")
 
     errors = validate_expected_counts(components)
@@ -1123,6 +1121,8 @@ def main() -> None:
         raise SystemExit("QC failed:\n" + "\n".join(errors))
 
     if args.qc_only:
+        write_component_approval_template(components, approval_path)
+        print(f"Saved component approval template to: {approval_path}")
         print("QC passed. No transcript parquets were written.")
         return
 
