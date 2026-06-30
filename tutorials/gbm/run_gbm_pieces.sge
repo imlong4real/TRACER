@@ -6,7 +6,7 @@
 #$ -o logs/$JOB_NAME.$JOB_ID.$TASK_ID.log
 #$ -pe smp 4
 #$ -l h_rt=192:00:00
-#$ -l h_vmem=64G
+#$ -l mem_free=64G
 
 set -euo pipefail
 

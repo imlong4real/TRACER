@@ -6,13 +6,13 @@
 #$ -o logs/$JOB_NAME.$JOB_ID.log
 #$ -pe smp 4
 #$ -l h_rt=192:00:00
-#$ -l h_vmem=256G
+#$ -l mem_free=256G
 
 set -euo pipefail
 
 REPO=/mnt/storage/dept/medonc/beroukhim/youyun/BTC_GBM/code/TRACER
 SIF=$REPO/tracer_latest.sif
-INPUT=/mnt/storage/dept/medonc/beroukhim/youyun/BTC_GBM/data/xenium/output-XETG00323__0023274__P4_resection__20241004__181038/transcripts.parquet
+INPUT=/mnt/storage/dept/medonc/beroukhim/youyun/BTC_GBM/data/xenium/output-XETG00323__0023274__Patient4__20241004__181038/transcripts.parquet
 NPMI=$REPO/tutorials/gbm/data/gbm_npmi.csv
 OUTPUT=$REPO/tutorials/gbm/output/df_finetuned.parquet
 
