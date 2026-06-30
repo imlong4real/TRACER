@@ -132,8 +132,7 @@ def main() -> None:
             "NPMI": ci["legacy_npmi"].to_numpy(dtype=np.float64),
         }
     )
-    panel = panel[panel["gene_i"] != panel["gene_j"]]
-    panel = panel[panel["PMI"].notna()].reset_index(drop=True)
+    panel = panel[panel["gene_i"] != panel["gene_j"]].reset_index(drop=True)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     panel.to_csv(output_path, index=False)
@@ -141,8 +140,8 @@ def main() -> None:
     print(f"Input transcripts: {n_in:,}")
     print(f"After qv>={args.qv_min} / non-empty gene: {len(df):,}")
     print(f"Genes in result: {len(result.genes):,}")
-    print(f"PMI pairs written: {len(panel):,}")
-    print(f"Saved PMI panel to: {output_path}")
+    print(f"NPMI pairs written: {len(panel):,}")
+    print(f"Saved NPMI panel to: {output_path}")
 
 
 if __name__ == "__main__":
