@@ -33,7 +33,6 @@ EXAMPLE
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 
 REQUIRED_COLUMNS = {"feature_name", "cell_id", "qv", "overlaps_nucleus"}
@@ -73,8 +72,6 @@ def main() -> None:
     import numpy as np
     import pandas as pd
 
-    repo_root = Path(__file__).resolve().parents[2]
-    sys.path.insert(0, str(repo_root / "src"))
     from tracer.metrics import compute_pmi_bootstrap
 
     input_path = Path(args.input)

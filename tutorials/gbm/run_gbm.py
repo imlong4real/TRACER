@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import sys
 import time
 from pathlib import Path
 
@@ -75,13 +74,6 @@ def _parse_args() -> argparse.Namespace:
         "next to --output (off by default; downstream scripts build their own).",
     )
     return parser.parse_args()
-
-
-def _add_src_to_path() -> None:
-    repo_root = Path(__file__).resolve().parents[2]
-    src = str(repo_root / "src")
-    if src not in sys.path:
-        sys.path.insert(0, src)
 
 
 def load_transcripts(path: Path) -> pd.DataFrame:
@@ -212,7 +204,6 @@ def _emit_cell_outputs(
 
 def main() -> None:
     args = _parse_args()
-    _add_src_to_path()
 
     np.random.seed(args.seed)
     os.environ["PYTHONHASHSEED"] = str(args.seed)
