@@ -1,22 +1,22 @@
 #!/bin/bash
 #$ -S /bin/bash
-#$ -N tracer_gbm
+#$ -N tracer_gbm_npmi
 #$ -cwd
 #$ -j y
 #$ -o logs/$JOB_NAME.$JOB_ID.log
 #$ -pe smp 4
-#$ -l h_rt=192:00:00
-#$ -l mem_free=256G
+#$ -l h_rt=24:00:00
+#$ -l mem_free=64G
 
 set -euo pipefail
 
 REPO=/mnt/storage/dept/medonc/beroukhim/youyun/BTC_GBM/code/TRACER
 SIF=$REPO/tracer_latest.sif
+# Transcripts the NPMI panel is learned from (a representative sample).
 INPUT=/mnt/storage/dept/medonc/beroukhim/youyun/BTC_GBM/data/xenium/output-XETG00323__0023274__Patient4__20241004__181038/transcripts.parquet
-NPMI=$REPO/tutorials/gbm/data/gbm_npmi.csv
-OUTPUT=$REPO/tutorials/gbm/output/df_finetuned.parquet
+OUTPUT=$REPO/tutorials/gbm/data/gbm_npmi.csv
 
-mkdir -p "$REPO/logs" "$REPO/tutorials/gbm/output"
+mkdir -p "$REPO/logs" "$REPO/tutorials/gbm/data"
 
 source /mnt/storage/dept/medonc/beroukhim/youyun/util/miniforge3/etc/profile.d/conda.sh
 conda activate segmentation
@@ -34,7 +34,10 @@ apptainer exec \
     --bind /mnt/storage:/mnt/storage \
     --pwd /app \
     "$SIF" \
-    python tutorials/gbm/run_gbm.py \
+    python tutorials/gbm/generate_npmi.py \
         --input "$INPUT" \
-        --npmi /app/tutorials/gbm/data/gbm_npmi.csv \
-        --output /app/tutorials/gbm/output/df_finetuned.parquet
+        --output /app/tutorials/gbm/data/gbm_npmi.csv \
+        --qv-min 30 \
+        --low-pct 20 \
+        --high-pct 80 \
+        --seed 1

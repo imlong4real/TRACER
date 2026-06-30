@@ -101,7 +101,7 @@ echo "Input: $INPUT_REL"
 echo "Output: $OUTPUT_REL"
 
 apptainer exec \
-    --bind "$REPO":/app \
+    --bind "$REPO/tutorials":/app/tutorials \
     --bind /mnt/storage:/mnt/storage \
     --pwd /app \
     "$SIF" \

@@ -46,7 +46,7 @@ cd "$REPO"
 
 echo "=== Step 1: Merging 8 TRACER piece parquets ==="
 apptainer exec \
-    --bind "$REPO":/app \
+    --bind "$REPO/tutorials":/app/tutorials \
     --bind /mnt/storage:/mnt/storage \
     --pwd /app \
     "$SIF" \
@@ -57,7 +57,7 @@ apptainer exec \
 
 echo "=== Step 2: Comparing original vs TRACER-refined profiles ==="
 apptainer exec \
-    --bind "$REPO":/app \
+    --bind "$REPO/tutorials":/app/tutorials \
     --bind /mnt/storage:/mnt/storage \
     --pwd /app \
     "$SIF" \
