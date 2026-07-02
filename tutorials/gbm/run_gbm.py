@@ -31,7 +31,10 @@ EXAMPLE
 from __future__ import annotations
 
 import argparse
+import logging
 import os
+import signal
+import sys
 import time
 from pathlib import Path
 
@@ -48,6 +51,42 @@ COMMON_COLUMN_ALIASES = {
 UNASSIGNED_TOKENS = frozenset(
     {"UNASSIGNED", "Unassigned", "unassigned", "DROP", "nan", "None", "", "0", "-1", "NA"}
 )
+
+
+def _setup_logging() -> logging.Logger:
+    log = logging.getLogger("run_gbm")
+    if log.handlers:
+        return log
+    log.setLevel(logging.INFO)
+    log.propagate = False
+    h = logging.StreamHandler(sys.stdout)
+    h.setFormatter(logging.Formatter(fmt="%(asctime)s %(levelname)-7s %(message)s", datefmt="%H:%M:%S"))
+    log.addHandler(h)
+    return log
+
+
+class _RuntimeExceeded(RuntimeError):
+    pass
+
+
+def _install_watchdog(max_runtime_sec: float | None, log: logging.Logger):
+    """Arm a SIGALRM watchdog that aborts with a clear message instead of hanging silently."""
+    if not max_runtime_sec or max_runtime_sec <= 0:
+        return lambda: None
+    if not hasattr(signal, "SIGALRM"):
+        log.warning("SIGALRM unavailable on this platform; --max-runtime-sec ignored.")
+        return lambda: None
+
+    def _handler(signum, frame):
+        raise _RuntimeExceeded(
+            f"TRACER pipeline exceeded the --max-runtime-sec budget ({max_runtime_sec:.0f}s). "
+            f"Re-run with TRACER_STAGE_VERBOSE=1 to see which stage stalled."
+        )
+
+    signal.signal(signal.SIGALRM, _handler)
+    signal.setitimer(signal.ITIMER_REAL, float(max_runtime_sec))
+    log.info("Watchdog armed: max runtime %.0fs", max_runtime_sec)
+    return lambda: signal.setitimer(signal.ITIMER_REAL, 0.0)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -67,6 +106,18 @@ def _parse_args() -> argparse.Namespace:
         help="Override the in-pipeline PMI prune threshold (default: from config).",
     )
     parser.add_argument("--seed", type=int, default=1, help="Reproducibility seed.")
+    parser.add_argument(
+        "--user-config",
+        type=Path,
+        default=None,
+        help="Optional user-override TOML on top of defaults+platform.",
+    )
+    parser.add_argument(
+        "--max-runtime-sec",
+        type=float,
+        default=None,
+        help="Abort with a clear error if the pipeline exceeds this wall-clock budget.",
+    )
     parser.add_argument(
         "--emit-cell-outputs",
         action="store_true",
@@ -204,12 +255,16 @@ def _emit_cell_outputs(
 
 def main() -> None:
     args = _parse_args()
+    log = _setup_logging()
 
-    np.random.seed(args.seed)
-    os.environ["PYTHONHASHSEED"] = str(args.seed)
-
+    from tracer.core import set_reproducibility_seed
     import tracer.pipeline as pipeline
     from tracer.config import load_config
+
+    os.environ.setdefault("TRACER_STAGE_VERBOSE", "1")
+    np.random.seed(args.seed)
+    os.environ["PYTHONHASHSEED"] = str(args.seed)
+    set_reproducibility_seed(args.seed)
 
     input_path = Path(args.input)
     output_path = Path(args.output)
@@ -219,17 +274,35 @@ def main() -> None:
     print(f"Reading NPMI panel from: {args.npmi}")
     panel = load_npmi_panel(Path(args.npmi))
 
-    cfg = load_config(platform=args.platform)
+    cfg = load_config(path=args.user_config, platform=args.platform)
     if args.pmi_threshold is not None:
         # PMI prune threshold lives at module level for legacy reasons; the
         # pipeline reads it as the Stage-1 prune threshold.
         pipeline.PMI_THR = float(args.pmi_threshold)
-        print(f"PMI threshold override: pipeline.PMI_THR = {pipeline.PMI_THR:.4f}")
+        log.info("PMI threshold override: pipeline.PMI_THR = %.4f", pipeline.PMI_THR)
 
-    print(f"Running run_segmented_pipeline (platform={args.platform}) ...")
+    log.info("Calling run_segmented_pipeline (df=%d rows, panel=%d pairs, platform=%s)",
+             len(df), len(panel), args.platform)
+    disarm = _install_watchdog(args.max_runtime_sec, log)
     t0 = time.time()
-    df_out, progression = pipeline.run_segmented_pipeline(df=df, npmi_panel=panel, cfg=cfg)
-    print(f"Pipeline done: {len(df_out):,} rows, {len(progression)} stages, {time.time() - t0:.1f}s")
+    try:
+        df_out, progression = pipeline.run_segmented_pipeline(df=df, npmi_panel=panel, cfg=cfg)
+    except _RuntimeExceeded as exc:
+        log.error("%s", exc)
+        raise SystemExit(2)
+    finally:
+        disarm()
+    wall = time.time() - t0
+
+    for s in progression:
+        log.info(
+            "[stage] %-22s cells=%-7s partials=%-7s components=%-7s unassigned=%-9s %.2fs",
+            s.get("stage", ""), f"{s.get('n_cells', 0):,}",
+            f"{s.get('n_partials', 0):,}", f"{s.get('n_components', 0):,}",
+            f"{s.get('n_unassigned_tx', 0):,}", (s.get("stage_seconds") or 0.0),
+        )
+    log.info("TRACER done — %d stages, output rows=%d, wall=%.1fs",
+             len(progression), len(df_out), wall)
 
     # Final per-transcript label is `stitched`; expose legacy aliases so the
     # downstream GBM scripts keep working unchanged.
@@ -237,11 +310,11 @@ def main() -> None:
     df_out["cell_id_stitched"] = df_out["stitched"].astype(str)
 
     n_cells = df_out.loc[~df_out["stitched"].astype(str).isin(UNASSIGNED_TOKENS), "stitched"].nunique()
-    print(f"Final entities (stitched): {n_cells:,}")
+    log.info("Final entities (stitched): %d", n_cells)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     df_out.to_parquet(output_path, index=False)
-    print(f"Saved refined transcripts to: {output_path}")
+    log.info("Saved refined transcripts to: %s", output_path)
 
     if args.emit_cell_outputs:
         _emit_cell_outputs(df_out, panel, output_path)
