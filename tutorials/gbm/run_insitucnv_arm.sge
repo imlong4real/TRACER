@@ -1,0 +1,119 @@
+#!/bin/bash
+#$ -S /bin/bash
+#$ -N insitucnv_arm
+#$ -cwd
+#$ -j y
+#$ -o logs/$JOB_NAME.$JOB_ID.log
+#$ -pe smp 4
+#$ -l h_rt=12:00:00
+#$ -l mem_free=48G
+
+# Run InSituCNV on ONE segmentation arm of ONE Slide 3 piece.
+#
+# Unlike the TRACER jobs, this runs in a dedicated conda env (insitucnv_env),
+# NOT the Apptainer container — InSituCNV/infercnvpy are not in tracer_latest.sif
+# and container deps cannot be added without a main-branch merge + re-pull
+# (see MEMORY: "Container deps via main"). Create the env once:
+#   conda env create -f tutorials/gbm/insitucnv_env.yml
+#   conda activate insitucnv_env
+#   pip install git+https://github.com/Moldia/InSituCNV.git   # NOT -e /tmp (node-local)
+#
+# Full run (inferCNV -> cluster -> subclones) with PIECE and ARM (raw|tracer):
+#   qsub -v PIECE=04,ARM=raw    tutorials/gbm/run_insitucnv_arm.sge
+#   qsub -v PIECE=04,ARM=tracer tutorials/gbm/run_insitucnv_arm.sge
+# Optional: RES (resolution sweep), DOWNSAMPLE (depth-match), or FROM_H5AD (cheap
+# resolution re-sweep of an existing adata_cnv.h5ad, skipping inferCNV):
+#   qsub -v PIECE=04,ARM=tracer,RES=0.05,0.1,0.2 tutorials/gbm/run_insitucnv_arm.sge
+#   qsub -v PIECE=04,ARM=tracer,FROM_H5AD=1,RES=0.03,0.08 tutorials/gbm/run_insitucnv_arm.sge
+
+set -euo pipefail
+
+# This is the gbm-branch worktree: REPO points at TRACER-gbm (its own code). The
+# gitignored data/ and output/ under tutorials/gbm/ are symlinks back to the
+# canonical TRACER/ checkout, so $REPO-relative data paths still resolve.
+REPO=/mnt/storage/dept/medonc/beroukhim/youyun/BTC_GBM/code/TRACER-gbm
+PIECE="${PIECE:?Set PIECE, e.g. qsub -v PIECE=04,ARM=raw ...}"
+ARM="${ARM:?Set ARM=raw or ARM=tracer}"
+RES="${RES:-0.05,0.1,0.2}"
+# FROM_H5AD: unset = full run; "1" = re-cluster this arm's own adata_cnv.h5ad in
+# place; or an explicit path to a specific adata_cnv.h5ad.
+FROM_H5AD="${FROM_H5AD:-}"
+# Optional depth matching: set DOWNSAMPLE to a per-cell count cap (same value for
+# both arms) to compare at matched depth. 0 = off. Matched runs write to a
+# separate <arm>_ds<N> output dir so they don't clobber the full-depth run.
+DOWNSAMPLE=${DOWNSAMPLE:-0}
+
+if [[ "$ARM" != "raw" && "$ARM" != "tracer" ]]; then
+    echo "ARM must be 'raw' or 'tracer', got: $ARM" >&2
+    exit 1
+fi
+
+if [[ "$DOWNSAMPLE" != "0" ]]; then
+    OUTDIR=$REPO/tutorials/gbm/output/insitucnv/piece${PIECE}/${ARM}_ds${DOWNSAMPLE}
+else
+    OUTDIR=$REPO/tutorials/gbm/output/insitucnv/piece${PIECE}/${ARM}
+fi
+
+mkdir -p "$REPO/logs" "$OUTDIR"
+
+source /mnt/storage/dept/medonc/beroukhim/youyun/util/miniforge3/etc/profile.d/conda.sh
+conda activate insitucnv_env
+
+export PYTHONUNBUFFERED=1
+export OMP_NUM_THREADS=${NSLOTS:-1}
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+
+cd "$REPO"
+
+if [[ -n "$FROM_H5AD" ]]; then
+    # Re-cluster / re-sweep mode: reuse an existing adata_cnv.h5ad (no inferCNV).
+    if [[ "$FROM_H5AD" == "1" ]]; then
+        ADATA=$OUTDIR/adata_cnv.h5ad
+    else
+        ADATA=$FROM_H5AD
+    fi
+    if [[ ! -f "$ADATA" ]]; then
+        echo "Missing adata_cnv.h5ad for --from-h5ad: $ADATA" >&2
+        exit 1
+    fi
+    echo "InSituCNV re-sweep arm=$ARM piece=$PIECE  from=$ADATA  RES=$RES  out=$OUTDIR"
+    python tutorials/gbm/run_insitucnv_arm.py \
+        --from-h5ad "$ADATA" \
+        --segmentation "$ARM" \
+        --cluster-resolutions "$RES" \
+        --output-dir "$OUTDIR"
+    exit 0
+fi
+
+# Full run.
+PARQUET=$REPO/tutorials/gbm/output/slide3_tracer/slide3_piece_${PIECE}_Patient4_tracer.parquet
+GENEPOS=$REPO/tutorials/gbm/data/gene_positions_grch38.tsv
+# Existing per-cell annotations (source of truth for reference/tumor compartments),
+# same file the compare_* scripts use. cell_id carries a -P4 patient suffix.
+ANNOTATIONS=${ANNOTATIONS:-/mnt/storage/dept/medonc/beroukhim/youyun/BTC_GBM/data/xenium/Xenium_Annotations/adata_obs_annotated.csv}
+# Passed with `--opt=value` below: the value starts with '-', which argparse would
+# otherwise mistake for a flag ("expected one argument").
+ANNOT_SUFFIX=${ANNOT_SUFFIX:--P4}
+
+for f in "$PARQUET" "$GENEPOS" "$ANNOTATIONS"; do
+    if [[ ! -f "$f" ]]; then
+        echo "Missing required input: $f" >&2
+        exit 1
+    fi
+done
+
+echo "InSituCNV arm=$ARM piece=$PIECE  RES=$RES  DOWNSAMPLE=$DOWNSAMPLE"
+echo "Parquet: $PARQUET"
+echo "Output:  $OUTDIR"
+
+python tutorials/gbm/run_insitucnv_arm.py \
+    --parquet "$PARQUET" \
+    --segmentation "$ARM" \
+    --gene-positions "$GENEPOS" \
+    --annotations-csv "$ANNOTATIONS" \
+    --annotation-suffix="$ANNOT_SUFFIX" \
+    --cluster-resolutions "$RES" \
+    --downsample-to-counts "$DOWNSAMPLE" \
+    --output-dir "$OUTDIR"

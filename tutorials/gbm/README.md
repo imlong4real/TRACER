@@ -130,6 +130,65 @@ opened in any browser. The notebook covers:
 4. **Analysis B — paired purity/conflict comparison** — Wilcoxon signed-rank
    tests and scatter plots for matched whole cells.
 
+## InSituCNV subclone analysis (per segmentation arm)
+
+Infer copy-number variation per cell with [InSituCNV](https://github.com/Moldia/InSituCNV)
+(Jensen et al. 2025 — a thin wrapper around `infercnvpy`/inferCNV with scVelo
+smoothing) and resolve **CNV subclones**, per segmentation arm.
+`run_insitucnv_arm.py` runs end to end for one arm: **(1) inferCNV → (2) cluster
+all cells on the CNV matrix → (3) select tumor CNV clusters as subclones and
+profile each.** Run it on both arms — `raw` (original Xenium `cell_id`) and
+`tracer` (the refined `cell_id_tracer`/`cell_id_finetuned` label from the piece
+parquets) — and compare by eyeballing the per-subclone outputs. There is **no
+bulk-tumor comparison**: pooling all tumor cells averages subclones away.
+
+Tumor and reference cells come from your **existing** annotation
+(`adata_obs_annotated.csv`), not de-novo clustering — one source of truth across
+arms. `cancer_*` → tumor; myeloid / T-cell / vascular / oligo / neutrophil →
+reference (the inferCNV baseline); else unknown. Raw arm: direct `cell_id` lookup.
+Tracer arm: each refined cell inherits the **majority** annotation of its
+constituent transcripts' original `cell_id`.
+
+Runs in its own conda env (`insitucnv_env`), **not** the Apptainer container:
+
+```bash
+conda env create -f tutorials/gbm/insitucnv_env.yml
+conda activate insitucnv_env
+pip install git+https://github.com/Moldia/InSituCNV.git   # NOT -e /tmp (node-local)
+```
+
+Run each arm (annotations, RES, and depth-match are optional overrides):
+
+```bash
+qsub -v PIECE=04,ARM=raw    tutorials/gbm/run_insitucnv_arm.sge
+qsub -v PIECE=04,ARM=tracer tutorials/gbm/run_insitucnv_arm.sge
+```
+
+Each arm writes to `tutorials/gbm/output/insitucnv/piece<NN>/<arm>/`:
+`adata_cnv.h5ad`; `arm_summary.json` (depth, baseline flatness, per-chromosome
+resolution, per-resolution subclones + events); `cnv_clusters_r{r}.csv` (every CNV
+cluster: sizes, tumor/ref/unknown fractions, `is_subclone`, events);
+`subclone_cohensd_r{r}.csv` (subclone × chromosome Cohen's d vs reference);
+`subclone_chrom_cnv_r{r}.csv`; `subclone_assignments_r{r}.csv`; and
+`plots/cnv_heatmap_r{r}.png` / `plots/spatial_clusters_r{r}.png`. A cheap
+resolution re-sweep that skips inferCNV: add `-v FROM_H5AD=1,RES=0.03,0.08`.
+
+**Subclones** are CNV clusters whose tumor-annotated fraction ≥
+`--tumor-cluster-frac` (0.5). Each is profiled by per-chromosome mean CNV and
+**Cohen's d vs reference cells** (intrinsic signal separation — not a bulk-WGS
+correlation, since WGS is bulk and Xenium cells are polyclonal). Pick the
+resolution whose subclones are distinct (e.g. separating the chr8+/chr13±/chr14+/
+chr19− events that are subclonal in this tumor) and spatially coherent.
+
+Caveats: (1) inferCNV windows are per-chromosome and the panel is sparse (~366
+genes; ~16 of 23 chromosomes have <20 genes), so defaults are
+`--window-size 10 --step 3`, `chrom_resolution.csv` reports genes+windows per
+chromosome, and chromosomes below `--min-genes-per-chromosome` (10) are flagged
+`low_resolution` and excluded from the Cohen's d. (2) Cohen's d and baseline
+flatness shrink with per-cell depth, and TRACER makes fewer/denser cells, so run
+both arms depth-matched (`-v DOWNSAMPLE=<shallower-arm-median>`, writes
+`<arm>_ds<N>/`) before trusting a difference.
+
 ## Notes
 
 - `generate_npmi.py` keeps `qv >= 30` transcripts, requires `overlaps_nucleus == 1`, and keeps confident nuclei between the 20th and 80th percentile of transcript counts.

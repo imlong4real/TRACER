@@ -1,0 +1,43 @@
+# Conda environment for the InSituCNV raw-vs-TRACER CNV comparison
+# (tutorials/gbm/run_insitucnv_arm.py + compare_insitucnv_arms.py).
+#
+# Trimmed relative to upstream Moldia/InSituCNV `insitucnv.yml`: we call the
+# `insitucnv.tl` API directly and build AnnData from the TRACER transcript
+# parquet ourselves, so the Xenium `spatialdata`/`squidpy`/`zarr` loader stack
+# is not needed. Fewer packages also means less risk on argos9's old GCC
+# (see MEMORY: "Cluster GCC constraint") — everything below is a conda-forge /
+# bioconda prebuilt binary, and infercnvpy is a pure-Python pip install.
+#
+# Create + install InSituCNV (run once on the cluster):
+#   source /mnt/storage/dept/medonc/beroukhim/youyun/util/miniforge3/etc/profile.d/conda.sh
+#   conda env create -f tutorials/gbm/insitucnv_env.yml
+#   conda activate insitucnv_env
+#   pip install git+https://github.com/Moldia/InSituCNV.git   # non-editable: copied into the env
+#
+# Do NOT use `pip install -e /tmp/InSituCNV`: /tmp is node-local on SGE, so an
+# editable install pointing there fails with ModuleNotFoundError when the job runs
+# on a different node. For an editable checkout, clone to a persistent shared path
+# (e.g. /mnt/storage/.../util/InSituCNV) and `pip install -e` that.
+name: insitucnv_env
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.11
+  - pip
+  - anndata>=0.10,<0.12
+  - h5py
+  - numpy>=1.26
+  - pandas>=2.1
+  - pyarrow
+  - scanpy>=1.10
+  - scvelo>=0.3.3
+  - leidenalg
+  - python-igraph
+  - scikit-learn>=1.4
+  - scipy
+  - matplotlib>=3.8
+  - seaborn>=0.13
+  - tqdm
+  - pip:
+      - infercnvpy>=0.6.0
