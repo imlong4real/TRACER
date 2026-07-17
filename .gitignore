@@ -34,7 +34,20 @@ datasets/
 outputs/
 output/
 cache/
-tutorials/
+
+# tutorials/ is generated/exploratory in general, but the gbm application is
+# tracked here (its data/output/junk stay ignored). Mirrors the
+# insitucnv_tracer_benchmark exception on the insitucnv-tracer-degradation branch.
+# NOTE: must be `tutorials/*` (not `tutorials/`) — git cannot re-include (!) paths
+# inside a directory that is itself excluded.
+tutorials/*
+!tutorials/gbm/
+!tutorials/gbm/**
+tutorials/gbm/**/._*
+tutorials/gbm/**/__pycache__/
+tutorials/gbm/**/*.html
+tutorials/gbm/data
+tutorials/gbm/output
 
 # Large data files
 **/data/*.parquet
