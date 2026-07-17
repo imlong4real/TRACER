@@ -148,16 +148,25 @@ cd $REPO
 qsub tutorials/gbm/run_gbm_compare.sge
 ```
 
-This chains two steps inside the container:
+**Split across two environments.** Leiden clustering needs `igraph`/`leidenalg`,
+which the pulled `tracer_latest.sif` lacks (they're downstream-only and the container
+is refreshed only via a `main` merge + re-pull). So the comparison is split along its
+dependency fault line and the SGE script chains **three** steps — the first two inside
+the container, the third in the `insitucnv_env` conda env (the shared
+"everything after TRACER" env; **create it first — see §5**, which now also pins
+`umap-learn` for `sc.tl.umap`):
 
-1. `merge_slide3_tracer.py` — concatenates the per-piece TRACER parquets into
-   `tutorials/gbm/output/slide3_tracer_merged.parquet`, tagging each row with
-   `piece_id`/`slide_tissue_id` and normalizing the whole-cell column to
-   `cell_id_tracer`.
-2. `compare_profiles.py` — builds `original` (`cell_id`) vs TRACER-refined
-   (`cell_id_tracer`) whole-cell profiles, computes purity/conflict scores, runs
-   Leiden clustering, joins Patient4 cell-type annotations, and writes to
-   `tutorials/gbm/output/slide3_profile_comparison/`:
+1. `merge_slide3_tracer.py` **[container]** — concatenates the per-piece TRACER parquets
+   into `tutorials/gbm/output/slide3_tracer_merged.parquet`, tagging each row with
+   `piece_id`/`slide_tissue_id` and normalizing the whole-cell column to `cell_id_tracer`.
+2. `compare_profiles.py --stage prep` **[container, needs `tracer`]** — builds
+   `original` (`cell_id`) vs TRACER-refined whole-cell AnnData (auto-detecting
+   `cell_id_tracer` or `cell_id_finetuned`), computes purity/conflict scores, joins
+   Patient4 cell-type annotations, QC-filters, and writes intermediates
+   `adata_{orig,ft}_prepped.h5ad` + `prep_manifest.json`.
+3. `compare_profiles.py --stage cluster` **[`insitucnv_env`, needs `igraph`]** — reads
+   the prepped h5ads and runs the scanpy pipeline (normalize → PCA → neighbors → UMAP →
+   Leiden → Wilcoxon markers), writing to `tutorials/gbm/output/slide3_profile_comparison/`:
 
 ```text
 profile_summary.csv                           # per labeling: n_cells, mean transcripts/genes, purity, conflict, n_clusters
@@ -165,6 +174,14 @@ profile_summary.csv                           # per labeling: n_cells, mean tran
 {original,finetuned}_marker_matrixplot.png
 adata_{orig,ft}.h5ad                          # full AnnData: UMAP, PCA, Leiden, purity/conflict, cell types
 ```
+
+**Three-way comparison** (original vs a previous TRACER run vs the current run, aligned
+by `piece_id`): preserve the previous run's merged parquet as
+`slide3_tracer_merged_2025-05-07.parquet`, then submit `run_gbm_threeway.sge`. It uses the
+same three-step split (`merge_slide3_tracer.py --allow-missing` → `compare_three_way.py
+--stage prep` in the container → `--stage cluster` in `insitucnv_env`) and writes
+`adata_{original,tracer_may,tracer_new}.h5ad` + matching `*_top_markers.csv` /
+`*_marker_matrixplot.png` and a 3-row `profile_summary.csv`.
 
 ## 5. InSituCNV subclone analysis (per segmentation arm)
 
@@ -185,14 +202,18 @@ reference (the inferCNV baseline); else unknown. Raw arm: direct `cell_id` looku
 Tracer arm: each refined cell inherits the **majority** annotation of its
 constituent transcripts' original `cell_id`.
 
-This stage runs in its own conda env (`insitucnv_env`), **not** the Apptainer
-container:
+This stage runs in the `insitucnv_env` conda env, **not** the Apptainer container.
+This is the shared "everything after TRACER" env — it also runs the `--stage cluster`
+step of the profile comparison in §4 (Leiden/UMAP/markers). Create it once:
 
 ```bash
 conda env create -f tutorials/gbm/insitucnv_env.yml
 conda activate insitucnv_env
 pip install git+https://github.com/Moldia/InSituCNV.git   # NOT -e /tmp (node-local)
 ```
+
+(The `InSituCNV` pip install is only needed for §5; the §4 cluster step uses just the
+conda packages — `scanpy`/`igraph`/`leidenalg`/`umap-learn`.)
 
 Run each arm (annotations, RES, and depth-match are optional overrides):
 
@@ -235,7 +256,9 @@ To run TRACER over a whole transcript parquet in one job instead of per-piece:
 qsub tutorials/gbm/run_gbm.sge   # writes tutorials/gbm/output/df_finetuned.parquet
 ```
 
-then compare with `compare_profiles.py` (via `run_gbm_compare.sge`, or directly).
+then compare with `compare_profiles.py` via `run_gbm_compare.sge` (§4). To invoke it
+directly, run the two stages in order — `--stage prep` in the container, then
+`--stage cluster` in `insitucnv_env` — pointing `--input` at the whole-slide parquet.
 
 ## Interactive Analysis
 

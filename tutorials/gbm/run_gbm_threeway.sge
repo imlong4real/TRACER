@@ -1,12 +1,12 @@
 #!/bin/bash
 #$ -S /bin/bash
-#$ -N tracer_gbm_compare
+#$ -N tracer_gbm_threeway
 #$ -cwd
 #$ -j y
 #$ -o logs/$JOB_NAME.$JOB_ID.log
 #$ -pe smp 4
 #$ -l h_rt=24:00:00
-#$ -l mem_free=128G
+#$ -l mem_free=256G
 
 set -euo pipefail
 
@@ -37,7 +37,8 @@ DATA_REAL=$(readlink -f "$REPO/tutorials/gbm/data")
 
 MANIFEST=$OUT_REAL/slide3_pieces/piece_run_manifest.csv
 NPMI=$DATA_REAL/gbm_npmi.csv
-MERGED=$OUT_REAL/slide3_tracer_merged.parquet
+NEW_MERGED=$OUT_REAL/slide3_tracer_merged.parquet
+OLD_MERGED=$OUT_REAL/slide3_tracer_merged_2025-05-07.parquet
 OUTDIR=$OUT_REAL/slide3_profile_comparison
 ANNOTATIONS=/mnt/storage/dept/medonc/beroukhim/youyun/BTC_GBM/data/xenium/Xenium_Annotations/adata_obs_annotated.csv
 
@@ -51,6 +52,11 @@ if [[ ! -f "$MANIFEST" ]]; then
 fi
 if [[ ! -f "$NPMI" ]]; then
     echo "Missing NPMI file: $NPMI" >&2
+    exit 1
+fi
+if [[ ! -f "$OLD_MERGED" ]]; then
+    echo "Missing preserved old merged parquet: $OLD_MERGED" >&2
+    echo "Rename the previous run's slide3_tracer_merged.parquet to a dated name first." >&2
     exit 1
 fi
 
@@ -67,7 +73,7 @@ export NUMEXPR_NUM_THREADS=${NSLOTS:-4}
 
 cd "$REPO"
 
-echo "=== Step 1: Merging TRACER piece parquets [container] ==="
+echo "=== Step 1: Merging current TRACER piece parquets (--allow-missing) [container] ==="
 apptainer exec \
     --bind "$REPO/tutorials":/app/tutorials \
     --bind /mnt/storage:/mnt/storage \
@@ -76,24 +82,26 @@ apptainer exec \
     python tutorials/gbm/merge_slide3_tracer.py \
         --manifest "$MANIFEST" \
         --tracer-dir "$OUT_REAL/slide3_tracer" \
-        --output "$MERGED"
+        --output "$NEW_MERGED" \
+        --allow-missing
 
-echo "=== Step 2: Prep — build AnnData + purity/conflict + QC [container] ==="
+echo "=== Step 2: Three-way prep — build AnnData + purity/conflict + QC [container] ==="
 apptainer exec \
     --bind "$REPO/tutorials":/app/tutorials \
     --bind /mnt/storage:/mnt/storage \
     --pwd /app \
     "$SIF" \
-    python tutorials/gbm/compare_profiles.py \
+    python tutorials/gbm/compare_three_way.py \
         --stage prep \
-        --input "$MERGED" \
+        --new-merged "$NEW_MERGED" \
+        --old-merged "$OLD_MERGED" \
         --npmi "$NPMI" \
         --outdir "$OUTDIR" \
         --annotations-csv "$ANNOTATIONS"
 
-echo "=== Step 3: Cluster — scanpy (Leiden/UMAP/markers) [insitucnv_env] ==="
+echo "=== Step 3: Three-way cluster — scanpy (Leiden/UMAP/markers) [insitucnv_env] ==="
 conda activate insitucnv_env
-python tutorials/gbm/compare_profiles.py \
+python tutorials/gbm/compare_three_way.py \
     --stage cluster \
     --outdir "$OUTDIR"
 

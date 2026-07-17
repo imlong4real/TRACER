@@ -28,6 +28,12 @@ def _parse_args() -> argparse.Namespace:
         default="tutorials/gbm/output/slide3_tracer_merged.parquet",
         help="Path for merged output parquet.",
     )
+    p.add_argument(
+        "--allow-missing",
+        action="store_true",
+        help="Skip (with a warning) any piece whose TRACER parquet is absent "
+        "instead of raising. Used when comparing a partial re-run.",
+    )
     return p.parse_args()
 
 
@@ -48,12 +54,21 @@ def main() -> None:
 
     chunks: list[pd.DataFrame] = []
     total_rows = 0
+    skipped: list[str] = []
 
     for _, row in manifest.iterrows():
         piece_name = Path(row["output_tracer_parquet"]).name
         piece_path = tracer_dir / piece_name
 
         if not piece_path.exists():
+            if args.allow_missing:
+                skipped.append(str(row["component_id"]))
+                print(
+                    f"  WARNING: Missing piece parquet: {piece_path} — skipping "
+                    f"(piece_id={row['component_id']})",
+                    flush=True,
+                )
+                continue
             raise FileNotFoundError(f"Missing piece parquet: {piece_path}")
 
         print(f"  Reading {piece_name} ...", flush=True)
@@ -69,6 +84,14 @@ def main() -> None:
         print(f"    {len(df):>12,} rows  (piece_id={row['component_id']})", flush=True)
         total_rows += len(df)
         chunks.append(df)
+
+    if skipped:
+        print(f"\nSkipped {len(skipped)} missing piece(s): {', '.join(skipped)}\n", flush=True)
+
+    if not chunks:
+        raise FileNotFoundError(
+            f"No piece parquets found in {tracer_dir} (all {len(manifest)} manifest rows missing)."
+        )
 
     print(f"\nConcatenating {len(chunks)} pieces ({total_rows:,} rows total) ...", flush=True)
     merged = pd.concat(chunks, ignore_index=True)

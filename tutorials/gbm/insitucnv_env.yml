@@ -1,5 +1,10 @@
-# Conda environment for the InSituCNV raw-vs-TRACER CNV comparison
-# (tutorials/gbm/run_insitucnv_arm.py + compare_insitucnv_arms.py).
+# Conda environment for the post-TRACER downstream analysis: it runs BOTH the
+# InSituCNV raw-vs-TRACER CNV comparison (tutorials/gbm/run_insitucnv_arm.py +
+# compare_insitucnv_arms.py) AND the profile-comparison clustering stage
+# (compare_profiles.py / compare_three_way.py `--stage cluster`). Those clustering
+# scripts split the TRACER-dependent work (make_adata + purity/conflict) into the
+# Apptainer container and run only scanpy (Leiden/UMAP/markers) here, so this env
+# needs scanpy + igraph + leidenalg + umap-learn but NOT tracer/torch/open3d.
 #
 # Trimmed relative to upstream Moldia/InSituCNV `insitucnv.yml`: we call the
 # `insitucnv.tl` API directly and build AnnData from the TRACER transcript
@@ -34,6 +39,7 @@ dependencies:
   - scvelo>=0.3.3
   - leidenalg
   - python-igraph
+  - umap-learn        # sc.tl.umap in the compare_* --stage cluster pipeline
   - scikit-learn>=1.4
   - scipy
   - matplotlib>=3.8
