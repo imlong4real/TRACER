@@ -60,6 +60,7 @@ from compare_profiles import (
     _log,
     _resolve_tracer_col,
     _run_cluster,
+    _sanitize_obs_for_h5ad,
     _whole_cell_mask,
 )
 
@@ -211,7 +212,7 @@ def _run_prep(args) -> None:
         adata = _filter_qc(adatas[key], min_transcripts=args.min_transcripts, min_genes=args.min_genes)
         _log(f"[{key}] after QC: {adata.n_obs:,} cells")
         prepped = f"adata_{key}_prepped.h5ad"
-        adata.write_h5ad(outdir / prepped)
+        _sanitize_obs_for_h5ad(adata).write_h5ad(outdir / prepped)
         entries.append({
             "key": key, "prefix": key, "prepped": prepped,
             "final": f"adata_{key}.h5ad", "markers": f"{key}_top_markers.csv",

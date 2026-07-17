@@ -113,6 +113,32 @@ def _filter_qc(adata, *, min_transcripts: int, min_genes: int):
     return adata[mask].copy()
 
 
+# tracer.metrics writes cell_purity_bool / is_conflict as object columns holding
+# Python bools + NaN (cells absent from the purity/conflict tables). h5py can't
+# serialize those to a vlen-string dataset, so write_h5ad() raises
+# "Can't implicitly convert non-string objects to strings". They're unused
+# downstream (the summary reads the float cell_purity / conflict_score columns),
+# so drop them.
+_NONWRITABLE_OBS_COLS = ["cell_purity_bool", "is_conflict"]
+
+
+def _sanitize_obs_for_h5ad(adata):
+    """Make adata.obs writable by h5py before write_h5ad (prep AND cluster stages).
+
+    1. Drop the unused object bool columns (see above).
+    2. Coerce every remaining object column to categorical. The annotation join
+       leaves cell_type as an object column of str + NaN (un-annotated cells);
+       older anndata (as in the container) writes object columns as vlen strings
+       and chokes on the NaN with the same TypeError. anndata's categorical codec
+       stores NaN as a missing code and round-trips values intact on all versions.
+    """
+    adata.obs.drop(columns=_NONWRITABLE_OBS_COLS, errors="ignore", inplace=True)
+    for col in adata.obs.columns:
+        if adata.obs[col].dtype == object:
+            adata.obs[col] = adata.obs[col].astype("category")
+    return adata
+
+
 def _run_scanpy_pipeline(adata, *, prefix: str, n_neighbors: int, leiden_resolution: float):
     import scanpy as sc
 
@@ -293,8 +319,8 @@ def _run_prep(args) -> None:
     _log(f"After QC — original: {adata_orig.n_obs:,} cells  |  TRACER: {adata_ft.n_obs:,} cells")
 
     _log("Writing prepped h5ads ...")
-    adata_orig.write_h5ad(outdir / "adata_orig_prepped.h5ad")
-    adata_ft.write_h5ad(outdir / "adata_ft_prepped.h5ad")
+    _sanitize_obs_for_h5ad(adata_orig).write_h5ad(outdir / "adata_orig_prepped.h5ad")
+    _sanitize_obs_for_h5ad(adata_ft).write_h5ad(outdir / "adata_ft_prepped.h5ad")
 
     entries = [
         {"key": "original", "prefix": "original", "prepped": "adata_orig_prepped.h5ad",
@@ -347,7 +373,7 @@ def _run_cluster(args) -> None:
 
         summary_rows.append(_summary_row(e["key"], adata))
 
-        adata.obs.drop(columns=["cell_purity_bool", "is_conflict"], errors="ignore", inplace=True)
+        _sanitize_obs_for_h5ad(adata)
         _log(f"[{e['key']}] saving {e['final']} ...")
         adata.write_h5ad(outdir / e["final"])
 
