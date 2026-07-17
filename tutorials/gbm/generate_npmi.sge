@@ -10,7 +10,10 @@
 
 set -euo pipefail
 
-REPO=/mnt/storage/dept/medonc/beroukhim/youyun/BTC_GBM/code/TRACER
+# gbm-branch worktree: REPO is TRACER-gbm (its own code). The gitignored
+# tracer_latest.sif, data/ and output/ are symlinks back to the canonical TRACER/
+# checkout, so $REPO-relative paths resolve.
+REPO=/mnt/storage/dept/medonc/beroukhim/youyun/BTC_GBM/code/TRACER-gbm
 SIF=$REPO/tracer_latest.sif
 # Transcripts the NPMI panel is learned from (a representative sample).
 INPUT=/mnt/storage/dept/medonc/beroukhim/youyun/BTC_GBM/data/xenium/output-XETG00323__0023274__Patient4__20241004__181038/transcripts.parquet

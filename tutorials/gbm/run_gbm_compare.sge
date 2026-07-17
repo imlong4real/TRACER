@@ -10,7 +10,10 @@
 
 set -euo pipefail
 
-REPO=/mnt/storage/dept/medonc/beroukhim/youyun/BTC_GBM/code/TRACER
+# gbm-branch worktree: REPO is TRACER-gbm (its own code). The gitignored
+# tracer_latest.sif, data/ and output/ are symlinks back to the canonical TRACER/
+# checkout, so $REPO-relative paths resolve.
+REPO=/mnt/storage/dept/medonc/beroukhim/youyun/BTC_GBM/code/TRACER-gbm
 SIF=$REPO/tracer_latest.sif
 MANIFEST=$REPO/tutorials/gbm/output/slide3_pieces/piece_run_manifest.csv
 NPMI=$REPO/tutorials/gbm/data/gbm_npmi.csv
