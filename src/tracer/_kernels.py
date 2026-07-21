@@ -157,3 +157,124 @@ def pair_aggregate_dense(
         k_arr, n_pos, sum_neg, pos_relu, neg_relu,
     )
     return k_arr, n_pos, sum_neg, pos_relu, neg_relu
+
+
+# ---------------------------------------------------------------------------
+# top-k present-in-profile ReLU aggregation
+# ---------------------------------------------------------------------------
+@njit(parallel=True, cache=True, fastmath=False)
+def _kernel_topk(M_u8, col_idx, npmi_mat, tau, top_k,
+                 k_out, pos_relu_out, neg_relu_out, nsig_out):
+    """Per-row ReLU pos/neg sums restricted to the top-k strongest
+    interactions AMONG genes present in the row.
+
+    For each row we (a) collect present-gene global indices, (b) accumulate the
+    signed symmetric-ReLU(NPMI, tau) contributions of every present-gene pair
+    whose |NPMI| clears the ``tau`` dead-zone, then (c) keep only the ``top_k``
+    contributions with the largest magnitude before summing the positive and
+    negative parts.  When ``top_k <= 0`` or a row has <= ``top_k`` signal pairs
+    every signal pair is kept (identical to the full ReLU aggregation).
+    """
+    n_rows = M_u8.shape[0]
+    n_cols = M_u8.shape[1]
+    for r in prange(n_rows):
+        present = np.empty(n_cols, dtype=np.int64)
+        k = 0
+        for c in range(n_cols):
+            if M_u8[r, c]:
+                present[k] = col_idx[c]
+                k += 1
+        k_out[r] = k
+        if k < 2:
+            pos_relu_out[r] = 0.0
+            neg_relu_out[r] = 0.0
+            nsig_out[r] = 0
+            continue
+        maxp = k * (k - 1) // 2
+        contrib = np.empty(maxp, dtype=np.float64)  # signed relu-adjusted value
+        m = 0
+        for i in range(k):
+            gi = present[i]
+            for j in range(i + 1, k):
+                gj = present[j]
+                v = npmi_mat[gi, gj]
+                if v != v:            # NaN -> unobserved
+                    continue
+                if v > tau:
+                    contrib[m] = v - tau
+                    m += 1
+                elif v < -tau:
+                    contrib[m] = v + tau   # negative; magnitude = -v - tau
+                    m += 1
+        nsig_out[r] = m
+        pos = 0.0
+        neg = 0.0
+        if m == 0:
+            pos_relu_out[r] = 0.0
+            neg_relu_out[r] = 0.0
+            continue
+        if top_k <= 0 or m <= top_k:
+            for t in range(m):
+                cval = contrib[t]
+                if cval > 0.0:
+                    pos += cval
+                else:
+                    neg += -cval
+        else:
+            absv = np.empty(m, dtype=np.float64)
+            for t in range(m):
+                a = contrib[t]
+                absv[t] = a if a >= 0.0 else -a
+            abss = np.sort(absv)             # ascending
+            cutoff = abss[m - top_k]         # k-th largest magnitude
+            taken = 0
+            for t in range(m):
+                a = contrib[t]
+                mag = a if a >= 0.0 else -a
+                if mag > cutoff:
+                    if a > 0.0:
+                        pos += a
+                    else:
+                        neg += -a
+                    taken += 1
+            need = top_k - taken
+            if need > 0:                     # break ties at the cutoff value
+                for t in range(m):
+                    if need == 0:
+                        break
+                    a = contrib[t]
+                    mag = a if a >= 0.0 else -a
+                    if mag == cutoff:
+                        if a > 0.0:
+                            pos += a
+                        else:
+                            neg += -a
+                        need -= 1
+        pos_relu_out[r] = pos
+        neg_relu_out[r] = neg
+
+
+def pair_aggregate_topk(M, col_idx, npmi_mat, *, tau=0.05, top_k=500):
+    """Top-k present-in-profile ReLU aggregation (wrapper around ``_kernel_topk``).
+
+    Returns ``(k, pos_relu, neg_relu, n_signal)`` where ``k`` is the number of
+    present genes per row, ``pos_relu``/``neg_relu`` are the summed positive /
+    negative symmetric-ReLU contributions over the top-k strongest present-gene
+    interactions, and ``n_signal`` is how many present-gene pairs cleared the
+    ``tau`` dead-zone (before top-k truncation).  ``top_k <= 0`` disables the
+    truncation (full aggregation).
+    """
+    M_u8 = np.ascontiguousarray(M, dtype=np.uint8)
+    col_idx_i64 = np.ascontiguousarray(col_idx, dtype=np.int64)
+    if npmi_mat.dtype != np.float64 and npmi_mat.dtype != np.float32:
+        npmi_mat = np.ascontiguousarray(npmi_mat, dtype=np.float32)
+    else:
+        npmi_mat = np.ascontiguousarray(npmi_mat)
+    n_rows = M_u8.shape[0]
+    k_arr = np.empty(n_rows, dtype=np.int64)
+    pos_relu = np.empty(n_rows, dtype=np.float64)
+    neg_relu = np.empty(n_rows, dtype=np.float64)
+    nsig = np.empty(n_rows, dtype=np.int64)
+    _kernel_topk(M_u8, col_idx_i64, npmi_mat, float(tau), int(top_k),
+                 k_arr, pos_relu, neg_relu, nsig)
+    return k_arr, pos_relu, neg_relu, nsig
