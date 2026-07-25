@@ -63,9 +63,40 @@ cd $REPO
 qsub tutorials/gbm/generate_npmi.sge
 ```
 
-Writes `tutorials/gbm/data/gbm_npmi.csv` (keeps `qv >= 30`,
-`overlaps_nucleus == 1`, and confident nuclei between the 20th and 80th percentile
-of transcript counts).
+Writes `tutorials/gbm/data/gbm_npmi_no_controls.csv` (keeps `qv >= 30`,
+excludes Xenium control/deprecated features, uses nucleus-overlapping transcripts,
+keeps confident nuclei between the 20th and 80th percentile of transcript counts,
+and applies a 5th-95th percentile per-gene size-band filter).
+
+### Piece 5 PMI/Prune diagnostic
+
+Before replacing the production panel, generate a corrected spatial PMI panel
+from piece 5 and run only the compiled nuclear-seed Prune stage:
+
+```bash
+cd $REPO
+mkdir -p logs
+qsub tutorials/gbm/run_gbm_piece5_pmi_diagnostic.sge
+```
+
+The job exports only accepted `W_sparse` edges. The complete bootstrap
+`pair_ci` table remains a separate audit file and cannot enter Prune. It also
+compares the corrected panel with the existing whole-slide panel. To include a
+single-cell panel comparison, pass its cluster-visible path:
+
+```bash
+qsub -v SCRNA_PMI=/mnt/storage/path/to/pmi_panel_GBM_logcp10000_xge1_sub50k_long.csv \
+  tutorials/gbm/run_gbm_piece5_pmi_diagnostic.sge
+```
+
+Outputs are isolated under
+`tutorials/gbm/output/pmi_diagnostics/piece5/`. The key receipt is
+`piece5_spatial_prune_summary.json`; the per-nucleus evidence is in
+`piece5_spatial_prune_cells.csv`. Interpret retained original nuclei as:
+
+- `>= 4,500`: piece scope or the old exporter explains the prior collapse.
+- `2,000-4,499`: review edge coverage and per-seed support before proceeding.
+- `< 2,000`: spatial PMI remains incompatible; test the single-cell panel for production.
 
 ## 2. Slide 3 tissue pieces
 
@@ -228,9 +259,13 @@ Each arm writes to `tutorials/gbm/output/insitucnv/piece<NN>/<arm>/`:
 resolution, per-resolution subclones + events); `cnv_clusters_r{r}.csv` (every CNV
 cluster: sizes, tumor/ref/unknown fractions, `is_subclone`, events);
 `subclone_cohensd_r{r}.csv` (subclone × chromosome Cohen's d vs reference);
-`subclone_chrom_cnv_r{r}.csv`; `subclone_assignments_r{r}.csv`; and
-`plots/cnv_heatmap_r{r}.png` / `plots/spatial_clusters_r{r}.png`. A cheap
-resolution re-sweep that skips inferCNV: add `-v FROM_H5AD=1,RES=0.03,0.08`.
+`subclone_chrom_cnv_r{r}.csv`; `subclone_assignments_r{r}.csv`; and plots
+`plots/cnv_heatmap_r{r}.png` (per-cell × genome), `plots/spatial_clusters_r{r}.png`,
+plus two per-subclone summary heatmaps — `plots/subclone_chrom_cnv_heatmap_r{r}.png`
+(subclone × chromosome mean CNV, with a reference baseline row) and
+`plots/subclone_cohensd_heatmap_r{r}.png` (subclone × chromosome Cohen's d vs
+reference). A cheap resolution re-sweep that skips inferCNV (and regenerates all of
+these): add `-v FROM_H5AD=1,RES=0.03,0.08`.
 
 **Subclones** are CNV clusters whose tumor-annotated fraction ≥
 `--tumor-cluster-frac` (0.5). Each is profiled by per-chromosome mean CNV and
@@ -287,8 +322,10 @@ cells.
   bind `/mnt/storage`. `tracer_latest.sif`, `data/`, and `output/` are symlinks to
   the canonical `…/code/TRACER` checkout (one shared data copy). Adjust `REPO` if
   the worktree lives elsewhere.
-- `generate_npmi.py` keeps `qv >= 30`, requires `overlaps_nucleus == 1`, and keeps
-  confident nuclei between the 20th and 80th percentile of transcript counts.
+- `generate_npmi.py` keeps `qv >= 30`, excludes Xenium control/deprecated features,
+  requires `overlaps_nucleus == 1`, keeps confident nuclei between the 20th and
+  80th percentile of transcript counts, and applies a 5th-95th percentile
+  per-gene size-band filter.
 - `run_gbm.py` uses the lung-tutorial settings (`deltaC_min=0.01`,
   `dist_threshold=5.0`) and writes the whole-cell label to `cell_id_tracer`.
 - The `compare_profiles.py` / InSituCNV scripts accept either `cell_id_tracer`

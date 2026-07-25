@@ -57,6 +57,9 @@ tutorials/gbm/output
 *.csv.gz
 *.tsv
 
+# Container images (pulled from ghcr; never commit the multi-GB blob)
+*.sif
+
 # Output artifacts
 **/output/*.parquet
 **/output/*.csv

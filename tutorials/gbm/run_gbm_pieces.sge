@@ -5,8 +5,12 @@
 #$ -j y
 #$ -o logs/$JOB_NAME.$JOB_ID.$TASK_ID.log
 #$ -pe smp 4
-#$ -l h_rt=192:00:00
-#$ -l mem_free=64G
+# 48h (was 192h): piece-5 Rescue alone ran ~10 min; the biggest pieces are ~13x
+# larger with this denser panel, so 48h leaves margin without the 8-day ceiling.
+#$ -l h_rt=48:00:00
+# 128G (was 64G): the dense single-cell panel retains far more entities per piece
+# (piece 5: ~668 -> ~4,276 cells), so Group/Stitch graphs are much heavier.
+#$ -l mem_free=128G
 
 set -euo pipefail
 
@@ -15,8 +19,20 @@ set -euo pipefail
 # checkout, so $REPO-relative paths resolve.
 REPO=/mnt/storage/dept/medonc/beroukhim/youyun/BTC_GBM/code/TRACER-gbm
 SIF=$REPO/tracer_latest.sif
-MANIFEST=$REPO/tutorials/gbm/output/slide3_pieces/piece_run_manifest.csv
-NPMI=$REPO/tutorials/gbm/data/gbm_npmi.csv
+DATA_REAL=$(readlink -f "$REPO/tutorials/gbm/data")
+OUT_REAL=$(readlink -f "$REPO/tutorials/gbm/output")
+[[ "$DATA_REAL" == /mnt/storage/* && "$OUT_REAL" == /mnt/storage/* ]] || {
+    echo "Resolved data/output escape the /mnt/storage bind: $DATA_REAL / $OUT_REAL" >&2
+    exit 1
+}
+MANIFEST=$OUT_REAL/slide3_pieces/piece_run_manifest.csv
+# Panel: default to the collaborator's dense single-cell PMI panel, which resolves
+# the piece-5 over-pruning collapse. Override with `qsub -v NPMI=/mnt/storage/...`
+# (e.g. the whole-slide spatial panel $DATA_REAL/gbm_npmi_no_controls.csv).
+NPMI=${NPMI:-$DATA_REAL/pmi_panel_GBM_logcp10000_xge1_sub50k_long.csv}
+# Output dir: keep collab-panel results separate from the Jul-20 spatial-panel run
+# so nothing is clobbered. Set `-v OUT_SUBDIR=slide3_tracer` to overwrite in place.
+OUT_SUBDIR=${OUT_SUBDIR:-slide3_tracer_collab}
 
 if [[ -z "${SGE_TASK_ID:-}" ]]; then
     echo "SGE_TASK_ID is missing. Submit with qsub -t 1-N tutorials/gbm/run_gbm_pieces.sge" >&2
@@ -77,8 +93,16 @@ if [[ "$INPUT_REL" = /* || "$OUTPUT_REL" = /* ]]; then
     exit 1
 fi
 
-INPUT=$REPO/$INPUT_REL
-OUTPUT=$REPO/$OUTPUT_REL
+# Re-root the manifest's output into $OUT_SUBDIR (default: slide3_tracer_collab) so
+# the collaborator-panel run does not overwrite the spatial-panel outputs. When
+# OUT_SUBDIR=slide3_tracer this substitution is a no-op (writes in place).
+OUTPUT_REL="${OUTPUT_REL/slide3_tracer\//$OUT_SUBDIR/}"
+
+INPUT=$(readlink -f "$REPO/$INPUT_REL")
+OUTPUT_HOST=$REPO/$OUTPUT_REL
+mkdir -p "$(dirname "$OUTPUT_HOST")"
+OUTPUT_DIR_REAL=$(readlink -f "$(dirname "$OUTPUT_HOST")")
+OUTPUT=$OUTPUT_DIR_REAL/$(basename "$OUTPUT_HOST")
 
 if [[ ! -f "$INPUT" ]]; then
     echo "Missing task input parquet for task $SGE_TASK_ID: $INPUT" >&2
@@ -100,8 +124,11 @@ cd "$REPO"
 
 echo "Running Slide 3 piece task $TASK_ID: $SAMPLE_NAME $COMPONENT_ID"
 echo "Label: $ASSIGNED_LABEL tissue=$SLIDE_TISSUE_ID rows=$ROWS_WRITTEN"
+echo "Panel: $NPMI"
 echo "Input: $INPUT_REL"
 echo "Output: $OUTPUT_REL"
+echo "Resolved input: $INPUT"
+echo "Resolved output: $OUTPUT"
 
 apptainer exec \
     --bind "$REPO/tutorials":/app/tutorials \
@@ -109,6 +136,6 @@ apptainer exec \
     --pwd /app \
     "$SIF" \
     python tutorials/gbm/run_gbm.py \
-        --input "/app/$INPUT_REL" \
-        --npmi /app/tutorials/gbm/data/gbm_npmi.csv \
-        --output "/app/$OUTPUT_REL"
+        --input "$INPUT" \
+        --npmi "$NPMI" \
+        --output "$OUTPUT"

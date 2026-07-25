@@ -36,7 +36,7 @@ DATA_REAL=$(readlink -f "$REPO/tutorials/gbm/data")
 }
 
 MANIFEST=$OUT_REAL/slide3_pieces/piece_run_manifest.csv
-NPMI=$DATA_REAL/gbm_npmi.csv
+NPMI=$DATA_REAL/gbm_npmi_no_controls.csv
 NEW_MERGED=$OUT_REAL/slide3_tracer_merged.parquet
 OLD_MERGED=$OUT_REAL/slide3_tracer_merged_2025-05-07.parquet
 OUTDIR=$OUT_REAL/slide3_profile_comparison

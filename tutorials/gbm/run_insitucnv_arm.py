@@ -567,6 +567,97 @@ def render_cnv_heatmap(adata, group_key: str, out_path: Path, vmax: float, cnv_k
     plt.close(fig)
 
 
+def _annotate_cells(ax, M: np.ndarray, vmax: float, fmt: str) -> None:
+    """Overlay the numeric value in each cell when the grid is small enough to stay legible."""
+    if M.size > 400:  # too many cells: labels would be unreadable, skip.
+        return
+    for i in range(M.shape[0]):
+        for j in range(M.shape[1]):
+            v = M[i, j]
+            if np.isfinite(v):
+                ax.text(j, i, format(v, fmt), ha="center", va="center", fontsize=6,
+                        color="black" if abs(v) < 0.6 * vmax else "white")
+
+
+def render_subclone_chrom_heatmap(cnv_df: pd.DataFrame, ref_row, low_res: set,
+                                  out_path: Path, vmax: float) -> None:
+    """Subclone x chromosome MEAN-CNV heatmap (rows = reference baseline + each subclone).
+
+    The compact "which subclone carries which arm-level gain/loss" view: one row per
+    subclone plus a leading ``reference`` baseline row (should read ~flat), columns are
+    chromosomes. Low-resolution chromosomes (excluded from the Cohen's d) are marked
+    with ``*`` on the axis label but still shown here.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    if cnv_df.empty:
+        print("[heatmap] no subclones at this resolution; skipping subclone chrom heatmap.", flush=True)
+        return
+    cols = list(cnv_df.columns)
+    rows, data = [], []
+    if ref_row is not None:
+        rows.append("reference"); data.append(np.asarray(ref_row.reindex(cols), dtype=float))
+    for lab in cnv_df.index:
+        rows.append(f"subclone {lab}"); data.append(np.asarray(cnv_df.loc[lab].reindex(cols), dtype=float))
+    M = np.asarray(data, dtype=float)
+
+    cmap = plt.get_cmap("RdBu_r").copy()
+    cmap.set_bad("lightgrey")
+
+    fig, ax = plt.subplots(figsize=(max(6.0, 0.5 * len(cols) + 2), max(2.5, 0.5 * len(rows) + 1)))
+    im = ax.imshow(np.ma.masked_invalid(M), aspect="auto", cmap=cmap, vmin=-vmax, vmax=vmax)
+    ax.set_xticks(range(len(cols)))
+    ax.set_xticklabels([c.replace("chr", "") + ("*" if c in low_res else "") for c in cols], fontsize=8)
+    ax.set_yticks(range(len(rows))); ax.set_yticklabels(rows, fontsize=8)
+    if ref_row is not None:  # separate the baseline row from the subclones.
+        ax.axhline(0.5, color="black", lw=1.0)
+    _annotate_cells(ax, M, vmax, ".2f")
+    ax.set_xlabel("chromosome  (* = low-resolution, < min genes)")
+    ax.set_title("Mean inferred CNV by subclone")
+    fig.colorbar(im, ax=ax, shrink=0.7, label="mean inferred CNV")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
+def render_cohensd_heatmap(cohensd_df: pd.DataFrame, out_path: Path) -> None:
+    """Subclone x chromosome Cohen's-d (vs reference) heatmap.
+
+    Significance-aware companion to the mean-CNV heatmap: separates a real event from
+    depth noise. Low-resolution / degenerate chromosomes are NaN and render grey. The
+    color scale is symmetric and adapts to the data (capped at +/-3).
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    if cohensd_df.empty:
+        print("[heatmap] no subclones at this resolution; skipping Cohen's d heatmap.", flush=True)
+        return
+    cols = list(cohensd_df.columns)
+    rows = [f"subclone {lab}" for lab in cohensd_df.index]
+    M = cohensd_df.to_numpy(dtype=float)
+    finite = M[np.isfinite(M)]
+    vmax = float(min(3.0, max(0.5, np.abs(finite).max()))) if finite.size else 1.0
+
+    cmap = plt.get_cmap("RdBu_r").copy()
+    cmap.set_bad("lightgrey")
+
+    fig, ax = plt.subplots(figsize=(max(6.0, 0.5 * len(cols) + 2), max(2.5, 0.5 * len(rows) + 1)))
+    im = ax.imshow(np.ma.masked_invalid(M), aspect="auto", cmap=cmap, vmin=-vmax, vmax=vmax)
+    ax.set_xticks(range(len(cols))); ax.set_xticklabels([c.replace("chr", "") for c in cols], fontsize=8)
+    ax.set_yticks(range(len(rows))); ax.set_yticklabels(rows, fontsize=8)
+    _annotate_cells(ax, M, vmax, ".1f")
+    ax.set_xlabel("chromosome  (grey = low-resolution / undefined)")
+    ax.set_title("Cohen's d vs reference by subclone")
+    fig.colorbar(im, ax=ax, shrink=0.7, label="Cohen's d (subclone − reference)")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
 # --------------------------------------------------------------------------- #
 # Main
 # --------------------------------------------------------------------------- #
@@ -805,6 +896,9 @@ def _profile_and_write(adata, args, out_dir: Path, stats: dict) -> None:
     per_cell_chr = per_cell_chromosome_cnv(adata)
     ref_mask = (adata.obs["compartment"].astype(str) == "reference").to_numpy()
     baseline_flatness = float(np.nanstd(per_cell_chr.to_numpy()[ref_mask])) if ref_mask.any() else float("nan")
+    # Reference-cell per-chromosome mean CNV = the flat baseline row for the subclone
+    # heatmap (same per-cell quantity the Cohen's d compares against).
+    ref_chrom_mean = per_cell_chr[ref_mask].mean() if ref_mask.any() else None
 
     # Bulk sanity: mean CNV by compartment (NOT the subclone analysis).
     comp_tbl = chromosome_cluster_table(adata, "compartment")
@@ -844,6 +938,10 @@ def _profile_and_write(adata, args, out_dir: Path, stats: dict) -> None:
 
         render_cnv_heatmap(adata, key, plots_dir / f"cnv_heatmap_r{rtag}.png", args.vmax)
         _spatial(adata, key, plots_dir / f"spatial_clusters_r{rtag}.png")
+        # Per-subclone CNV summaries (readable views of the two CSVs above).
+        render_subclone_chrom_heatmap(cnv_df, ref_chrom_mean, low_res,
+                                      plots_dir / f"subclone_chrom_cnv_heatmap_r{rtag}.png", args.vmax)
+        render_cohensd_heatmap(cohensd_df, plots_dir / f"subclone_cohensd_heatmap_r{rtag}.png")
 
         subs = clusters_df.index[clusters_df["is_subclone"]].tolist()
         summary["resolutions"][rtag] = {

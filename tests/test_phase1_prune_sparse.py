@@ -265,7 +265,10 @@ def test_neg_one_sentinel_counts_in_greedy_strip():
 import pandas as pd  # noqa: E402
 
 from tracer.metrics import PmiBootstrapResult  # noqa: E402
-from tracer.pruning import prune_transcripts_nuclear_seed  # noqa: E402
+from tracer.pruning import (  # noqa: E402
+    build_sparse_pmi_matrix_from_long,
+    prune_transcripts_nuclear_seed,
+)
 
 
 def _npmi_df(*, fill_absent):
@@ -319,6 +322,33 @@ def _prune(npmi, **kw):
         min_nuclear_genes=3, **kw,
     )
     return out["tracer_id"].to_numpy()
+
+
+def test_long_builder_collapses_equivalent_symmetric_rows_without_doubling():
+    panel = pd.DataFrame(
+        [
+            ("A", "B", 0.4),
+            ("B", "A", 0.4),
+        ],
+        columns=["gene_i", "gene_j", "PMI"],
+    )
+    _genes, gene_to_idx, W = build_sparse_pmi_matrix_from_long(panel)
+    i, j = sorted((gene_to_idx["A"], gene_to_idx["B"]))
+
+    assert W.nnz == 1
+    assert W[i, j] == pytest.approx(0.4)
+
+
+def test_long_builder_rejects_conflicting_symmetric_rows():
+    panel = pd.DataFrame(
+        [
+            ("A", "B", 0.4),
+            ("B", "A", 0.8),
+        ],
+        columns=["gene_i", "gene_j", "PMI"],
+    )
+    with pytest.raises(ValueError, match="Conflicting duplicate undirected PMI"):
+        build_sparse_pmi_matrix_from_long(panel)
 
 
 def test_wrapper_dense_sparse_parity_fully_observed():

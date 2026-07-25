@@ -1,31 +1,45 @@
 #!/bin/bash
 #$ -S /bin/bash
-#$ -N tracer_gbm
+#$ -N tracer_gbm_p5_collab
 #$ -cwd
 #$ -j y
 #$ -o logs/$JOB_NAME.$JOB_ID.log
 #$ -pe smp 4
-#$ -l h_rt=192:00:00
-#$ -l mem_free=256G
+#$ -l h_rt=48:00:00
+#$ -l mem_free=64G
 
 set -euo pipefail
 
+# Full TRACER segmentation (Prune -> Group -> Stitch) of Slide-3 piece 5 using
+# the collaborator's single-cell PMI panel, to test whether the denser panel
+# resolves the piece-5 over-pruning collapse. Compare the output to the
+# collaborator's own segmentation (partition_sequential.parquet, same 2,189,168
+# transcripts) and to a run with the whole-slide spatial panel.
+#
 # gbm-branch worktree: REPO is TRACER-gbm (its own code). The gitignored
 # tracer_latest.sif, data/ and output/ are symlinks back to the canonical TRACER/
 # checkout, so $REPO-relative paths resolve.
 REPO=/mnt/storage/dept/medonc/beroukhim/youyun/BTC_GBM/code/TRACER-gbm
 SIF=$REPO/tracer_latest.sif
-INPUT=/mnt/storage/dept/medonc/beroukhim/youyun/BTC_GBM/data/xenium/output-XETG00323__0023274__Patient4__20241004__181038/transcripts.parquet
 DATA_REAL=$(readlink -f "$REPO/tutorials/gbm/data")
 OUT_REAL=$(readlink -f "$REPO/tutorials/gbm/output")
 [[ "$DATA_REAL" == /mnt/storage/* && "$OUT_REAL" == /mnt/storage/* ]] || {
     echo "Resolved data/output escape the /mnt/storage bind: $DATA_REAL / $OUT_REAL" >&2
     exit 1
 }
-NPMI=$DATA_REAL/gbm_npmi_no_controls.csv
-OUTPUT=$OUT_REAL/df_finetuned.parquet
 
-mkdir -p "$REPO/logs" "$OUT_REAL"
+INPUT=$OUT_REAL/slide3_pieces/slide3_piece_05_Patient4.parquet
+NPMI=$DATA_REAL/pmi_panel_GBM_logcp10000_xge1_sub50k_long.csv
+OUTPUT=$OUT_REAL/piece5_collab/df_finetuned_piece5_collab.parquet
+
+for path in "$SIF" "$INPUT" "$NPMI"; do
+    if [[ ! -f "$path" ]]; then
+        echo "Missing required input: $path" >&2
+        exit 1
+    fi
+done
+
+mkdir -p "$REPO/logs" "$(dirname "$OUTPUT")"
 
 source /mnt/storage/dept/medonc/beroukhim/youyun/util/miniforge3/etc/profile.d/conda.sh
 conda activate segmentation
@@ -38,6 +52,11 @@ export NUMEXPR_NUM_THREADS=1
 
 cd "$REPO"
 
+echo "Segmenting piece 5 with the collaborator's single-cell PMI panel"
+echo "Input:  $INPUT"
+echo "Panel:  $NPMI"
+echo "Output: $OUTPUT"
+
 apptainer exec \
     --bind "$REPO/tutorials":/app/tutorials \
     --bind /mnt/storage:/mnt/storage \
@@ -46,4 +65,6 @@ apptainer exec \
     python tutorials/gbm/run_gbm.py \
         --input "$INPUT" \
         --npmi "$NPMI" \
-        --output "$OUTPUT"
+        --output "$OUTPUT" \
+        --platform xenium \
+        --seed 1

@@ -17,9 +17,14 @@ REPO=/mnt/storage/dept/medonc/beroukhim/youyun/BTC_GBM/code/TRACER-gbm
 SIF=$REPO/tracer_latest.sif
 # Transcripts the NPMI panel is learned from (a representative sample).
 INPUT=/mnt/storage/dept/medonc/beroukhim/youyun/BTC_GBM/data/xenium/output-XETG00323__0023274__Patient4__20241004__181038/transcripts.parquet
-OUTPUT=$REPO/tutorials/gbm/data/gbm_npmi.csv
+DATA_REAL=$(readlink -f "$REPO/tutorials/gbm/data")
+[[ "$DATA_REAL" == /mnt/storage/* ]] || {
+    echo "Resolved data path escapes the /mnt/storage bind: $DATA_REAL" >&2
+    exit 1
+}
+OUTPUT=$DATA_REAL/gbm_npmi_no_controls.csv
 
-mkdir -p "$REPO/logs" "$REPO/tutorials/gbm/data"
+mkdir -p "$REPO/logs" "$DATA_REAL"
 
 source /mnt/storage/dept/medonc/beroukhim/youyun/util/miniforge3/etc/profile.d/conda.sh
 conda activate segmentation
@@ -39,8 +44,10 @@ apptainer exec \
     "$SIF" \
     python tutorials/gbm/generate_npmi.py \
         --input "$INPUT" \
-        --output /app/tutorials/gbm/data/gbm_npmi.csv \
+        --output "$OUTPUT" \
         --qv-min 30 \
         --low-pct 20 \
         --high-pct 80 \
+        --per-gene-low-pct 5 \
+        --per-gene-high-pct 95 \
         --seed 1

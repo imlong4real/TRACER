@@ -24,19 +24,33 @@ EXAMPLE
 
     python tutorials/gbm/run_gbm.py \\
       --input  tutorials/gbm/data/transcripts.parquet \\
-      --npmi   tutorials/gbm/data/gbm_npmi.csv \\
+      --npmi   tutorials/gbm/data/gbm_npmi_no_controls.csv \\
       --output tutorials/gbm/output/df_finetuned.parquet
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import signal
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
+
+# Make the checkout's source tree win only when its compiled extensions are
+# available. The pulled TRACER container carries compiled Cython modules; a
+# plain bound checkout usually does not, so blindly prepending /app/src causes
+# imports like tracer._cy_prune to fail.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_SRC_ROOT = _REPO_ROOT / "src"
+_HAS_COMPILED_TRACER = bool(list((_SRC_ROOT / "tracer").glob("_cy_prune*.so")))
+if _HAS_COMPILED_TRACER:
+    for _p in (str(_SRC_ROOT), str(_REPO_ROOT)):
+        if _p not in sys.path:
+            sys.path.insert(0, _p)
 
 import numpy as np
 import pandas as pd
@@ -51,6 +65,19 @@ COMMON_COLUMN_ALIASES = {
 UNASSIGNED_TOKENS = frozenset(
     {"UNASSIGNED", "Unassigned", "unassigned", "DROP", "nan", "None", "", "0", "-1", "NA"}
 )
+
+
+def _canonicalize_cell_id(series: pd.Series) -> pd.Series:
+    """Map raw Xenium unassigned sentinels to TRACER's canonical "-1" label."""
+    values = series.astype(str).str.strip()
+    numeric = pd.to_numeric(values, errors="coerce")
+    numeric_sentinel = (
+        numeric.notna()
+        & (numeric <= 0)
+        & values.str.fullmatch(r"[+-]?\d+(?:\.0+)?", na=False)
+    )
+    sentinel = values.isin(UNASSIGNED_TOKENS) | numeric_sentinel
+    return values.where(~sentinel, "-1")
 
 
 def _setup_logging() -> logging.Logger:
@@ -159,38 +186,88 @@ def load_transcripts(path: Path) -> pd.DataFrame:
         df["overlaps_nucleus"] = np.uint8(0)
 
     df["feature_name"] = df["feature_name"].astype(str).str.strip()
-    df["cell_id"] = df["cell_id"].astype(str)
+    raw_cell_id = df["cell_id"].astype(str).str.strip()
+    df["cell_id"] = _canonicalize_cell_id(df["cell_id"])
     for c in ("x", "y", "z"):
         df[c] = df[c].astype(np.float32)
     df["overlaps_nucleus"] = df["overlaps_nucleus"].astype(np.uint8)
 
+    remapped_to_unassigned = int(((raw_cell_id != "-1") & (df["cell_id"] == "-1")).sum())
     n_assigned = int((df["cell_id"] != "-1").sum())
     print(
         f"Loaded {len(df):,} transcripts, {df['feature_name'].nunique():,} genes; "
         f"assigned={n_assigned:,}, unassigned={len(df) - n_assigned:,}, "
-        f"nucleus-overlapping={int(df['overlaps_nucleus'].sum()):,}"
+        f"nucleus-overlapping={int(df['overlaps_nucleus'].sum()):,}, "
+        f"cell_id remapped-to--1={remapped_to_unassigned:,}"
     )
     return df
 
 
 def load_npmi_panel(path: Path) -> pd.DataFrame:
-    """Load the long-format NPMI panel and symmetric-expand it.
+    """Load one canonical undirected row per long-format PMI pair.
 
-    Same contract as ``scripts/run_tracer.py``: requires ``gene_i``/``gene_j``;
-    the pipeline prefers a ``PMI`` column and falls back to ``NPMI``.
+    The sparse Prune builder canonicalizes pairs to its upper triangle and
+    symmetrizes the resulting CSR internally. Expanding both directions here
+    would make scipy sum duplicate coordinates and double every PMI value.
     """
     df = pd.read_csv(path)
     if not {"gene_i", "gene_j"}.issubset(df.columns):
         raise SystemExit(f"NPMI panel missing gene_i/gene_j; columns: {list(df.columns)}")
-    if df.duplicated(["gene_i", "gene_j"]).any():
-        print("NPMI panel has duplicate pairs — keeping first occurrence.")
-        df = df.drop_duplicates(["gene_i", "gene_j"], keep="first")
-    rev = df.copy()
-    rev["gene_i"], rev["gene_j"] = df["gene_j"].values, df["gene_i"].values
-    panel = pd.concat([df, rev], ignore_index=True)
-    panel = panel.loc[panel["gene_i"] != panel["gene_j"]].reset_index(drop=True)
+    metric_col = "PMI" if "PMI" in df.columns else "NPMI" if "NPMI" in df.columns else None
+    if metric_col is None:
+        raise SystemExit(f"NPMI panel lacks both PMI and NPMI; columns: {list(df.columns)}")
+
+    panel = df.copy()
+    panel["gene_i"] = panel["gene_i"].astype(str).str.strip()
+    panel["gene_j"] = panel["gene_j"].astype(str).str.strip()
+    panel[metric_col] = pd.to_numeric(panel[metric_col], errors="coerce")
+    finite = np.isfinite(panel[metric_col].to_numpy(dtype=np.float64))
+    n_nonfinite = int((~finite).sum())
+    if n_nonfinite:
+        print(f"NPMI panel: dropping {n_nonfinite:,} rows with non-finite {metric_col}.")
+        panel = panel.loc[finite].copy()
+    panel = panel.loc[
+        (panel["gene_i"] != "") & (panel["gene_j"] != "")
+        & (panel["gene_i"] != panel["gene_j"])
+    ].copy()
+    if panel.empty:
+        raise SystemExit(f"NPMI panel has no usable {metric_col} pairs: {path}")
+
+    swap = panel["gene_i"] > panel["gene_j"]
+    gene_i = panel["gene_i"].where(~swap, panel["gene_j"])
+    gene_j = panel["gene_j"].where(~swap, panel["gene_i"])
+    panel["gene_i"] = gene_i
+    panel["gene_j"] = gene_j
+
+    duplicate_mask = panel.duplicated(["gene_i", "gene_j"], keep=False)
+    if duplicate_mask.any():
+        duplicate_groups = panel.loc[duplicate_mask].groupby(
+            ["gene_i", "gene_j"], sort=False, observed=True
+        )[metric_col]
+        conflicting = [
+            pair for pair, values in duplicate_groups
+            if not np.allclose(
+                values.to_numpy(dtype=np.float64),
+                float(values.iloc[0]),
+                rtol=1e-6,
+                atol=1e-7,
+            )
+        ]
+        if conflicting:
+            examples = ", ".join(f"{a}/{b}" for a, b in conflicting[:10])
+            raise SystemExit(
+                f"NPMI panel has conflicting duplicate undirected {metric_col} "
+                f"values for: {examples}"
+            )
+        print(
+            "NPMI panel: collapsing "
+            f"{int(duplicate_mask.sum()):,} equivalent directed/duplicate rows."
+        )
+        panel = panel.drop_duplicates(["gene_i", "gene_j"], keep="first")
+
+    panel = panel.sort_values(["gene_i", "gene_j"], ignore_index=True)
     print(
-        f"NPMI panel: {len(panel):,} rows after symmetric expansion "
+        f"NPMI panel: {len(panel):,} canonical undirected pairs "
         f"(PMI={'yes' if 'PMI' in panel.columns else 'no'}, "
         f"NPMI={'yes' if 'NPMI' in panel.columns else 'no'})"
     )
@@ -253,11 +330,47 @@ def _emit_cell_outputs(
     print(f"Wrote {h5ad_path} ({adata.n_obs:,} cells) and {scores_path}")
 
 
+def _write_run_receipt(
+    path: Path,
+    *,
+    args: argparse.Namespace,
+    progression: list[dict],
+    n_final_entities: int,
+    wall_seconds: float,
+    cfg,
+) -> None:
+    from tracer.config import to_dict as cfg_to_dict
+    import tracer
+    import tracer.pipeline as pipeline
+
+    receipt_path = Path(f"{path.with_suffix('')}_run_receipt.json")
+    payload = {
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "command": " ".join(sys.argv),
+        "input": str(args.input),
+        "npmi": str(args.npmi),
+        "output": str(args.output),
+        "platform": args.platform,
+        "seed": args.seed,
+        "pmi_threshold_override": args.pmi_threshold,
+        "pipeline_pmi_threshold": float(pipeline.PMI_THR),
+        "tracer_module": getattr(tracer, "__file__", None),
+        "pipeline_module": getattr(pipeline, "__file__", None),
+        "config": cfg_to_dict(cfg),
+        "stage_progression": progression,
+        "final_entities_stitched": int(n_final_entities),
+        "wall_seconds": float(wall_seconds),
+    }
+    receipt_path.write_text(json.dumps(payload, indent=2, default=str) + "\n")
+    print(f"Saved run receipt to: {receipt_path}")
+
+
 def main() -> None:
     args = _parse_args()
     log = _setup_logging()
 
     from tracer.core import set_reproducibility_seed
+    import tracer
     import tracer.pipeline as pipeline
     from tracer.config import load_config
 
@@ -265,6 +378,8 @@ def main() -> None:
     np.random.seed(args.seed)
     os.environ["PYTHONHASHSEED"] = str(args.seed)
     set_reproducibility_seed(args.seed)
+    log.info("Imported tracer from: %s", getattr(tracer, "__file__", "unknown"))
+    log.info("Imported tracer.pipeline from: %s", getattr(pipeline, "__file__", "unknown"))
 
     input_path = Path(args.input)
     output_path = Path(args.output)
@@ -280,6 +395,16 @@ def main() -> None:
         # pipeline reads it as the Stage-1 prune threshold.
         pipeline.PMI_THR = float(args.pmi_threshold)
         log.info("PMI threshold override: pipeline.PMI_THR = %.4f", pipeline.PMI_THR)
+    log.info("Pipeline PMI_THR: %.4f", pipeline.PMI_THR)
+    log.info(
+        "Config: phase1.veto=%s rescue.veto=%s stitch.deltaC_min=%.4f "
+        "stitch.dist_threshold_um=%.2f stitch.g_z_um=%r",
+        cfg.phase1.veto_mode,
+        cfg.rescue.veto_mode,
+        cfg.stitch.deltaC_min,
+        cfg.stitch.dist_threshold_um,
+        cfg.stitch.g_z_um,
+    )
 
     log.info("Calling run_segmented_pipeline (df=%d rows, panel=%d pairs, platform=%s)",
              len(df), len(panel), args.platform)
@@ -306,6 +431,7 @@ def main() -> None:
 
     # Final per-transcript label is `stitched`; expose legacy aliases so the
     # downstream GBM scripts keep working unchanged.
+    df_out["cell_id_tracer"] = df_out["stitched"].astype(str)
     df_out["cell_id_finetuned"] = df_out["stitched"].astype(str)
     df_out["cell_id_stitched"] = df_out["stitched"].astype(str)
 
@@ -315,6 +441,14 @@ def main() -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     df_out.to_parquet(output_path, index=False)
     log.info("Saved refined transcripts to: %s", output_path)
+    _write_run_receipt(
+        output_path,
+        args=args,
+        progression=progression,
+        n_final_entities=n_cells,
+        wall_seconds=wall,
+        cfg=cfg,
+    )
 
     if args.emit_cell_outputs:
         _emit_cell_outputs(df_out, panel, output_path)

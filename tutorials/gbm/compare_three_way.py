@@ -32,7 +32,7 @@ EXAMPLE
     python tutorials/gbm/compare_three_way.py --stage prep \\
       --new-merged tutorials/gbm/output/slide3_tracer_merged.parquet \\
       --old-merged tutorials/gbm/output/slide3_tracer_merged_2025-05-07.parquet \\
-      --npmi       tutorials/gbm/data/gbm_npmi.csv \\
+      --npmi       tutorials/gbm/data/gbm_npmi_no_controls.csv \\
       --outdir     tutorials/gbm/output/slide3_profile_comparison \\
       --annotations-csv /path/to/adata_obs_annotated.csv
 

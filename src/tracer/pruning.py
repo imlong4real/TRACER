@@ -123,7 +123,9 @@ def build_sparse_pmi_matrix_from_long(
     The output is upper-triangle by construction (i < j). Callers needing
     a symmetric CSR for kernel input must pass it through
     :func:`_symmetric_csr_arrays` (same convention as
-    :func:`build_sparse_pmi_matrix`).
+    :func:`build_sparse_pmi_matrix`). Equivalent duplicate directions are
+    collapsed before COO construction so scipy cannot silently sum and
+    double their values; conflicting duplicates fail loudly.
     """
     df = npmi_df[[gene_i_col, gene_j_col, metric_col]].copy()
     df[gene_i_col] = df[gene_i_col].astype(str).str.strip()
@@ -147,6 +149,35 @@ def build_sparse_pmi_matrix_from_long(
     bi_u = np.where(swap, ai, bi)
     keep = ai_u != bi_u
     ai_u, bi_u, vv = ai_u[keep], bi_u[keep], vv[keep]
+
+    canonical = pd.DataFrame({"i": ai_u, "j": bi_u, "value": vv})
+    duplicate_mask = canonical.duplicated(["i", "j"], keep=False)
+    if duplicate_mask.any():
+        duplicate_groups = canonical.loc[duplicate_mask].groupby(
+            ["i", "j"], sort=False, observed=True
+        )["value"]
+        conflicting = [
+            (int(i), int(j))
+            for (i, j), values in duplicate_groups
+            if not np.allclose(
+                values.to_numpy(dtype=np.float32),
+                np.float32(values.iloc[0]),
+                rtol=1e-6,
+                atol=1e-7,
+            )
+        ]
+        if conflicting:
+            examples = ", ".join(
+                f"{genes[i]}/{genes[j]}" for i, j in conflicting[:10]
+            )
+            raise ValueError(
+                f"Conflicting duplicate undirected {metric_col} values for: "
+                f"{examples}"
+            )
+        canonical = canonical.drop_duplicates(["i", "j"], keep="first")
+    ai_u = canonical["i"].to_numpy()
+    bi_u = canonical["j"].to_numpy()
+    vv = canonical["value"].to_numpy(dtype=np.float32)
 
     W = sp.coo_matrix(
         (vv, (ai_u, bi_u)), shape=(G, G), dtype=np.float32,

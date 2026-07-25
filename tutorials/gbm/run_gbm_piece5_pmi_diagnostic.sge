@@ -1,0 +1,106 @@
+#!/bin/bash
+#$ -S /bin/bash
+#$ -N tracer_gbm_p5_pmi
+#$ -cwd
+#$ -j y
+#$ -o logs/$JOB_NAME.$JOB_ID.log
+#$ -pe smp 4
+#$ -l h_rt=48:00:00
+#$ -l mem_free=64G
+
+set -euo pipefail
+
+REPO=/mnt/storage/dept/medonc/beroukhim/youyun/BTC_GBM/code/TRACER-gbm
+SIF=$REPO/tracer_latest.sif
+DATA_REAL=$(readlink -f "$REPO/tutorials/gbm/data")
+OUT_REAL=$(readlink -f "$REPO/tutorials/gbm/output")
+[[ "$DATA_REAL" == /mnt/storage/* && "$OUT_REAL" == /mnt/storage/* ]] || {
+    echo "Resolved data/output escape the /mnt/storage bind: $DATA_REAL / $OUT_REAL" >&2
+    exit 1
+}
+
+INPUT=$OUT_REAL/slide3_pieces/slide3_piece_05_Patient4.parquet
+DIAG_DIR=$OUT_REAL/pmi_diagnostics/piece5
+PANEL=$DIAG_DIR/piece5_spatial_pmi_accepted.csv
+PAIR_AUDIT=$DIAG_DIR/piece5_spatial_pmi_pair_ci.csv
+PMI_SUMMARY=$DIAG_DIR/piece5_spatial_pmi_summary.json
+PRUNE_OUTPUT=$DIAG_DIR/piece5_spatial_prune.parquet
+PRUNE_CELLS=$DIAG_DIR/piece5_spatial_prune_cells.csv
+PRUNE_SUMMARY=$DIAG_DIR/piece5_spatial_prune_summary.json
+WHOLE_SLIDE_PANEL=$DATA_REAL/gbm_npmi_no_controls.csv
+
+for path in "$SIF" "$INPUT" "$WHOLE_SLIDE_PANEL"; do
+    if [[ ! -f "$path" ]]; then
+        echo "Missing required input: $path" >&2
+        exit 1
+    fi
+done
+
+mkdir -p "$REPO/logs" "$DIAG_DIR"
+
+# shellcheck disable=SC1091
+source /mnt/storage/dept/medonc/beroukhim/youyun/util/miniforge3/etc/profile.d/conda.sh
+conda activate segmentation
+
+export PYTHONUNBUFFERED=1
+export OMP_NUM_THREADS=${NSLOTS:-1}
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+
+cd "$REPO"
+
+echo "Generating corrected piece-5 spatial PMI panel"
+echo "Input: $INPUT"
+echo "Diagnostic directory: $DIAG_DIR"
+
+apptainer exec \
+    --bind "$REPO/tutorials":/app/tutorials \
+    --bind /mnt/storage:/mnt/storage \
+    --pwd /app \
+    "$SIF" \
+    python tutorials/gbm/generate_npmi.py \
+        --input "$INPUT" \
+        --output "$PANEL" \
+        --audit-output "$PAIR_AUDIT" \
+        --summary-output "$PMI_SUMMARY" \
+        --qv-min 30 \
+        --low-pct 20 \
+        --high-pct 80 \
+        --per-gene-low-pct 5 \
+        --per-gene-high-pct 95 \
+        --min-occurrences-per-context 2 \
+        --max-bootstraps 10000 \
+        --seed 1 \
+        --show-progress
+
+COMPARISON_ARGS=(
+    --comparison-panel "whole_slide_existing=$WHOLE_SLIDE_PANEL"
+)
+if [[ -n "${SCRNA_PMI:-}" ]]; then
+    if [[ ! -f "$SCRNA_PMI" ]]; then
+        echo "SCRNA_PMI was provided but does not exist: $SCRNA_PMI" >&2
+        exit 1
+    fi
+    COMPARISON_ARGS+=(--comparison-panel "single_cell=$SCRNA_PMI")
+fi
+
+echo "Running compiled nuclear-seed Prune only"
+apptainer exec \
+    --bind "$REPO/tutorials":/app/tutorials \
+    --bind /mnt/storage:/mnt/storage \
+    --pwd /app \
+    "$SIF" \
+    python tutorials/gbm/run_gbm_prune_diagnostic.py \
+        --input "$INPUT" \
+        --npmi "$PANEL" \
+        --output "$PRUNE_OUTPUT" \
+        --cell-report-output "$PRUNE_CELLS" \
+        --report-output "$PRUNE_SUMMARY" \
+        --platform xenium \
+        --seed 1 \
+        "${COMPARISON_ARGS[@]}"
+
+echo "Piece-5 PMI diagnostic complete"
+echo "PMI summary: $PMI_SUMMARY"
+echo "Prune summary: $PRUNE_SUMMARY"
