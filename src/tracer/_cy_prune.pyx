@@ -324,6 +324,75 @@ cdef cnp.ndarray _greedy_prune_to_retained(
     return kept
 
 
+def greedy_prune_retained(
+    cnp.ndarray[cnp.int32_t, ndim=1] g_local,
+    cnp.ndarray[cnp.int32_t, ndim=1] tx_counts,
+    W_dense=None,
+    W_indptr=None,
+    W_indices=None,
+    W_data=None,
+    double threshold=0.05,
+):
+    """Public tx-weighted greedy bad-edge prune — returns RETAINED genes.
+
+    Native replacement for the former ``density_cascade.greedy_prune``
+    Python loop. Where that loop counted each conflicting gene once, this
+    scores gene ``i`` by ``sum_j bad[i, j] * tx_counts[j]`` and protects a
+    gene whose own tx count outweighs its conflict score — the same
+    tx-weighted policy the nuclear-seed prune uses. Passing an all-ones
+    ``tx_counts`` reproduces the legacy unweighted behavior bit-for-bit
+    (the self-protection safeguard then fires only at score 0, which the
+    legacy loop never removed either).
+
+    Provide EITHER ``W_dense`` (a float32 ``(G, G)`` ndarray, unobserved
+    pairs = NaN) OR the symmetric, column-sorted CSR triple
+    (``W_indptr``, ``W_indices``, ``W_data``, unobserved pairs absent).
+    Absent/NaN pairs are SKIPPED (never marked bad), matching the seeded
+    kernels' ``_wget`` contract on both backends.
+
+    Parameters
+    ----------
+    g_local : int32 ndarray
+        Distinct gene indices in the component.
+    tx_counts : int32 ndarray
+        Per-gene transcript counts aligned to ``g_local``. All-ones for
+        unweighted parity with the legacy loop.
+    threshold : float
+        Bad-edge PMI cutoff — a pair with PMI < threshold is a conflict.
+
+    Returns
+    -------
+    int32 ndarray of retained gene indices.
+    """
+    cdef cnp.ndarray[cnp.float32_t, ndim=2] _W
+    cdef cnp.ndarray[cnp.int32_t, ndim=1] _ip
+    cdef cnp.ndarray[cnp.int32_t, ndim=1] _ix
+    cdef cnp.ndarray[cnp.float32_t, ndim=1] _dt
+    cdef int use_sparse
+    if W_dense is not None:
+        use_sparse = 0
+        _W = np.ascontiguousarray(W_dense, dtype=np.float32)
+        _ip = np.zeros(1, dtype=np.int32)
+        _ix = np.zeros(1, dtype=np.int32)
+        _dt = np.zeros(1, dtype=np.float32)
+    else:
+        if W_indptr is None or W_indices is None or W_data is None:
+            raise ValueError(
+                "greedy_prune_retained: pass either W_dense or all of "
+                "W_indptr / W_indices / W_data"
+            )
+        use_sparse = 1
+        _W = np.zeros((1, 1), dtype=np.float32)
+        _ip = np.ascontiguousarray(W_indptr, dtype=np.int32)
+        _ix = np.ascontiguousarray(W_indices, dtype=np.int32)
+        _dt = np.ascontiguousarray(W_data, dtype=np.float32)
+    return np.asarray(_greedy_prune_to_retained(
+        np.ascontiguousarray(g_local, dtype=np.int32),
+        np.ascontiguousarray(tx_counts, dtype=np.int32),
+        _W, _ip, _ix, _dt, use_sparse, threshold,
+    ))
+
+
 cdef cnp.ndarray _prune_cells_nuclear_seed_core(
     list cell_tx_idx_lists,
     cnp.int32_t[:] tx_gene_mv,

@@ -37,28 +37,29 @@ import scipy.sparse as sp
 # the sparse-only path the rest of the package is migrating toward.
 
 
-def _wget(W, i: int, j: int) -> float:
-    """Single-element PMI lookup that works for dense ndarray and sparse CSR.
+def _greedy_prune_retained(uniq_g, uniq_c, W, threshold: float):
+    """tx-weighted greedy bad-edge prune over dense or sparse ``W``.
 
-    Dense: returns ``W[i, j]`` directly (may be NaN for structurally-absent
-    pairs depending on how W was built).
-
-    Sparse CSR: random-access via the indptr/indices/data triple. Pairs
-    encoded as absent return NaN to match dense-NaN semantics (matches
-    the existing `_cy_prune._wget` contract used by the Cython kernels).
+    Thin dispatch over the native ``_cy_prune.greedy_prune_retained``
+    kernel: hands a dense float32 ``(G, G)`` ndarray or a symmetric
+    column-sorted CSR straight through. Returns the retained gene indices
+    as an int32 ndarray. Absent/NaN pairs are skipped (never bad), the
+    same ``_wget`` contract the seeded prune uses.
     """
+    from tracer import _cy_prune
+
+    g32 = np.ascontiguousarray(uniq_g, dtype=np.int32)
+    c32 = np.ascontiguousarray(uniq_c, dtype=np.int32)
     if isinstance(W, np.ndarray):
-        return float(W[i, j])
-    # CSR random access; W.indices for row i is sorted (CSR invariant).
-    row_start = int(W.indptr[i])
-    row_end = int(W.indptr[i + 1])
-    if row_end <= row_start:
-        return float("nan")
-    indices = W.indices[row_start:row_end]
-    pos = int(np.searchsorted(indices, j))
-    if pos < (row_end - row_start) and indices[pos] == j:
-        return float(W.data[row_start + pos])
-    return float("nan")
+        return _cy_prune.greedy_prune_retained(
+            g32, c32, W_dense=W, threshold=threshold)
+    Wc = W.tocsr()
+    if not Wc.has_sorted_indices:
+        Wc = Wc.sorted_indices()
+    return _cy_prune.greedy_prune_retained(
+        g32, c32,
+        W_indptr=Wc.indptr, W_indices=Wc.indices, W_data=Wc.data,
+        threshold=threshold)
 
 
 # ============================================================================
@@ -210,33 +211,10 @@ def auto_thresholds(
 
 
 # ============================================================================
-# Phase 1a-style greedy prune
+# Phase 1a-style greedy prune — see `_greedy_prune_retained` (tx-weighted
+# native kernel `_cy_prune.greedy_prune_retained`). The former pure-Python
+# `greedy_prune` (unweighted, per-pair `_wget`) was removed in favor of it.
 # ============================================================================
-def greedy_prune(unique_gene_idx: list[int], W,
-                  threshold: float = 0.05) -> list[int]:
-    """Iteratively remove the gene with most bad edges (PMI < threshold).
-
-    Accepts ``W`` as either a dense ``np.ndarray`` or a sparse CSR matrix —
-    per-pair lookups go through :func:`_wget`, which has the same NaN
-    semantics on both backends (structurally-absent CSR pairs return NaN
-    and are treated as "unknown" / not-bad, matching dense-NaN behavior).
-    """
-    g = list(unique_gene_idx)
-    while len(g) >= 2:
-        bad_count = [0] * len(g)
-        for i in range(len(g)):
-            gi = g[i]
-            for j in range(len(g)):
-                if i == j:
-                    continue
-                v = _wget(W, gi, g[j])
-                if v == v and v < threshold:  # NaN-safe
-                    bad_count[i] += 1
-        worst_idx = int(np.argmax(bad_count))
-        if bad_count[worst_idx] == 0:
-            break
-        g.pop(worst_idx)
-    return g
 
 
 # ============================================================================
@@ -398,8 +376,9 @@ def density_cascade_phase1(
                 continue
 
             ten_genes = gene_idx[tentative]
-            unique = np.unique(ten_genes).tolist()
-            seed_genes = greedy_prune(unique, W, threshold=pmi_threshold)
+            uniq_g, uniq_c = np.unique(ten_genes, return_counts=True)
+            seed_genes = _greedy_prune_retained(
+                uniq_g, uniq_c, W, pmi_threshold).tolist()
 
             if len(seed_genes) < 2:
                 continue
