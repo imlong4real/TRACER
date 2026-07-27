@@ -264,7 +264,7 @@ def prune_transcripts_fast(
     housekeeping_pos_thresh: float = 0.05,
     housekeeping_neg_thresh: float = -0.05,
     housekeeping_min_strong_count: int = 5,
-    metric_col: str = "NPMI",
+    metric_col: str = "PMI",
     nan_fill: float | None = None,
 ):
     """

@@ -151,6 +151,7 @@ def test_phase1_emitter_writes_etype_consistent_with_labels():
         df.copy(), panel,
         cell_id_col="cell_id", gene_col="feature_name",
         threshold=0.05, unassigned_id="-1",
+        metric_col="NPMI",  # synthetic panel is NPMI-columned (legacy opt-in)
         nan_fill=0.0, n_jobs=-1, show_progress=False,
     )
     # `_etype` column is present and a Categorical
