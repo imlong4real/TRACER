@@ -34,11 +34,10 @@ def build_dense_pmi_matrix_small_panel(
 ):
     """Build a dense symmetric NPMI/PMI matrix (small-panel legacy path).
 
-    Retained only for the synthetic-only legacy caller
-    :func:`prune_transcripts_fast`, which uses the dense-or-sparse
-    ``_cy_prune.prune_cells_retained`` kernel. The production SEG path
-    (:func:`prune_transcripts_nuclear_seed`) is sparse end-to-end via
-    :func:`build_sparse_pmi_matrix_from_long`.
+    No internal callers remain: both :func:`prune_transcripts_fast` and
+    :func:`prune_transcripts_nuclear_seed` are now sparse end-to-end via
+    :func:`build_sparse_pmi_matrix_from_long`. Kept only as a public
+    convenience builder for a dense ``(G, G)`` panel; removal candidate.
 
     Missing pairs remain NaN (conservative). ``metric_col`` defaults to
     ``"PMI"`` to match the bootstrap panel convention; callers feeding
@@ -305,20 +304,26 @@ def prune_transcripts_fast(
     else:
         df["_cell_str"] = df[cell_id_col]
 
+    # Sparse panel end-to-end (mirrors prune_transcripts_nuclear_seed): build
+    # an upper-triangle CSR, symmetrize it for the whole-cell kernel, and skip
+    # absent pairs. This unblocks whole-transcriptome / NOSEG panels that OOM a
+    # dense (G, G) matrix. `nan_fill` is now a no-op — absent pairs are SKIPPED
+    # (not zero-filled), matching the nuclear-seed backend and the bootstrap
+    # panel convention (see `_cy_prune._wget`).
+    _ = nan_fill  # retained for API compatibility; no dense NaN to fill
     if _is_bootstrap_result(npmi_df) or sp.issparse(npmi_df):
-        # The two-pass whole-cell prune (prune_cells / prune_single) is
-        # still dense-only. The sparse CSR backend currently lives on the
-        # nuclear-seed path (prune_transcripts_nuclear_seed); sparsifying
-        # this path is tracked as a follow-up.
-        raise NotImplementedError(
-            "prune_transcripts_fast does not yet accept a sparse / "
-            "PmiBootstrapResult panel; use prune_transcripts_nuclear_seed "
-            "for whole-transcriptome sparse panels."
-        )
-    genes, gene_to_idx, W = build_dense_pmi_matrix_small_panel(
-        npmi_df, metric_col=metric_col)
-    if nan_fill is not None:
-        np.nan_to_num(W, copy=False, nan=float(nan_fill))
+        if sp.issparse(npmi_df):
+            raise TypeError(
+                "Pass a PmiBootstrapResult (carries gene names) for the "
+                "sparse prune, not a bare scipy matrix."
+            )
+        genes, gene_to_idx, W_panel = build_sparse_pmi_matrix(npmi_df)
+    else:
+        genes, gene_to_idx, W_panel = build_sparse_pmi_matrix_from_long(
+            npmi_df, metric_col=metric_col)
+    # Symmetric column-sorted CSR for the kernel (W_panel is upper-triangle).
+    _sp_ip, _sp_ix, _sp_dt = _symmetric_csr_arrays(W_panel)
+    W = sp.csr_matrix((_sp_dt, _sp_ix, _sp_ip), shape=(len(genes), len(genes)))
     df["_gene_idx"] = df[gene_col].map(gene_to_idx)
 
     # ---------- PASS 1 ----------
@@ -531,6 +536,9 @@ def prune_transcripts_fast(
     aux = {
         "genes": genes,
         "gene_to_idx": gene_to_idx,
+        # Symmetric CSR: the whole-cell / NOSEG cascade + rescue do bidirectional
+        # W[i,j]/W[j,i] lookups, so aux["W"] must be symmetric (the former dense
+        # path stored a symmetric matrix; an upper-tri panel here over-merges).
         "W": W,
         "partial_map": partial_map,
         "threshold": threshold,
