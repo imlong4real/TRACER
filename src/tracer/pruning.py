@@ -333,6 +333,15 @@ def prune_transcripts(
     return df, aux
 
 
+def _genes_and_counts(s):
+    """Sorted unique gene indices + aligned per-gene tx counts for a group's
+    ``_gene_idx`` series. Feeds the tx-weighted `_cy_prune.prune_cells_retained`
+    (counts weight each gene's conflict evidence and self-protection)."""
+    a = s.dropna().astype(int).to_numpy()
+    g, c = np.unique(a, return_counts=True)   # g ascending (matches prior np.sort)
+    return (g.astype(np.int32), c.astype(np.int32))
+
+
 def prune_transcripts_fast(
     df,
     npmi_df,
@@ -424,9 +433,9 @@ def prune_transcripts_fast(
 
     partial_map = {}
 
-    # Prepare per-cell unique gene lists (only cells that are not unassigned)
+    # Prepare per-cell unique gene lists + tx counts (only non-unassigned cells)
     grp = df[df["_cell_str"] != unassigned_id].groupby("_cell_str")["_gene_idx"].apply(
-        lambda s: np.asarray(np.sort(pd.Index(s.dropna().astype(int)).unique()), dtype=np.int32)
+        _genes_and_counts
     )
 
     cell_items = list(grp.items())
@@ -442,11 +451,15 @@ def prune_transcripts_fast(
 
     # Batch prune all cells through the compiled Cython kernel. The Python
     # fallback was removed — it was 100–1000× slower and silently ran for
-    # hours when the .so wasn't built. If _cy_prune.prune_cells raises
-    # (e.g. corrupted gene lists), surface it instead of papering over.
+    # hours when the .so wasn't built. If the kernel raises (e.g. corrupted
+    # gene lists), surface it instead of papering over.
     cell_ids = [cid for cid, _ in cell_items]
-    g_arrays = [gl if (gl is not None and gl.size > 0) else None for _, gl in cell_items]
-    removed_lists = _cy_prune.prune_cells(g_arrays, W, float(threshold))
+    g_arrays = [gc[0] if (gc is not None and gc[0].size > 0) else None
+                for _, gc in cell_items]
+    tc_arrays = [gc[1] if (gc is not None and gc[0].size > 0) else None
+                 for _, gc in cell_items]
+    removed_lists = _cy_prune.prune_cells_retained(
+        g_arrays, tc_arrays, W, float(threshold))
     for cid, removed in zip(cell_ids, removed_lists):
         if removed:
             results.append((cid, removed))
@@ -516,7 +529,7 @@ def prune_transcripts_fast(
     pids = sorted(set(partial_map.values()))
     if pids:
         grp_p = df[df[out_col].isin(pids)].groupby(out_col)["_gene_idx"].apply(
-            lambda s: np.asarray(np.sort(pd.Index(s.dropna().astype(int)).unique()), dtype=np.int32)
+            _genes_and_counts
         )
 
         partial_items = list(grp_p.items())
@@ -530,8 +543,12 @@ def prune_transcripts_fast(
         results2 = []
 
         pids = [pid for pid, _ in partial_items]
-        g_arrays = [gl if (gl is not None and gl.size > 0) else None for _, gl in partial_items]
-        removed_lists = _cy_prune.prune_cells(g_arrays, W, float(threshold))
+        g_arrays = [gc[0] if (gc is not None and gc[0].size > 0) else None
+                    for _, gc in partial_items]
+        tc_arrays = [gc[1] if (gc is not None and gc[0].size > 0) else None
+                     for _, gc in partial_items]
+        removed_lists = _cy_prune.prune_cells_retained(
+            g_arrays, tc_arrays, W, float(threshold))
         for pid, removed in zip(pids, removed_lists):
             if removed:
                 results2.append((pid, removed))

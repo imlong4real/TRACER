@@ -19,48 +19,48 @@
       "n_cells": 8,
       "n_components": 0,
       "n_partials": 6,
-      "n_unassigned_tx": 6,
+      "n_unassigned_tx": 5,
       "stage": "Prune"
     },
     {
       "n_cells": 8,
       "n_components": 0,
       "n_partials": 6,
-      "n_unassigned_tx": 6,
+      "n_unassigned_tx": 5,
       "stage": "Split-Phase1"
     },
     {
       "n_cells": 7,
       "n_components": 0,
-      "n_partials": 1,
-      "n_unassigned_tx": 14,
+      "n_partials": 2,
+      "n_unassigned_tx": 11,
       "stage": "Phase1-QC"
     },
     {
       "n_cells": 7,
       "n_components": 0,
-      "n_partials": 1,
-      "n_unassigned_tx": 14,
+      "n_partials": 2,
+      "n_unassigned_tx": 11,
       "stage": "Phase1-Maha-Remerge"
     },
     {
       "n_cells": 7,
       "n_components": 0,
-      "n_partials": 2,
-      "n_unassigned_tx": 14,
+      "n_partials": 4,
+      "n_unassigned_tx": 11,
       "stage": "Split"
     },
     {
       "n_cells": 7,
       "n_components": 0,
-      "n_partials": 2,
-      "n_unassigned_tx": 13,
+      "n_partials": 4,
+      "n_unassigned_tx": 10,
       "stage": "Rescue"
     },
     {
       "n_cells": 7,
       "n_components": 0,
-      "n_partials": 3,
+      "n_partials": 4,
       "n_unassigned_tx": 10,
       "stage": "Group"
     },
@@ -68,21 +68,21 @@
       "n_cells": 7,
       "n_components": 0,
       "n_partials": 2,
-      "n_unassigned_tx": 11,
+      "n_unassigned_tx": 12,
       "stage": "Mid-QC"
     },
     {
       "n_cells": 7,
       "n_components": 0,
       "n_partials": 2,
-      "n_unassigned_tx": 11,
+      "n_unassigned_tx": 12,
       "stage": "Post-Group Rescue"
     },
     {
       "n_cells": 7,
       "n_components": 0,
       "n_partials": 2,
-      "n_unassigned_tx": 11,
+      "n_unassigned_tx": 12,
       "stage": "Stitch"
     },
     {

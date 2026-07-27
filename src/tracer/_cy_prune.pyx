@@ -8,124 +8,6 @@ from cython.parallel cimport prange
 cimport openmp
 
 
-def prune_cells(list g_lists, cnp.ndarray[cnp.float32_t, ndim=2] W, double threshold):
-    """
-    Bulk prune helper callable from Python.
-
-    Parameters
-    ----------
-    g_lists : list
-        List of 1D integer numpy arrays (gene indices) or None entries.
-    W : ndarray[float32, 2D]
-        Full NPMI matrix.
-    threshold : float
-        NPMI threshold.
-
-    Returns
-    -------
-    list
-        List of removed gene index lists (python lists) or []/None.
-    """
-    cdef Py_ssize_t n
-    cdef list out
-    cdef Py_ssize_t idx
-    cdef object arr
-
-    n = len(g_lists)
-    out = [None] * n
-    for idx in range(n):
-        g = g_lists[idx]
-        if g is None:
-            out[idx] = None
-            continue
-        arr = np.asarray(g, dtype=np.int32)
-        if arr.size <= 1:
-            out[idx] = []
-            continue
-        out[idx] = prune_single(arr, W, threshold)
-
-    return out
-
-
-def prune_single(cnp.ndarray[cnp.int32_t, ndim=1] g_local, cnp.ndarray[cnp.float32_t, ndim=2] W, double threshold):
-    """Prune a single gene list. Returns removed gene indices as Python list."""
-    cdef int k
-    cdef int i, j
-    cdef int gi, gj
-    cdef int active_count
-    cdef int maxc, argmax
-    cdef float val
-
-    cdef object active
-    cdef object bad
-    cdef object bad_counts
-
-    cdef cnp.int32_t[:] gids
-    cdef cnp.float32_t[:, :] Wv
-    cdef cnp.uint8_t[:, :] bad_mv
-    cdef cnp.uint8_t[:] active_mv
-    cdef cnp.int32_t[:] badc_mv
-
-    k = g_local.shape[0]
-    # create local numpy arrays for masks/counts (fast with memoryviews)
-    active = np.ones(k, dtype=np.uint8)
-    bad = np.zeros((k, k), dtype=np.uint8)
-    bad_counts = np.zeros(k, dtype=np.int32)
-
-    gids = g_local
-    Wv = W
-    bad_mv = bad
-    active_mv = active
-    badc_mv = bad_counts
-
-    # compute bad matrix and counts
-    for i in range(k):
-        gi = int(gids[i])
-        for j in range(k):
-            if i == j:
-                continue
-            gj = int(gids[j])
-            val = Wv[gi, gj]
-            # NaN check
-            if val != val:
-                continue
-            if val < threshold:
-                bad_mv[i, j] = 1
-                badc_mv[i] += 1
-
-    active_count = k
-    while active_count > 1:
-        # find active index with max bad_counts
-        maxc = -1
-        argmax = -1
-        for i in range(k):
-            if active_mv[i]:
-                if badc_mv[i] > maxc:
-                    maxc = badc_mv[i]
-                    argmax = i
-
-        if maxc <= 0:
-            break
-
-        # remove argmax
-        active_mv[argmax] = 0
-        active_count -= 1
-
-        # decrement neighbors' counts
-        for j in range(k):
-            if active_mv[j] and bad_mv[argmax, j]:
-                badc_mv[j] -= 1
-        badc_mv[argmax] = 0
-
-    # collect removed genes (those inactive)
-    cdef list removed = []
-    for i in range(k):
-        if not bool(active_mv[i]):
-            removed.append(int(gids[i]))
-
-    return removed
-
-
 cdef inline bint _wget(
     cnp.float32_t[:, :] W,
     const int[::1] W_indptr,
@@ -391,6 +273,66 @@ def greedy_prune_retained(
         np.ascontiguousarray(tx_counts, dtype=np.int32),
         _W, _ip, _ix, _dt, use_sparse, threshold,
     ))
+
+
+def prune_cells_retained(list g_lists, list tx_counts_lists, W, double threshold):
+    """Batched tx-weighted whole-cell prune — the tx-weighted replacement for
+    ``prune_cells``. Returns a list of REMOVED gene-index lists (Python lists),
+    one per input cell (parity with ``prune_cells``): ``removed = g \\ retained``,
+    where ``retained`` comes from the tx-weighted ``_greedy_prune_to_retained``.
+
+    ``W`` is a dense float32 ``(G, G)`` ndarray (unobserved = NaN) OR a
+    symmetric, column-sorted scipy CSR (unobserved = absent) — dispatched by
+    type, so both the dense small-panel and sparse whole-transcriptome paths
+    work. ``tx_counts_lists[i]`` aligns to ``g_lists[i]``; pass all-ones (or
+    ``None``) for unweighted parity with ``prune_cells``. ``None``/empty
+    entries mirror ``prune_cells`` (``None`` -> ``None``, size<=1 -> ``[]``).
+    """
+    cdef cnp.ndarray[cnp.float32_t, ndim=2] _W
+    cdef cnp.ndarray[cnp.int32_t, ndim=1] _ip
+    cdef cnp.ndarray[cnp.int32_t, ndim=1] _ix
+    cdef cnp.ndarray[cnp.float32_t, ndim=1] _dt
+    cdef int use_sparse
+    if isinstance(W, np.ndarray):
+        use_sparse = 0
+        _W = np.ascontiguousarray(W, dtype=np.float32)
+        _ip = np.zeros(1, dtype=np.int32)
+        _ix = np.zeros(1, dtype=np.int32)
+        _dt = np.zeros(1, dtype=np.float32)
+    else:
+        use_sparse = 1
+        Wc = W.tocsr()
+        if not Wc.has_sorted_indices:
+            Wc = Wc.sorted_indices()
+        _W = np.zeros((1, 1), dtype=np.float32)
+        _ip = np.ascontiguousarray(Wc.indptr, dtype=np.int32)
+        _ix = np.ascontiguousarray(Wc.indices, dtype=np.int32)
+        _dt = np.ascontiguousarray(Wc.data, dtype=np.float32)
+
+    cdef Py_ssize_t n = len(g_lists)
+    cdef list out = [None] * n
+    cdef Py_ssize_t idx
+    cdef cnp.ndarray[cnp.int32_t, ndim=1] garr
+    cdef cnp.ndarray[cnp.int32_t, ndim=1] tcarr
+    cdef cnp.ndarray retained
+    for idx in range(n):
+        g = g_lists[idx]
+        if g is None:
+            out[idx] = None
+            continue
+        garr = np.ascontiguousarray(g, dtype=np.int32)
+        if garr.shape[0] <= 1:
+            out[idx] = []
+            continue
+        tc = None if tx_counts_lists is None else tx_counts_lists[idx]
+        if tc is None:
+            tcarr = np.ones(garr.shape[0], dtype=np.int32)
+        else:
+            tcarr = np.ascontiguousarray(tc, dtype=np.int32)
+        retained = _greedy_prune_to_retained(
+            garr, tcarr, _W, _ip, _ix, _dt, use_sparse, threshold)
+        out[idx] = np.setdiff1d(garr, retained, assume_unique=True).tolist()
+    return out
 
 
 cdef cnp.ndarray _prune_cells_nuclear_seed_core(

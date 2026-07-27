@@ -471,20 +471,25 @@ def annotate_unassigned_components_fast(
         pbar_groupby.update(1)
         pbar_groupby.set_description("grouping")
 
+    comp_gene_counts = {}
     for comp_id, group in df_candidate.groupby("_comp_id_local", sort=True):
-        g_local = np.sort(group["_gene_idx_local"].dropna().astype(int).unique())
+        a = group["_gene_idx_local"].dropna().astype(int).to_numpy()
+        g_local, c_local = np.unique(a, return_counts=True)   # g ascending
         if g_local.size > 0:
             comp_gene_map[comp_id] = np.asarray(g_local, dtype=np.int32)
+            comp_gene_counts[comp_id] = np.asarray(c_local, dtype=np.int32)
 
     if show_progress:
         pbar_groupby.update(1)
         pbar_groupby.close()
 
-    # Bulk-prune all components through the Cython kernel.
+    # Bulk-prune all components through the tx-weighted Cython kernel.
     if len(comp_gene_map) > 0:
         comp_keys = sorted(comp_gene_map.keys())
         g_arrays = [comp_gene_map[k] if comp_gene_map[k].size > 0 else None for k in comp_keys]
-        removed_lists = _cy_prune.prune_cells(g_arrays, W, float(npmi_threshold))
+        tc_arrays = [comp_gene_counts[k] if comp_gene_map[k].size > 0 else None for k in comp_keys]
+        removed_lists = _cy_prune.prune_cells_retained(
+            g_arrays, tc_arrays, W, float(npmi_threshold))
 
         # Pre-compute comp_id → row-positions ONCE (replaces the
         # O(N × n_comps) per-comp full-df mask in the loop below).
