@@ -28,6 +28,31 @@ import numpy as np
 import pandas as pd
 
 
+# Canonical unassigned cell_id tokens. Transcripts carrying these ids share no
+# real cell, so they must be tiled by their own xy rather than collapsed onto
+# the single centroid tile of the "-1" pseudo-cell (which otherwise dumps the
+# entire residual/Rescue workload into one tile).
+_UNASSIGNED_TOKENS = frozenset({"-1", "DROP", "UNASSIGNED", "nan"})
+
+
+def _bin_coords_to_tiles(x, y, x_edges, y_edges, n_x, n_y):
+    """Vectorized (x, y) -> flat row-major tile index, matching the binning in
+    ``_assign_cells_to_tiles`` (searchsorted on the same edges, clipped)."""
+    xb = np.clip(np.searchsorted(x_edges, np.asarray(x, float), side="right") - 1, 0, n_x - 1)
+    yb = np.clip(np.searchsorted(y_edges, np.asarray(y, float), side="right") - 1, 0, n_y - 1)
+    return (xb * n_y + yb).astype(np.int32)
+
+
+def _tile_edges_from_info(tile_info, n_x, n_y):
+    """Reconstruct (x_edges, y_edges) from the per-tile bbox dict produced by
+    ``_assign_cells_to_tiles`` so unassigned tx bin onto the identical grid."""
+    x_edges = np.array([tile_info[ix * n_y]["x_min"] for ix in range(n_x)]
+                       + [tile_info[(n_x - 1) * n_y]["x_max"]], float)
+    y_edges = np.array([tile_info[iy]["y_min"] for iy in range(n_y)]
+                       + [tile_info[n_y - 1]["y_max"]], float)
+    return x_edges, y_edges
+
+
 # ---------------------------------------------------------------------------
 # Worker function (must be module-level so multiprocessing can pickle it)
 # ---------------------------------------------------------------------------
@@ -184,7 +209,12 @@ def _disambiguate_tile_labels(
     needs_prefix = (
         labels.str.startswith("cascade_") | labels.str.startswith("UNASSIGNED_")
     )
-    tile_per_tx = df_out[cell_id_col].map(cell_to_tile).astype("Int64")
+    # Key on the tile a transcript was PROCESSED in when available; fall back to
+    # the cell_id centroid map (valid only for assigned tx).
+    if "_proc_tile" in df_out.columns:
+        tile_per_tx = df_out["_proc_tile"].astype("Int64")
+    else:
+        tile_per_tx = df_out[cell_id_col].map(cell_to_tile).astype("Int64")
     tile_prefix = "tile" + tile_per_tx.astype(str) + "_"
     out = labels.copy()
     out.loc[needs_prefix] = tile_prefix.loc[needs_prefix] + labels.loc[needs_prefix]
@@ -339,9 +369,19 @@ def run_segmented_pipeline_tiled(
         cell_id_col=cell_id_col, coord_cols=coord_cols,
     )
 
-    # 2. Slice df per tile (no copy of panel; that goes in via args).
+    # 2. Slice df per tile. Assigned tx follow their cell centroid (whole cell
+    #    stays together); unassigned tx (shared cell_id "-1") are tiled by their
+    #    own xy so the residual/Rescue workload spreads evenly across tiles
+    #    instead of collapsing onto the single centroid tile of "-1".
+    x_col, y_col = coord_cols
+    tile_of_tx = df[cell_id_col].map(cell_to_tile).to_numpy()
+    un = df[cell_id_col].astype(str).isin(_UNASSIGNED_TOKENS).to_numpy()
+    if un.any():
+        x_edges, y_edges = _tile_edges_from_info(tile_info, n_x, n_y)
+        tile_of_tx[un] = _bin_coords_to_tiles(
+            df.loc[un, x_col], df.loc[un, y_col], x_edges, y_edges, n_x, n_y)
     tile_dfs: dict[int, pd.DataFrame] = {}
-    df_with_tile = df.assign(_tile_idx=df[cell_id_col].map(cell_to_tile).astype(np.int32))
+    df_with_tile = df.assign(_tile_idx=np.asarray(tile_of_tx, np.int32))
     for ti, sub in df_with_tile.groupby("_tile_idx", sort=False):
         tile_dfs[int(ti)] = sub.drop(columns=["_tile_idx"]).reset_index(drop=True)
 
@@ -380,9 +420,23 @@ def run_segmented_pipeline_tiled(
                           f"({r['n_input_cell_ids']:,} input cells)", flush=True)
     wall_total = time.time() - t_total
 
-    # 4. Concatenate outputs.
-    parts = [per_tile_results[ti]["df_out"] for ti in sorted(per_tile_results)]
+    # 4. Concatenate outputs. Tag each row with the tile it was PROCESSED in so
+    #    label disambiguation keys on the processing tile — unassigned tx share
+    #    cell_id "-1" and cannot be mapped back to a tile via cell_to_tile.
+    parts = []
+    for ti in sorted(per_tile_results):
+        part = per_tile_results[ti]["df_out"]
+        part["_proc_tile"] = np.int32(ti)
+        parts.append(part)
     df_out = pd.concat(parts, axis=0, ignore_index=True)
+
+    # 4a. Disambiguate tile-local synthetic labels (cascade_*, UNASSIGNED_*) by
+    #     prefixing the processing tile. Multi-tile only: a single tile needs no
+    #     prefixing and must stay byte-identical to the sequential pipeline.
+    if n_tiles > 1:
+        _col = "stitched" if "stitched" in df_out.columns else "tracer_id"
+        df_out[_col] = _disambiguate_tile_labels(
+            df_out, cell_to_tile, _col, cell_id_col=cell_id_col)
 
     # 4b. Optional global post-tile Stitch + Final Rescue.
     #     Re-merges cross-tile fragments of the same underlying entity and
@@ -443,6 +497,9 @@ def run_segmented_pipeline_tiled(
     ]
     peak_rss_max_tile_bytes = max(rss_values) if rss_values else 0
     peak_rss_sum_bytes = sum(rss_values)
+
+    # Internal bookkeeping column; never surfaced to callers.
+    df_out = df_out.drop(columns=["_proc_tile"], errors="ignore")
 
     return {
         "df_out": df_out,
