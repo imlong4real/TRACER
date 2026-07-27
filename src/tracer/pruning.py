@@ -34,11 +34,11 @@ def build_dense_pmi_matrix_small_panel(
 ):
     """Build a dense symmetric NPMI/PMI matrix (small-panel legacy path).
 
-    Retained only for the synthetic-only legacy callers
-    :func:`prune_transcripts` and :func:`prune_transcripts_fast`, which
-    use a dense ``_cy_prune.prune_cells`` kernel. The production SEG
-    path (:func:`prune_transcripts_nuclear_seed`) is sparse end-to-end
-    via :func:`build_sparse_pmi_matrix_from_long`.
+    Retained only for the synthetic-only legacy caller
+    :func:`prune_transcripts_fast`, which uses the dense-or-sparse
+    ``_cy_prune.prune_cells_retained`` kernel. The production SEG path
+    (:func:`prune_transcripts_nuclear_seed`) is sparse end-to-end via
+    :func:`build_sparse_pmi_matrix_from_long`.
 
     Missing pairs remain NaN (conservative). ``metric_col`` defaults to
     ``"PMI"`` to match the bootstrap panel convention; callers feeding
@@ -240,99 +240,6 @@ def prune_genes_by_npmi_greedy(
 # uses `_cy_prune.prune_cells` via `prune_transcripts_fast` etc.
 
 #
-def prune_transcripts(
-    df,
-    npmi_df,
-    cell_id_col="cell_id",
-    gene_col="feature_name",
-    threshold=-0.1,
-    unassigned_id="-1",
-):
-    """
-    Two-pass conservative NPMI pruning.
-    Partial cell IDs are string-based: cellID-1
-    """
-    _ensure_reproducibility_seed()
-    df = df.copy()
-    df["_cell_str"] = df[cell_id_col].astype(str)
-    df[gene_col] = df[gene_col].astype(str).str.strip()
-
-    genes, gene_to_idx, W = build_dense_pmi_matrix_small_panel(npmi_df)
-    df["_gene_idx"] = df[gene_col].map(gene_to_idx)
-
-    # ---------- PASS 1 ----------
-    df["cell_id_npmi_cons_p1"] = df["_cell_str"]
-    df["npmi_cons_p1_status"] = np.where(
-        df["_cell_str"] == unassigned_id,
-        "unassigned_input",
-        "core",
-    )
-
-    partial_map = {}
-
-    for cid, sub in df[df["_cell_str"] != unassigned_id].groupby("_cell_str", sort=False):
-        g_local = np.sort(sub["_gene_idx"].dropna().astype(int).unique())
-        if g_local.size <= 1:
-            continue
-
-        keep_mask = prune_genes_by_npmi_greedy(g_local, W, threshold)
-        removed = g_local[~keep_mask]
-        if removed.size == 0:
-            continue
-
-        pid = f"{cid}-1"
-        partial_map[cid] = pid
-        rem_set = set(removed.tolist())
-
-        mask = (df["_cell_str"] == cid) & (df["_gene_idx"].isin(rem_set))
-        df.loc[mask, "cell_id_npmi_cons_p1"] = pid
-        df.loc[mask, "npmi_cons_p1_status"] = "partial_p1"
-
-    # ---------- PASS 2 ----------
-    df["cell_id_npmi_cons_p2"] = df["cell_id_npmi_cons_p1"]
-    df["npmi_cons_p2_status"] = "unchanged"
-
-    for pid in sorted(set(partial_map.values())):
-        sub = df[df["cell_id_npmi_cons_p1"] == pid]
-        g_local = np.sort(sub["_gene_idx"].dropna().astype(int).unique())
-        if g_local.size <= 1:
-            df.loc[sub.index, "npmi_cons_p2_status"] = "partial_p2"
-            continue
-
-        keep_mask = prune_genes_by_npmi_greedy(g_local, W, threshold)
-        removed = g_local[~keep_mask]
-
-        if removed.size == 0:
-            df.loc[sub.index, "npmi_cons_p2_status"] = "partial_p2"
-            continue
-
-        rem_set = set(removed.tolist())
-        mask = (df["cell_id_npmi_cons_p1"] == pid) & (df["_gene_idx"].isin(rem_set))
-
-        df.loc[~mask & (df["cell_id_npmi_cons_p1"] == pid), "npmi_cons_p2_status"] = "partial_p2"
-        df.loc[mask, "cell_id_npmi_cons_p2"] = unassigned_id
-        df.loc[mask, "npmi_cons_p2_status"] = "unassigned_from_partial"
-
-    df.drop(columns=["_cell_str", "_gene_idx"], inplace=True)
-
-    from .stitching import compute_housekeeping_mask
-
-    aux = {
-        "genes": genes,
-        "gene_to_idx": gene_to_idx,
-        "W": W,
-        "partial_map": partial_map,
-        "threshold": threshold,
-        "housekeeping_mask": compute_housekeeping_mask(
-            W,
-            pos_thresh=housekeeping_pos_thresh,
-            neg_thresh=housekeeping_neg_thresh,
-            min_strong_count=housekeeping_min_strong_count,
-        ),
-    }
-    return df, aux
-
-
 def _genes_and_counts(s):
     """Sorted unique gene indices + aligned per-gene tx counts for a group's
     ``_gene_idx`` series. Feeds the tx-weighted `_cy_prune.prune_cells_retained`
