@@ -1146,6 +1146,7 @@ cdef inline double _compute_gene_fit(
     int e_off_lo, int e_off_hi,
     cnp.int32_t[:] ent_g_mv,
     cnp.float32_t[:, :] W_mv,
+    int w_row=-1,                  # W-row override; <0 ⇒ use g_idx (dense default)
 ) noexcept nogil:
     """Mean PMI of orphan gene `g_idx` against entity's seed gene set,
     excluding the self-pair if present. NaN entries are skipped.
@@ -1159,11 +1160,12 @@ cdef inline double _compute_gene_fit(
     cdef int n_finite = 0
     cdef int ig, eg
     cdef double v
+    cdef int _row = g_idx if w_row < 0 else w_row
     for ig in range(e_off_lo, e_off_hi):
         eg = ent_g_mv[ig]
         if eg == g_idx:
             continue
-        v = W_mv[g_idx, eg]
+        v = W_mv[_row, eg]
         if v == v:  # not NaN
             pmi_sum += v
             n_finite += 1
@@ -1211,6 +1213,7 @@ cdef inline int _admission_test(
     double neg_npmi_threshold,
     int small_entity_guard_n,
     int legacy_mean_test,          # 1 = `>=` (Phase 1b legacy), 0 = `>` (Rescue legacy)
+    int w_row=-1,                  # W-row override; <0 ⇒ use gene_idx (dense/prune default)
 ) nogil:
     """Unified admission gate for a candidate gene against a seed/entity
     gene set. Returns 1 = admit, 0 = veto.
@@ -1248,6 +1251,12 @@ cdef inline int _admission_test(
     cdef float v, av, min_signal_f, min_v_f
     cdef int rs_active = 1 if real_signal_threshold > 0.0 else 0
     cdef double rs_thr = real_signal_threshold
+    # W row to read: `gene_idx` conflates the tx's own gene (self-pair
+    # exclusion below) with the W row. Gene-blocked Rescue passes a
+    # (1, G) single-gene row and needs the row decoupled from the
+    # exclusion gene; `w_row >= 0` overrides. Dense/prune callers omit
+    # it (w_row=-1) and read row `gene_idx` exactly as before.
+    cdef int _row = gene_idx if w_row < 0 else w_row
 
     if seed_len <= 0:
         # Empty seed: legacy `_mean_pmi_test` returned 0 (no admit);
@@ -1262,7 +1271,7 @@ cdef inline int _admission_test(
             if eg == gene_idx:
                 continue
             if not _wget(W, W_indptr, W_indices, W_data, use_sparse,
-                         gene_idx, eg, &v):
+                         _row, eg, &v):
                 continue
             if v < neg_npmi_threshold:
                 return 0
@@ -1278,7 +1287,7 @@ cdef inline int _admission_test(
                 if eg == gene_idx:
                     continue
                 if not _wget(W, W_indptr, W_indices, W_data, use_sparse,
-                             gene_idx, eg, &v):
+                             _row, eg, &v):
                     continue
                 av = v if v >= 0.0 else -v
                 if av <= rs_thr:
@@ -1301,7 +1310,7 @@ cdef inline int _admission_test(
                 if eg == gene_idx:
                     continue
                 if not _wget(W, W_indptr, W_indices, W_data, use_sparse,
-                             gene_idx, eg, &v):
+                             _row, eg, &v):
                     continue
                 pmi_sum += v
                 n_finite += 1
@@ -1327,7 +1336,7 @@ cdef inline int _admission_test(
             if eg == gene_idx:
                 continue
             if not _wget(W, W_indptr, W_indices, W_data, use_sparse,
-                         gene_idx, eg, &v):
+                         _row, eg, &v):
                 continue
             av = v if v >= 0.0 else -v
             if av <= rs_thr:
@@ -1355,7 +1364,7 @@ cdef inline int _admission_test(
             if eg == gene_idx:
                 continue
             if not _wget(W, W_indptr, W_indices, W_data, use_sparse,
-                         gene_idx, eg, &v):
+                         _row, eg, &v):
                 continue
             pmi_sum += v
             n_finite += 1
@@ -1400,6 +1409,7 @@ cdef void _rescue_one_tx(
     cnp.int32_t[:] ent_size_mv,      # n_tx per entity (caller pre-computed)
     cnp.float32_t[:, :] una_c_mv,
     cnp.int64_t[:] una_g_mv,
+    cnp.int64_t[:] una_w_mv,        # per-tx W-row index (== una_g_mv for dense)
     cnp.int64_t[:, :] nb_bins_mv,
     cnp.float32_t[:, :] ass_c_mv,
     cnp.int32_t[:] ass_ent_mv,
@@ -1426,7 +1436,7 @@ cdef void _rescue_one_tx(
     """
     cdef int j, k, b, off_lo, off_hi, ass_li, ent
     cdef int e_off_lo, e_off_hi, n_ent_genes, ig, eg
-    cdef int g_idx, vetoed, any_vetoed, found_neg, n_finite, used_fallback
+    cdef int g_idx, w_row, vetoed, any_vetoed, found_neg, n_finite, used_fallback
     cdef int g_in_E
     cdef int n_signal
     cdef float v_f, av_f, min_signal_f
@@ -1441,6 +1451,7 @@ cdef void _rescue_one_tx(
     cdef double ent_min_d_sq
 
     g_idx = <int> una_g_mv[i]
+    w_row = <int> una_w_mv[i]
     if g_idx < 0:
         reason_mv[i] = 1
         return
@@ -1512,7 +1523,7 @@ cdef void _rescue_one_tx(
                                 eg = ent_g_mv[ig]
                                 if eg == g_idx:
                                     continue
-                                pmi_val = W_mv[g_idx, eg]
+                                pmi_val = W_mv[w_row, eg]
                                 if pmi_val == pmi_val:
                                     pmi_sum += pmi_val
                                     n_finite += 1
@@ -1543,6 +1554,7 @@ cdef void _rescue_one_tx(
                             neg_npmi_threshold,
                             small_entity_guard_n,
                             0,  # legacy_mean_test = 0 (Rescue: `>`)
+                            w_row,
                         ) else 1
 
                 cache_mv[tid, ent] = 1 if vetoed else 2
@@ -1609,7 +1621,7 @@ cdef void _rescue_one_tx(
                     tb = -1e9
                 else:
                     tb = _compute_gene_fit(
-                        g_idx, e_off_lo, e_off_hi, ent_g_mv, W_mv,
+                        g_idx, e_off_lo, e_off_hi, ent_g_mv, W_mv, w_row,
                     )
             else:                       # distance (negated so higher = nearer)
                 tb = -min_dist_mv[tid, ent]
@@ -1662,6 +1674,7 @@ def rescue_per_tx_batch(
     int witness_small_component_cap_divisor = 2,
     int witness_tiebreak = 1,                             # 0=distance, 1=gene_fit
     cnp.ndarray[cnp.int32_t, ndim=1] ent_size = None,     # entity tx counts; required when rank_policy=1
+    cnp.ndarray[cnp.int64_t, ndim=1] una_w_row = None,    # per-tx W row; None ⇒ una_g_idx (dense)
 ):
     """Per-unassigned-tx Rescue batch.
 
@@ -1704,6 +1717,10 @@ def rescue_per_tx_batch(
 
     cdef cnp.float32_t[:, :] una_c_mv = una_coords
     cdef cnp.int64_t[:]     una_g_mv = una_g_idx
+    # W-row per tx: gene-blocked Rescue passes an explicit row array
+    # (all tx in a block share one (1, G) densified gene row); dense
+    # callers omit it and read row == gene index.
+    cdef cnp.int64_t[:]     una_w_mv = (una_g_idx if una_w_row is None else una_w_row)
     cdef cnp.int64_t[:, :]  nb_bins_mv = nb_bins
     cdef cnp.float32_t[:, :] ass_c_mv = assigned_coords
     cdef cnp.int32_t[:]     ass_ent_mv = assigned_ent_id
@@ -1824,7 +1841,7 @@ def rescue_per_tx_batch(
                 rank_policy, witness_min_admit, witness_cap,
                 witness_small_component_cap_divisor, witness_tiebreak,
                 ent_size_mv,
-                una_c_mv, una_g_mv, nb_bins_mv,
+                una_c_mv, una_g_mv, una_w_mv, nb_bins_mv,
                 ass_c_mv, ass_ent_mv, bin_off_mv, bin_data_mv,
                 ent_off_mv, ent_g_mv, W_mv,
                 _dummy_ip_mv, _dummy_ix_mv, _dummy_dt_mv,
