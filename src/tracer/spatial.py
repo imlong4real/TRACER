@@ -1698,7 +1698,7 @@ def reassign_unassigned_grid_pool(
         )
     _ensure_reproducibility_seed()
     from .stitching import build_entity_table
-    from .graph import bin_xy, neighbor_bins
+    from .graph import bin_xy, neighbor_bins, neighbor_bins_batch
 
     if unassigned_labels is None:
         unassigned_labels = set(UNASSIGNED_LABELS)
@@ -1885,25 +1885,19 @@ def reassign_unassigned_grid_pool(
                 bin_data_arr[write_cursor[ri]] = li
                 write_cursor[ri] += 1
 
-            # Build the bin-key → remap-idx dict (Python-side; only used
-            # to populate nb_bins_arr below — Cython sees only int32 idx).
-            bin_key_to_remap = {int(bk): i for i, bk in enumerate(unique_bin_keys.tolist())}
-
-            # Neighbor-bin matrix [n_una, 9] (remap indices; -1 if a
-            # bin has no assigned-tx).
-            nb_bins_arr = np.full((len(una_idx), 9), -1, dtype=np.int64)
-            for i_una, bk_val_raw in enumerate(una_bin_keys.tolist()):
-                bk_val_int = int(bk_val_raw)
-                # Self bin
-                self_remap = bin_key_to_remap.get(bk_val_int, -1)
-                nb_bins_arr[i_una, 0] = self_remap
-                # 8 neighbor bins
-                nbs = neighbor_bins(bk_val_int, topology="8")
-                for nb_pos, nb_val in enumerate(nbs):
-                    if 1 + nb_pos >= 9:
-                        break
-                    nb_remap = bin_key_to_remap.get(int(nb_val), -1)
-                    nb_bins_arr[i_una, 1 + nb_pos] = nb_remap
+            # Neighbor-bin matrix [n_una, 9] (remap indices; -1 if a bin
+            # has no assigned-tx). Vectorized: compute all 9 neighbor keys
+            # at once (col 0 = self), then map each to its remap index via
+            # searchsorted on the sorted `unique_bin_keys`. Bit-identical
+            # to the former per-tx neighbor_bins + dict-lookup loop, which
+            # dominated grid setup once the Cython kernel got fast (~26% of
+            # a rescue pass).
+            nb_keys = neighbor_bins_batch(una_bin_keys)          # (n_una, 9)
+            _pos = np.searchsorted(unique_bin_keys, nb_keys)
+            _pos_c = np.clip(_pos, 0, unique_bin_keys.size - 1)
+            nb_bins_arr = np.where(
+                unique_bin_keys[_pos_c] == nb_keys, _pos_c, -1
+            ).astype(np.int64)
 
     # Run the Cython batch ONLY if all preconditions still hold after
     # the CSR construction above (which may have set use_cython_batch
