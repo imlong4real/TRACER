@@ -121,8 +121,10 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--min-tx-per-cell-for-scores", type=int, default=5,
                    help="Min transcripts/cell for cell-level purity/conflict scoring.")
-    p.add_argument("--tau", type=float, default=0.05,
-                   help="NPMI threshold for purity/conflict relu (default 0.05).")
+    p.add_argument("--tau", type=float, default=None,
+                   help="Purity/conflict ReLU dead-zone. Default: auto by metric "
+                        "(0.2 for a PMI panel = PMI_THR; 0.05 for a bounded NPMI "
+                        "panel). Pass a float to override.")
     p.add_argument("--overwrite", action="store_true",
                    help="If outdir exists, overwrite contents.")
     return p
@@ -329,15 +331,29 @@ UNASSIGNED_TOKENS = frozenset({
 def build_outputs(
     df_post: pd.DataFrame, *,
     npmi_panel: pd.DataFrame, log: logging.Logger,
-    label_col: str = "stitched", min_tx: int = 5, tau: float = 0.05,
+    label_col: str = "stitched", min_tx: int = 5, tau: float | None = None,
 ) -> tuple[pd.DataFrame, "anndata.AnnData"]:
-    """Compute per-cell purity/conflict + build cell-by-gene AnnData."""
+    """Compute per-cell purity/conflict + build cell-by-gene AnnData.
+
+    ``tau`` is the purity/conflict ReLU dead-zone. When ``None`` it tracks the
+    panel metric scale: a PMI panel uses 0.2 (the PMI enrichment cutoff, matching
+    pipeline ``PMI_THR``); a bounded NPMI panel uses 0.05. The scoring matrix is
+    built on whichever metric the panel carries, so tau must match that scale.
+    """
     import anndata as ad
     import scipy.sparse as sp
     from tracer.metrics import (
         build_cell_gene_matrix, build_pmi_matrix,
         compute_cell_purity_relu, compute_cell_conflict_relu,
     )
+
+    # Metric-conditional dead-zone: track the metric scale of the panel the
+    # scoring matrix is built on. PMI panels use the PMI enrichment cutoff
+    # (0.2, = pipeline PMI_THR); bounded NPMI panels keep the ±1-scale 0.05.
+    if tau is None:
+        _mcol = "PMI" if "PMI" in npmi_panel.columns else "NPMI"
+        tau = 0.2 if _mcol == "PMI" else 0.05
+        log.info("Scoring dead-zone tau=%.3f (auto, %s-scale panel)", tau, _mcol)
 
     if "_etype" in df_post.columns:
         keep_mask = df_post["_etype"].astype(str).isin({"cell", "partial", "component"})
