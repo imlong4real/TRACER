@@ -147,6 +147,30 @@ def build_sparse_pmi_matrix_from_long(
     keep = ai_u != bi_u
     ai_u, bi_u, vv = ai_u[keep], bi_u[keep], vv[keep]
 
+    # Collapse duplicate undirected pairs BEFORE the COO->CSR build. scipy sums
+    # duplicate coordinates (additive-assembly semantics), so a pair supplied
+    # more than once — e.g. a panel expanded to both (i,j) and (j,i), which both
+    # fold to the same (i<j) cell — would have its PMI DOUBLED. Each row already
+    # carries the complete PMI for its pair, so keep one value per cell. This is
+    # a no-op on a correct one-directional panel (no duplicate cells). Warn if
+    # repeats disagree — that signals a malformed panel, not mere symmetry.
+    pairs = pd.DataFrame({"i": ai_u, "j": bi_u, "v": vv})
+    dup_mask = pairs.duplicated(subset=["i", "j"], keep=False)
+    if dup_mask.any():
+        conflict = (pairs[dup_mask].groupby(["i", "j"])["v"]
+                    .transform(lambda s: s.max() - s.min()) > 1e-6)
+        if conflict.any():
+            import warnings
+            warnings.warn(
+                f"PMI panel has duplicate gene pairs with conflicting values "
+                f"({int(conflict.sum())} rows); keeping the first per pair.",
+                stacklevel=2,
+            )
+        pairs = pairs.drop_duplicates(subset=["i", "j"], keep="first")
+        ai_u = pairs["i"].to_numpy()
+        bi_u = pairs["j"].to_numpy()
+        vv = pairs["v"].to_numpy(dtype=np.float32)
+
     W = sp.coo_matrix(
         (vv, (ai_u, bi_u)), shape=(G, G), dtype=np.float32,
     ).tocsr()
