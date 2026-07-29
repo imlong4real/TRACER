@@ -231,17 +231,20 @@ def build_gene_threshold_maps_from_ranked_df(
     return npmi_thr, cond_thr
 
 #
-def build_npmi_matrix_from_long(npmi_long):
+def build_pmi_matrix_from_long(npmi_long):
     genes = np.union1d(npmi_long["gene_i"].unique(), npmi_long["gene_j"].unique())
     gene_to_idx = {g: i for i, g in enumerate(genes)}
     G = len(genes)
 
+    # Metric-agnostic: the bootstrap panel carries "PMI"; legacy panels "NPMI".
+    mcol = "PMI" if "PMI" in npmi_long.columns else "NPMI"
     npmi_mat = np.zeros((G, G), dtype=np.float32)
     for row in npmi_long.itertuples(index=False):
         i = gene_to_idx[row.gene_i]
         j = gene_to_idx[row.gene_j]
-        npmi_mat[i, j] = row.NPMI
-        npmi_mat[j, i] = row.NPMI
+        v = getattr(row, mcol)
+        npmi_mat[i, j] = v
+        npmi_mat[j, i] = v
 
     col_idx = np.arange(G, dtype=np.int32)
     return genes, gene_to_idx, npmi_mat, col_idx

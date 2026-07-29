@@ -88,7 +88,7 @@ def main() -> None:
 
     from tracer.noseg_pipeline import (
         load_visiumhd_bins, subset_roi, explode_to_transcripts,
-        load_npmi_panel, npmi_gene_set, _read_tissue_positions,
+        load_pmi_panel, pmi_gene_set, _read_tissue_positions,
     )
     from tracer.visiumhd_seg import load_nucleus_polygons, assign_bins_to_nuclei
 
@@ -129,8 +129,8 @@ def main() -> None:
 
     # 4. Gene panel (restrict explode) — fall back to all matrix genes.
     if args.npmi:
-        panel = load_npmi_panel(args.npmi)
-        panel_genes = npmi_gene_set(panel)
+        panel = load_pmi_panel(args.npmi)
+        panel_genes = pmi_gene_set(panel)
     else:
         panel_genes = set(np.asarray(bins.adata.var_names))
         print("[warn] no --npmi: exploding ALL genes (may be very large).")

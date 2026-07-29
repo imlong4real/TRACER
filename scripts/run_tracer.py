@@ -335,7 +335,7 @@ def build_outputs(
     import anndata as ad
     import scipy.sparse as sp
     from tracer.metrics import (
-        build_cell_gene_matrix, build_npmi_matrix,
+        build_cell_gene_matrix, build_pmi_matrix,
         compute_cell_purity_relu, compute_cell_conflict_relu,
     )
 
@@ -350,14 +350,9 @@ def build_outputs(
         work, min_transcripts=min_tx, genes_npm=npmi_panel,
         cell_col="cell_id", exclude_ids=set(UNASSIGNED_TOKENS),
     )
-    # build_npmi_matrix reads an "NPMI" column; the bootstrap panel carries the
-    # metric as "PMI". Alias it so scoring uses the same metric the pipeline ran
-    # on. (build_npmi_matrix assigns + self-symmetrizes, so one-directional input
-    # is fine and never doubles.)
-    score_panel = npmi_panel
-    if "NPMI" not in score_panel.columns and "PMI" in score_panel.columns:
-        score_panel = score_panel.rename(columns={"PMI": "NPMI"})
-    npmi_mat, _gix = build_npmi_matrix(score_panel)
+    # build_pmi_matrix is metric-agnostic (reads PMI or NPMI, assigns +
+    # self-symmetrizes), so the bootstrap PMI panel goes straight in.
+    npmi_mat, _gix = build_pmi_matrix(npmi_panel)
     _, _, _, pur_df = compute_cell_purity_relu(
         M=M, col_idx=col_idx, npmi_mat=npmi_mat, tau=tau, cell_ids=cell_ids,
     )

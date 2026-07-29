@@ -21,7 +21,7 @@ import pandas as pd
 
 from tracer.graph import build_grid_graph_xy, build_grid_graph_xyz
 from tracer.zscale import resolve_g_z_um
-from tracer.pruning import prune_transcripts_fast, prune_genes_by_npmi_greedy
+from tracer.pruning import prune_transcripts_fast, prune_genes_by_pmi_greedy
 from tracer.spatial import (
     annotate_unassigned_components_fast,
     enforce_spatial_coherence_fast,
@@ -1656,7 +1656,7 @@ def run_segmented_pipeline(df: pd.DataFrame,
     else:
         df_grouped = annotate_unassigned_components_fast(
             df_pruned=df_rescued, aux=aux,
-            build_graph_fn=_grid_self_graph_fn, prune_fn=prune_genes_by_npmi_greedy,
+            build_graph_fn=_grid_self_graph_fn, prune_fn=prune_genes_by_pmi_greedy,
             coord_cols=("x", "y", "z"),
             k=8, dist_threshold=1.5, min_comp_size=4,
             npmi_threshold=ANNOTATE_NEG_THR,
@@ -1877,7 +1877,7 @@ def run_noseg_pipeline(df: pd.DataFrame, npmi_panel: pd.DataFrame,
     else:
         df_grouped = annotate_unassigned_components_fast(
             df_pruned=df, aux=aux,
-            build_graph_fn=_grid_self_graph_fn, prune_fn=prune_genes_by_npmi_greedy,
+            build_graph_fn=_grid_self_graph_fn, prune_fn=prune_genes_by_pmi_greedy,
             coord_cols=("x", "y", "z"),
             k=8, dist_threshold=1.5, min_comp_size=5,
             npmi_threshold=ANNOTATE_NEG_THR,

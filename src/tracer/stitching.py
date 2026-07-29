@@ -410,7 +410,7 @@ def build_entity_table(
 _VALID_COHERENCE_MODES = ("count", "magnitude")
 
 
-def _slice_npmi_submatrix(npmi_mat, gene_ids):
+def _slice_pmi_submatrix(npmi_mat, gene_ids):
     """Return a dense float submatrix for the given gene indices.
 
     Handles both dense ``np.ndarray`` and ``scipy.sparse`` inputs. For
@@ -517,7 +517,7 @@ def coherence(
         except (ImportError, AttributeError):
             pass  # fall through to numpy path
 
-    sub = _slice_npmi_submatrix(npmi_mat, gene_ids)
+    sub = _slice_pmi_submatrix(npmi_mat, gene_ids)
     iu = np.triu_indices(k, k=1)
     vals = sub[iu]
     vals = vals[np.isfinite(vals)]
@@ -547,7 +547,7 @@ def signal_strength(gene_ids: np.ndarray, npmi_mat: np.ndarray) -> float:
     k = int(gene_ids.size)
     if k < 2:
         return 0.0
-    sub = _slice_npmi_submatrix(npmi_mat, gene_ids)
+    sub = _slice_pmi_submatrix(npmi_mat, gene_ids)
     iu = np.triu_indices(k, k=1)
     vals = sub[iu]
     vals = vals[np.isfinite(vals)]

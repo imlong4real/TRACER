@@ -25,7 +25,7 @@ import anndata as ad
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import fig4_config as C
-from tracer.cc_scoring import build_npmi_matrix_from_long, compute_purity_conflict_per_cc_relu
+from tracer.cc_scoring import build_pmi_matrix_from_long, compute_purity_conflict_per_cc_relu
 
 NPMI_CSV = C.RES / "kidney_visiumhd_rctd_tracer/reference/kidney_visiumhd_npmi.csv.gz"
 RCTD_IN = C.RCTD / "inputs"
@@ -48,7 +48,7 @@ def _load_npmi_long():
 def main():
     print("[pc] building NPMI matrix ...", flush=True)
     npmi_long = _load_npmi_long()
-    genes, gene_to_idx, npmi_mat, _ = build_npmi_matrix_from_long(npmi_long)
+    genes, gene_to_idx, npmi_mat, _ = build_pmi_matrix_from_long(npmi_long)
     print(f"[pc] NPMI graph: {len(genes)} genes", flush=True)
 
     means = []

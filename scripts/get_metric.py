@@ -404,7 +404,7 @@ def metric_cell_qc(
 def _compute_purity_conflict(adata, npmi_panel, *, tau: float, log: logging.Logger):
     """Apply tracer.metrics relu purity/conflict to an AnnData."""
     from tracer.metrics import (
-        build_cell_gene_matrix, build_npmi_matrix,
+        build_cell_gene_matrix, build_pmi_matrix,
         compute_cell_purity_relu, compute_cell_conflict_relu,
     )
     # Reconstruct a transcripts-style df from the AnnData (one row per
@@ -425,7 +425,7 @@ def _compute_purity_conflict(adata, npmi_panel, *, tau: float, log: logging.Logg
         df, min_transcripts=1, genes_npm=npmi_panel,
         cell_col="cell_id",
     )
-    npmi_mat, _ = build_npmi_matrix(npmi_panel)
+    npmi_mat, _ = build_pmi_matrix(npmi_panel)
     _, _, _, pur_df = compute_cell_purity_relu(
         M=M, col_idx=col_idx, npmi_mat=npmi_mat, tau=tau, cell_ids=cids,
     )

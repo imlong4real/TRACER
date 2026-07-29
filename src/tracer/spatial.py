@@ -129,7 +129,7 @@ def annotate_unassigned_components(
     aux: dict,
     *,
     build_graph_fn,                 # pass build_graph here
-    prune_fn,                       # pass prune_genes_by_npmi_greedy here
+    prune_fn,                       # pass prune_genes_by_pmi_greedy here
     coord_cols=("x", "y", "z"),
     k=8,
     dist_threshold=1.5,

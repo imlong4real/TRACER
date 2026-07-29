@@ -267,7 +267,7 @@ def _owned_partners(obs_i, obs_j, can_bootstrap, pos):
     return indptr, partner_s, pairref_s
 
 
-def _bootstrap_npmi_for_pairs(
+def _bootstrap_pmi_for_pairs(
     M_sample: sp.csr_matrix,
     pairs_i: np.ndarray,
     pairs_j: np.ndarray,
@@ -1066,7 +1066,7 @@ def _bootstrap_pairs_gather(
         for _ in range(block):
             sample_idx = rng.integers(0, C, size=iter_size)
             M_b = M[sample_idx]
-            npmi_block = _bootstrap_npmi_for_pairs(
+            npmi_block = _bootstrap_pmi_for_pairs(
                 M_b, i_un, j_un, alpha=alpha, metric=metric,
                 pmi_formula=pmi_formula,
             )
@@ -2525,7 +2525,7 @@ def build_cell_gene_matrix(filtered_df, min_transcripts=10, genes_npm=None, cell
     return cell_ids, genes_cell, M, col_idx
 
 #
-def build_npmi_matrix(nucleus_npmi_long):
+def build_pmi_matrix(nucleus_npmi_long):
     """
     Construct a dense NPMI (Normalized Pointwise Mutual Information) matrix
     from a long-format NPMI dataframe.
@@ -2572,7 +2572,9 @@ def build_npmi_matrix(nucleus_npmi_long):
     # went from ~2 s to ~10 ms; at G=5000 the old loop would take minutes.
     i_idx = nucleus_npmi_long["gene_i"].map(gene_to_idx).to_numpy()
     j_idx = nucleus_npmi_long["gene_j"].map(gene_to_idx).to_numpy()
-    vals = nucleus_npmi_long["NPMI"].to_numpy(dtype=float)
+    # Metric-agnostic: the bootstrap panel carries "PMI"; legacy panels "NPMI".
+    _mcol = "PMI" if "PMI" in nucleus_npmi_long.columns else "NPMI"
+    vals = nucleus_npmi_long[_mcol].to_numpy(dtype=float)
 
     npmi_mat = np.zeros((G, G), dtype=float)
     npmi_mat[i_idx, j_idx] = vals
@@ -2779,7 +2781,7 @@ def compute_purity_and_conflict(
     )
 
     # -------- Build NPMI matrix --------
-    npmi_mat, gene_to_idx_all = build_npmi_matrix(nucleus_npmi_long)
+    npmi_mat, gene_to_idx_all = build_pmi_matrix(nucleus_npmi_long)
 
     # -------- Purity --------
     purity_scores, is_pure, purity_thr, purity_df = compute_cell_purity(
@@ -3131,7 +3133,7 @@ def compute_purity_and_conflict_relu(
     )
 
     # -------- Build NPMI matrix --------
-    npmi_mat, gene_to_idx_all = build_npmi_matrix(nucleus_npmi_long)
+    npmi_mat, gene_to_idx_all = build_pmi_matrix(nucleus_npmi_long)
 
     # -------- ReLU-based Purity --------
     purity_scores, is_pure, purity_thr, purity_df = compute_cell_purity_relu(
