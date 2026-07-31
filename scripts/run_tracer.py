@@ -122,9 +122,9 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--min-tx-per-cell-for-scores", type=int, default=5,
                    help="Min transcripts/cell for cell-level purity/conflict scoring.")
     p.add_argument("--tau", type=float, default=None,
-                   help="Purity/conflict ReLU dead-zone. Default: auto by metric "
-                        "(0.2 for a PMI panel = PMI_THR; 0.05 for a bounded NPMI "
-                        "panel). Pass a float to override.")
+                   help="Purity/conflict coherence threshold. Default: auto by "
+                        "metric (0.2 for a PMI panel = PMI_THR; 0.05 for a bounded "
+                        "NPMI panel). Pass a float to override.")
     p.add_argument("--overwrite", action="store_true",
                    help="If outdir exists, overwrite contents.")
     return p
@@ -335,16 +335,15 @@ def build_outputs(
 ) -> tuple[pd.DataFrame, "anndata.AnnData"]:
     """Compute per-cell purity/conflict + build cell-by-gene AnnData.
 
-    ``tau`` is the purity/conflict ReLU dead-zone. When ``None`` it tracks the
-    panel metric scale: a PMI panel uses 0.2 (the PMI enrichment cutoff, matching
-    pipeline ``PMI_THR``); a bounded NPMI panel uses 0.05. The scoring matrix is
-    built on whichever metric the panel carries, so tau must match that scale.
+    ``tau`` is the purity/conflict coherence threshold (count-based; a pair
+    counts as coherent when ``w > tau``, conflicting when ``w < -tau``). When
+    ``None`` it tracks the panel metric scale: a PMI panel uses 0.2 (the PMI
+    enrichment cutoff, = pipeline ``PMI_THR``); a bounded NPMI panel uses 0.05.
     """
     import anndata as ad
     import scipy.sparse as sp
     from tracer.metrics import (
-        build_cell_gene_matrix, build_pmi_matrix,
-        compute_cell_purity_relu, compute_cell_conflict_relu,
+        build_cell_gene_matrix, build_pmi_matrix, compute_cell_coherence,
     )
 
     # Metric-conditional dead-zone: track the metric scale of the panel the
@@ -353,7 +352,7 @@ def build_outputs(
     if tau is None:
         _mcol = "PMI" if "PMI" in npmi_panel.columns else "NPMI"
         tau = 0.2 if _mcol == "PMI" else 0.05
-        log.info("Scoring dead-zone tau=%.3f (auto, %s-scale panel)", tau, _mcol)
+        log.info("Coherence threshold=%.3f (auto, %s-scale panel)", tau, _mcol)
 
     if "_etype" in df_post.columns:
         keep_mask = df_post["_etype"].astype(str).isin({"cell", "partial", "component"})
@@ -369,21 +368,12 @@ def build_outputs(
     # build_pmi_matrix is metric-agnostic (reads PMI or NPMI, assigns +
     # self-symmetrizes), so the bootstrap PMI panel goes straight in.
     npmi_mat, _gix = build_pmi_matrix(npmi_panel)
-    _, _, _, pur_df = compute_cell_purity_relu(
-        M=M, col_idx=col_idx, npmi_mat=npmi_mat, tau=tau, cell_ids=cell_ids,
-    )
-    _, _, _, conf_df = compute_cell_conflict_relu(
-        M=M, col_idx=col_idx, npmi_mat=npmi_mat, tau=tau, cell_ids=cell_ids,
-    )
-    scores = (
-        pur_df.rename(columns={"cell_purity_relu": "purity_score"})
-              [["cell_id", "purity_score", "signal_strength",
-                "relative_purity", "relative_conflict"]]
-        .merge(
-            conf_df.rename(columns={"cell_conflict_relu": "conflict_score"})
-                   [["cell_id", "conflict_score"]],
-            on="cell_id", how="outer",
-        )
+    # Count-based coherence — the SAME metric the segmentation uses
+    # (stitching.coherence(mode="count")): purity/conflict are fractions of
+    # gene pairs above/below ±threshold, coherence = purity - conflict. Bounded
+    # and PMI-safe. threshold=tau (auto 0.2 for PMI, 0.05 for NPMI).
+    _, _, _, scores = compute_cell_coherence(
+        M=M, col_idx=col_idx, npmi_mat=npmi_mat, threshold=tau, cell_ids=cell_ids,
     )
     log.info("Per-cell scores: %d cells with purity, %d cells total in cell-by-gene",
              int(scores["purity_score"].notna().sum()), len(cell_ids))
