@@ -125,6 +125,10 @@ def build_argparser() -> argparse.ArgumentParser:
                    help="Purity/conflict coherence threshold. Default: auto by "
                         "metric (0.2 for a PMI panel = PMI_THR; 0.05 for a bounded "
                         "NPMI panel). Pass a float to override.")
+    p.add_argument("--score-mode", choices=["count", "magnitude"], default="count",
+                   help="Per-cell scoring: 'count' (default; bounded, PMI-safe, "
+                        "matches the pipeline coherence) or 'magnitude' "
+                        "(strength-weighted ReLU; opt in deliberately).")
     p.add_argument("--overwrite", action="store_true",
                    help="If outdir exists, overwrite contents.")
     return p
@@ -332,13 +336,23 @@ def build_outputs(
     df_post: pd.DataFrame, *,
     npmi_panel: pd.DataFrame, log: logging.Logger,
     label_col: str = "stitched", min_tx: int = 5, tau: float | None = None,
+    score_mode: str = "count",
 ) -> tuple[pd.DataFrame, "anndata.AnnData"]:
     """Compute per-cell purity/conflict + build cell-by-gene AnnData.
 
-    ``tau`` is the purity/conflict coherence threshold (count-based; a pair
-    counts as coherent when ``w > tau``, conflicting when ``w < -tau``). When
-    ``None`` it tracks the panel metric scale: a PMI panel uses 0.2 (the PMI
-    enrichment cutoff, = pipeline ``PMI_THR``); a bounded NPMI panel uses 0.05.
+    ``score_mode`` selects the per-cell scoring:
+      - ``"count"`` (default): coherence = fraction of gene pairs above/below
+        ±tau; bounded, PMI-safe, and identical to the segmentation's
+        ``stitching.coherence(mode="count")``.
+      - ``"magnitude"``: the ReLU strength-weighted scores. On PMI its absolute
+        purity is unbounded and its relative form is single-pair-driven in
+        sparse cells (~⅓ of the signal from one pair at ~6 genes); it agrees
+        with count ~94% elsewhere. Opt in deliberately.
+
+    ``tau`` is the coherence threshold / ReLU dead-zone (a pair counts when
+    ``w > tau`` / ``w < -tau``). When ``None`` it tracks the panel metric scale:
+    a PMI panel uses 0.2 (the PMI enrichment cutoff, = pipeline ``PMI_THR``); a
+    bounded NPMI panel uses 0.05.
     """
     import anndata as ad
     import scipy.sparse as sp
@@ -368,15 +382,39 @@ def build_outputs(
     # build_pmi_matrix is metric-agnostic (reads PMI or NPMI, assigns +
     # self-symmetrizes), so the bootstrap PMI panel goes straight in.
     npmi_mat, _gix = build_pmi_matrix(npmi_panel)
-    # Count-based coherence — the SAME metric the segmentation uses
-    # (stitching.coherence(mode="count")): purity/conflict are fractions of
-    # gene pairs above/below ±threshold, coherence = purity - conflict. Bounded
-    # and PMI-safe. threshold=tau (auto 0.2 for PMI, 0.05 for NPMI).
-    _, _, _, scores = compute_cell_coherence(
-        M=M, col_idx=col_idx, npmi_mat=npmi_mat, threshold=tau, cell_ids=cell_ids,
-    )
-    log.info("Per-cell scores: %d cells with purity, %d cells total in cell-by-gene",
-             int(scores["purity_score"].notna().sum()), len(cell_ids))
+    if score_mode == "count":
+        # SAME metric the segmentation uses (stitching.coherence(mode="count")):
+        # purity/conflict are fractions of gene pairs above/below ±tau,
+        # coherence = purity - conflict. Bounded and PMI-safe.
+        _, _, _, scores = compute_cell_coherence(
+            M=M, col_idx=col_idx, npmi_mat=npmi_mat, threshold=tau, cell_ids=cell_ids,
+        )
+    elif score_mode == "magnitude":
+        # Opt-in strength-weighted ReLU scoring (see docstring caveats).
+        from tracer.metrics import compute_cell_purity_relu, compute_cell_conflict_relu
+        _, _, _, pur = compute_cell_purity_relu(
+            M=M, col_idx=col_idx, npmi_mat=npmi_mat, tau=tau, cell_ids=cell_ids,
+        )
+        _, _, _, conf = compute_cell_conflict_relu(
+            M=M, col_idx=col_idx, npmi_mat=npmi_mat, tau=tau, cell_ids=cell_ids,
+        )
+        scores = (
+            pur.rename(columns={"cell_purity_relu": "purity_score"})
+               [["cell_id", "purity_score", "signal_strength",
+                 "relative_purity", "relative_conflict"]]
+            .merge(conf.rename(columns={"cell_conflict_relu": "conflict_score"})
+                       [["cell_id", "conflict_score"]], on="cell_id", how="outer")
+        )
+        # bounded net-polarity analogue of the count coherence column
+        scores["coherence"] = scores["relative_purity"] - scores["relative_conflict"]
+        scores = scores[["cell_id", "purity_score", "conflict_score", "coherence",
+                         "relative_purity", "relative_conflict", "signal_strength"]]
+    else:
+        raise SystemExit(
+            f"--score-mode must be 'count' or 'magnitude', got {score_mode!r}"
+        )
+    log.info("Per-cell scores (%s): %d with purity, %d total in cell-by-gene",
+             score_mode, int(scores["purity_score"].notna().sum()), len(cell_ids))
 
     # Cell-by-gene AnnData (counts layer + score obs).
     cg = (
@@ -539,6 +577,7 @@ def main() -> int:
             df_post, npmi_panel=panel, log=log,
             label_col="stitched",
             min_tx=args.min_tx_per_cell_for_scores, tau=args.tau,
+            score_mode=args.score_mode,
         )
     with timer.time("write_outputs"):
         write_outputs(
