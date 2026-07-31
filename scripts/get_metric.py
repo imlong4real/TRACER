@@ -401,12 +401,18 @@ def metric_cell_qc(
     return {r[0]: r[1] for r in summary_rows}
 
 
-def _compute_purity_conflict(adata, npmi_panel, *, tau: float, log: logging.Logger):
-    """Apply tracer.metrics relu purity/conflict to an AnnData."""
+def _compute_purity_conflict(adata, npmi_panel, *, tau=None, log: logging.Logger):
+    """Apply count-based coherence (purity/conflict) to an AnnData.
+
+    ``tau`` is the coherence threshold; ``None`` -> auto (0.2 for a PMI panel
+    = pipeline PMI_THR, 0.05 for a bounded NPMI panel).
+    """
     from tracer.metrics import (
-        build_cell_gene_matrix, build_pmi_matrix,
-        compute_cell_purity_relu, compute_cell_conflict_relu,
+        build_cell_gene_matrix, build_pmi_matrix, compute_cell_coherence,
     )
+    if tau is None:
+        _mcol = "PMI" if "PMI" in npmi_panel.columns else "NPMI"
+        tau = 0.2 if _mcol == "PMI" else 0.05
     # Reconstruct a transcripts-style df from the AnnData (one row per
     # nonzero entry, replicated `count` times for purity's tx-counting).
     coo = adata.X.tocoo()
@@ -426,11 +432,8 @@ def _compute_purity_conflict(adata, npmi_panel, *, tau: float, log: logging.Logg
         cell_col="cell_id",
     )
     npmi_mat, _ = build_pmi_matrix(npmi_panel)
-    _, _, _, pur_df = compute_cell_purity_relu(
-        M=M, col_idx=col_idx, npmi_mat=npmi_mat, tau=tau, cell_ids=cids,
-    )
-    _, _, _, conf_df = compute_cell_conflict_relu(
-        M=M, col_idx=col_idx, npmi_mat=npmi_mat, tau=tau, cell_ids=cids,
+    _, _, _, scores = compute_cell_coherence(
+        M=M, col_idx=col_idx, npmi_mat=npmi_mat, threshold=tau, cell_ids=cids,
     )
     # Align to AnnData obs order
     name_to_pos = {c: i for i, c in enumerate(adata.obs_names.astype(str))}
@@ -439,17 +442,14 @@ def _compute_purity_conflict(adata, npmi_panel, *, tau: float, log: logging.Logg
     out_rpur = np.full(adata.n_obs, np.nan, dtype=np.float64)
     out_rconf = np.full(adata.n_obs, np.nan, dtype=np.float64)
     out_sig = np.full(adata.n_obs, np.nan, dtype=np.float64)
-    for _, row in pur_df.iterrows():
+    for _, row in scores.iterrows():
         pos = name_to_pos.get(str(row["cell_id"]))
         if pos is not None:
-            out_pur[pos] = row["cell_purity_relu"]
+            out_pur[pos] = row["purity_score"]
+            out_conf[pos] = row["conflict_score"]
             out_rpur[pos] = row["relative_purity"]
             out_rconf[pos] = row["relative_conflict"]
             out_sig[pos] = row["signal_strength"]
-    for _, row in conf_df.iterrows():
-        pos = name_to_pos.get(str(row["cell_id"]))
-        if pos is not None:
-            out_conf[pos] = row["cell_conflict_relu"]
     return out_pur, out_conf, out_rpur, out_rconf, out_sig
 
 
@@ -893,9 +893,13 @@ def metric_tcell_marker_log2fc(
 # ===========================================================================
 def metric_npmi_coherence(
     adata_query, npmi_panel: pd.DataFrame, *,
-    outdir: Path, log: logging.Logger, tau: float = 0.05,
+    outdir: Path, log: logging.Logger, tau: float | None = None,
 ) -> dict[str, float]:
-    """Reuse tracer.metrics relu purity/conflict aggregated for the dataset."""
+    """Count-based coherence (purity/conflict) aggregated for the dataset.
+
+    ``tau`` is the coherence threshold; ``None`` -> auto by metric (0.2 PMI /
+    0.05 NPMI).
+    """
     pur, conf, rel_pur, rel_conf, sig = _compute_purity_conflict(
         adata_query, npmi_panel, tau=tau, log=log,
     )

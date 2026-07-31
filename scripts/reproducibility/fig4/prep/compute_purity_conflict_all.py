@@ -25,7 +25,8 @@ import anndata as ad
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import fig4_config as C
-from tracer.cc_scoring import build_pmi_matrix_from_long, compute_purity_conflict_per_cc_relu
+from tracer.cc_scoring import build_pmi_matrix_from_long
+from tracer.metrics import compute_cell_coherence
 
 NPMI_CSV = C.RES / "kidney_visiumhd_rctd_tracer/reference/kidney_visiumhd_npmi.csv.gz"
 RCTD_IN = C.RCTD / "inputs"
@@ -65,8 +66,14 @@ def main():
         for s in range(0, n, BATCH):
             e = min(s + BATCH, n)
             M = (X[s:e].toarray() > 0).astype(np.float32)
-            _p, _c, r_p, r_c, sig = compute_purity_conflict_per_cc_relu(M, npmi_mat, col_idx)
-            rp[s:e], rc[s:e], ss[s:e] = r_p, r_c, sig
+            # count-based coherence at PMI enrichment cutoff (0.2); relative
+            # purity/conflict = signal-normalized fractions of the pair counts.
+            _coh, _p, _c, _ = compute_cell_coherence(M, col_idx, npmi_mat, threshold=0.2)
+            _tot = _p + _c
+            with np.errstate(invalid="ignore", divide="ignore"):
+                r_p = np.where(_tot > 0, _p / _tot, np.nan)
+                r_c = np.where(_tot > 0, _c / _tot, np.nan)
+            rp[s:e], rc[s:e], ss[s:e] = r_p, r_c, _tot
         # save per-cell with cell_id so QC filtering can be applied downstream
         pc = pd.DataFrame({"cell_id": a.obs_names.astype(str),
                            "relative_purity": rp, "relative_conflict": rc,
