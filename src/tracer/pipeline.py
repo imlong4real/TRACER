@@ -1842,10 +1842,14 @@ def run_noseg_pipeline(df: pd.DataFrame, npmi_panel: pd.DataFrame,
                   df.assign(_lbl=df["cell_id"].astype(str)), "_lbl")
 
     # Init aux via Stage 1 prune at -inf threshold (no actual pruning).
+    # PMI is the default/production panel column; fall back to NPMI only for
+    # legacy panels lacking a PMI column (mirrors run_segmented_pipeline).
+    metric_col = "PMI" if "PMI" in npmi_panel.columns else "NPMI"
     df, aux = prune_transcripts_fast(
         df, npmi_panel,
         cell_id_col="cell_id", gene_col="feature_name",
         threshold=-1e9, unassigned_id="-1",
+        metric_col=metric_col,
         n_jobs=-1, show_progress=False,
     )
     df["tracer_id"] = "-1"

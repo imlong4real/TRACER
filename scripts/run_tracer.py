@@ -251,17 +251,22 @@ def load_npmi_panel(path: Path, log: logging.Logger) -> pd.DataFrame:
         raise SystemExit(
             f"NPMI panel missing gene_i/gene_j; columns: {list(df.columns)}"
         )
-    # Pipeline expects long-format with both directions per pair.
-    if (df.duplicated(["gene_i", "gene_j"]).any()):
-        log.warning("NPMI panel has duplicate pairs — keeping first occurrence.")
-        df = df.drop_duplicates(["gene_i", "gene_j"], keep="first")
-    # Emit symmetric form (i, j) and (j, i) so downstream lookups work.
-    rev = df.copy()
-    rev["gene_i"], rev["gene_j"] = df["gene_j"].values, df["gene_i"].values
-    panel = pd.concat([df, rev], ignore_index=True)
-    # Drop self-pairs if present (i == j).
-    panel = panel.loc[panel["gene_i"] != panel["gene_j"]].reset_index(drop=True)
-    log.info("NPMI panel: %d rows after symmetric expansion; PMI: %s, NPMI: %s",
+    # Feed ONE row per undirected pair. The pipeline symmetrizes W itself
+    # (build_sparse_pmi_matrix_from_long folds edges into the upper triangle
+    # and _symmetric_csr_arrays mirrors them). Emitting (j, i) here as well
+    # would be *summed* by the COO->CSR builder and DOUBLE every PMI value —
+    # halving every calibrated threshold. Collapse on the undirected key so a
+    # one-directional OR an already-symmetric panel both yield single values.
+    ui = np.minimum(df["gene_i"].astype(str), df["gene_j"].astype(str))
+    uj = np.maximum(df["gene_i"].astype(str), df["gene_j"].astype(str))
+    df = df.assign(_ukey=ui + "\x00" + uj)
+    n_before = len(df)
+    df = df.loc[ui != uj].drop_duplicates("_ukey", keep="first")
+    panel = df.drop(columns="_ukey").reset_index(drop=True)
+    if len(panel) != n_before:
+        log.info("NPMI panel: collapsed %d -> %d one-directional pairs "
+                 "(self/duplicate/reverse rows dropped)", n_before, len(panel))
+    log.info("NPMI panel: %d one-directional rows; PMI: %s, NPMI: %s",
              len(panel),
              "yes" if "PMI" in panel.columns else "no",
              "yes" if "NPMI" in panel.columns else "no")
@@ -345,7 +350,14 @@ def build_outputs(
         work, min_transcripts=min_tx, genes_npm=npmi_panel,
         cell_col="cell_id", exclude_ids=set(UNASSIGNED_TOKENS),
     )
-    npmi_mat, _gix = build_npmi_matrix(npmi_panel)
+    # build_npmi_matrix reads an "NPMI" column; the bootstrap panel carries the
+    # metric as "PMI". Alias it so scoring uses the same metric the pipeline ran
+    # on. (build_npmi_matrix assigns + self-symmetrizes, so one-directional input
+    # is fine and never doubles.)
+    score_panel = npmi_panel
+    if "NPMI" not in score_panel.columns and "PMI" in score_panel.columns:
+        score_panel = score_panel.rename(columns={"PMI": "NPMI"})
+    npmi_mat, _gix = build_npmi_matrix(score_panel)
     _, _, _, pur_df = compute_cell_purity_relu(
         M=M, col_idx=col_idx, npmi_mat=npmi_mat, tau=tau, cell_ids=cell_ids,
     )

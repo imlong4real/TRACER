@@ -34,11 +34,10 @@ def build_dense_pmi_matrix_small_panel(
 ):
     """Build a dense symmetric NPMI/PMI matrix (small-panel legacy path).
 
-    Retained only for the synthetic-only legacy callers
-    :func:`prune_transcripts` and :func:`prune_transcripts_fast`, which
-    use a dense ``_cy_prune.prune_cells`` kernel. The production SEG
-    path (:func:`prune_transcripts_nuclear_seed`) is sparse end-to-end
-    via :func:`build_sparse_pmi_matrix_from_long`.
+    No internal callers remain: both :func:`prune_transcripts_fast` and
+    :func:`prune_transcripts_nuclear_seed` are now sparse end-to-end via
+    :func:`build_sparse_pmi_matrix_from_long`. Kept only as a public
+    convenience builder for a dense ``(G, G)`` panel; removal candidate.
 
     Missing pairs remain NaN (conservative). ``metric_col`` defaults to
     ``"PMI"`` to match the bootstrap panel convention; callers feeding
@@ -148,6 +147,30 @@ def build_sparse_pmi_matrix_from_long(
     keep = ai_u != bi_u
     ai_u, bi_u, vv = ai_u[keep], bi_u[keep], vv[keep]
 
+    # Collapse duplicate undirected pairs BEFORE the COO->CSR build. scipy sums
+    # duplicate coordinates (additive-assembly semantics), so a pair supplied
+    # more than once — e.g. a panel expanded to both (i,j) and (j,i), which both
+    # fold to the same (i<j) cell — would have its PMI DOUBLED. Each row already
+    # carries the complete PMI for its pair, so keep one value per cell. This is
+    # a no-op on a correct one-directional panel (no duplicate cells). Warn if
+    # repeats disagree — that signals a malformed panel, not mere symmetry.
+    pairs = pd.DataFrame({"i": ai_u, "j": bi_u, "v": vv})
+    dup_mask = pairs.duplicated(subset=["i", "j"], keep=False)
+    if dup_mask.any():
+        conflict = (pairs[dup_mask].groupby(["i", "j"])["v"]
+                    .transform(lambda s: s.max() - s.min()) > 1e-6)
+        if conflict.any():
+            import warnings
+            warnings.warn(
+                f"PMI panel has duplicate gene pairs with conflicting values "
+                f"({int(conflict.sum())} rows); keeping the first per pair.",
+                stacklevel=2,
+            )
+        pairs = pairs.drop_duplicates(subset=["i", "j"], keep="first")
+        ai_u = pairs["i"].to_numpy()
+        bi_u = pairs["j"].to_numpy()
+        vv = pairs["v"].to_numpy(dtype=np.float32)
+
     W = sp.coo_matrix(
         (vv, (ai_u, bi_u)), shape=(G, G), dtype=np.float32,
     ).tocsr()
@@ -240,97 +263,13 @@ def prune_genes_by_npmi_greedy(
 # uses `_cy_prune.prune_cells` via `prune_transcripts_fast` etc.
 
 #
-def prune_transcripts(
-    df,
-    npmi_df,
-    cell_id_col="cell_id",
-    gene_col="feature_name",
-    threshold=-0.1,
-    unassigned_id="-1",
-):
-    """
-    Two-pass conservative NPMI pruning.
-    Partial cell IDs are string-based: cellID-1
-    """
-    _ensure_reproducibility_seed()
-    df = df.copy()
-    df["_cell_str"] = df[cell_id_col].astype(str)
-    df[gene_col] = df[gene_col].astype(str).str.strip()
-
-    genes, gene_to_idx, W = build_dense_pmi_matrix_small_panel(npmi_df)
-    df["_gene_idx"] = df[gene_col].map(gene_to_idx)
-
-    # ---------- PASS 1 ----------
-    df["cell_id_npmi_cons_p1"] = df["_cell_str"]
-    df["npmi_cons_p1_status"] = np.where(
-        df["_cell_str"] == unassigned_id,
-        "unassigned_input",
-        "core",
-    )
-
-    partial_map = {}
-
-    for cid, sub in df[df["_cell_str"] != unassigned_id].groupby("_cell_str", sort=False):
-        g_local = np.sort(sub["_gene_idx"].dropna().astype(int).unique())
-        if g_local.size <= 1:
-            continue
-
-        keep_mask = prune_genes_by_npmi_greedy(g_local, W, threshold)
-        removed = g_local[~keep_mask]
-        if removed.size == 0:
-            continue
-
-        pid = f"{cid}-1"
-        partial_map[cid] = pid
-        rem_set = set(removed.tolist())
-
-        mask = (df["_cell_str"] == cid) & (df["_gene_idx"].isin(rem_set))
-        df.loc[mask, "cell_id_npmi_cons_p1"] = pid
-        df.loc[mask, "npmi_cons_p1_status"] = "partial_p1"
-
-    # ---------- PASS 2 ----------
-    df["cell_id_npmi_cons_p2"] = df["cell_id_npmi_cons_p1"]
-    df["npmi_cons_p2_status"] = "unchanged"
-
-    for pid in sorted(set(partial_map.values())):
-        sub = df[df["cell_id_npmi_cons_p1"] == pid]
-        g_local = np.sort(sub["_gene_idx"].dropna().astype(int).unique())
-        if g_local.size <= 1:
-            df.loc[sub.index, "npmi_cons_p2_status"] = "partial_p2"
-            continue
-
-        keep_mask = prune_genes_by_npmi_greedy(g_local, W, threshold)
-        removed = g_local[~keep_mask]
-
-        if removed.size == 0:
-            df.loc[sub.index, "npmi_cons_p2_status"] = "partial_p2"
-            continue
-
-        rem_set = set(removed.tolist())
-        mask = (df["cell_id_npmi_cons_p1"] == pid) & (df["_gene_idx"].isin(rem_set))
-
-        df.loc[~mask & (df["cell_id_npmi_cons_p1"] == pid), "npmi_cons_p2_status"] = "partial_p2"
-        df.loc[mask, "cell_id_npmi_cons_p2"] = unassigned_id
-        df.loc[mask, "npmi_cons_p2_status"] = "unassigned_from_partial"
-
-    df.drop(columns=["_cell_str", "_gene_idx"], inplace=True)
-
-    from .stitching import compute_housekeeping_mask
-
-    aux = {
-        "genes": genes,
-        "gene_to_idx": gene_to_idx,
-        "W": W,
-        "partial_map": partial_map,
-        "threshold": threshold,
-        "housekeeping_mask": compute_housekeeping_mask(
-            W,
-            pos_thresh=housekeeping_pos_thresh,
-            neg_thresh=housekeeping_neg_thresh,
-            min_strong_count=housekeeping_min_strong_count,
-        ),
-    }
-    return df, aux
+def _genes_and_counts(s):
+    """Sorted unique gene indices + aligned per-gene tx counts for a group's
+    ``_gene_idx`` series. Feeds the tx-weighted `_cy_prune.prune_cells_retained`
+    (counts weight each gene's conflict evidence and self-protection)."""
+    a = s.dropna().astype(int).to_numpy()
+    g, c = np.unique(a, return_counts=True)   # g ascending (matches prior np.sort)
+    return (g.astype(np.int32), c.astype(np.int32))
 
 
 def prune_transcripts_fast(
@@ -349,7 +288,7 @@ def prune_transcripts_fast(
     housekeeping_pos_thresh: float = 0.05,
     housekeeping_neg_thresh: float = -0.05,
     housekeeping_min_strong_count: int = 5,
-    metric_col: str = "NPMI",
+    metric_col: str = "PMI",
     nan_fill: float | None = None,
 ):
     """
@@ -389,20 +328,26 @@ def prune_transcripts_fast(
     else:
         df["_cell_str"] = df[cell_id_col]
 
+    # Sparse panel end-to-end (mirrors prune_transcripts_nuclear_seed): build
+    # an upper-triangle CSR, symmetrize it for the whole-cell kernel, and skip
+    # absent pairs. This unblocks whole-transcriptome / NOSEG panels that OOM a
+    # dense (G, G) matrix. `nan_fill` is now a no-op — absent pairs are SKIPPED
+    # (not zero-filled), matching the nuclear-seed backend and the bootstrap
+    # panel convention (see `_cy_prune._wget`).
+    _ = nan_fill  # retained for API compatibility; no dense NaN to fill
     if _is_bootstrap_result(npmi_df) or sp.issparse(npmi_df):
-        # The two-pass whole-cell prune (prune_cells / prune_single) is
-        # still dense-only. The sparse CSR backend currently lives on the
-        # nuclear-seed path (prune_transcripts_nuclear_seed); sparsifying
-        # this path is tracked as a follow-up.
-        raise NotImplementedError(
-            "prune_transcripts_fast does not yet accept a sparse / "
-            "PmiBootstrapResult panel; use prune_transcripts_nuclear_seed "
-            "for whole-transcriptome sparse panels."
-        )
-    genes, gene_to_idx, W = build_dense_pmi_matrix_small_panel(
-        npmi_df, metric_col=metric_col)
-    if nan_fill is not None:
-        np.nan_to_num(W, copy=False, nan=float(nan_fill))
+        if sp.issparse(npmi_df):
+            raise TypeError(
+                "Pass a PmiBootstrapResult (carries gene names) for the "
+                "sparse prune, not a bare scipy matrix."
+            )
+        genes, gene_to_idx, W_panel = build_sparse_pmi_matrix(npmi_df)
+    else:
+        genes, gene_to_idx, W_panel = build_sparse_pmi_matrix_from_long(
+            npmi_df, metric_col=metric_col)
+    # Symmetric column-sorted CSR for the kernel (W_panel is upper-triangle).
+    _sp_ip, _sp_ix, _sp_dt = _symmetric_csr_arrays(W_panel)
+    W = sp.csr_matrix((_sp_dt, _sp_ix, _sp_ip), shape=(len(genes), len(genes)))
     df["_gene_idx"] = df[gene_col].map(gene_to_idx)
 
     # ---------- PASS 1 ----------
@@ -424,9 +369,9 @@ def prune_transcripts_fast(
 
     partial_map = {}
 
-    # Prepare per-cell unique gene lists (only cells that are not unassigned)
+    # Prepare per-cell unique gene lists + tx counts (only non-unassigned cells)
     grp = df[df["_cell_str"] != unassigned_id].groupby("_cell_str")["_gene_idx"].apply(
-        lambda s: np.asarray(np.sort(pd.Index(s.dropna().astype(int)).unique()), dtype=np.int32)
+        _genes_and_counts
     )
 
     cell_items = list(grp.items())
@@ -442,11 +387,15 @@ def prune_transcripts_fast(
 
     # Batch prune all cells through the compiled Cython kernel. The Python
     # fallback was removed — it was 100–1000× slower and silently ran for
-    # hours when the .so wasn't built. If _cy_prune.prune_cells raises
-    # (e.g. corrupted gene lists), surface it instead of papering over.
+    # hours when the .so wasn't built. If the kernel raises (e.g. corrupted
+    # gene lists), surface it instead of papering over.
     cell_ids = [cid for cid, _ in cell_items]
-    g_arrays = [gl if (gl is not None and gl.size > 0) else None for _, gl in cell_items]
-    removed_lists = _cy_prune.prune_cells(g_arrays, W, float(threshold))
+    g_arrays = [gc[0] if (gc is not None and gc[0].size > 0) else None
+                for _, gc in cell_items]
+    tc_arrays = [gc[1] if (gc is not None and gc[0].size > 0) else None
+                 for _, gc in cell_items]
+    removed_lists = _cy_prune.prune_cells_retained(
+        g_arrays, tc_arrays, W, float(threshold))
     for cid, removed in zip(cell_ids, removed_lists):
         if removed:
             results.append((cid, removed))
@@ -516,7 +465,7 @@ def prune_transcripts_fast(
     pids = sorted(set(partial_map.values()))
     if pids:
         grp_p = df[df[out_col].isin(pids)].groupby(out_col)["_gene_idx"].apply(
-            lambda s: np.asarray(np.sort(pd.Index(s.dropna().astype(int)).unique()), dtype=np.int32)
+            _genes_and_counts
         )
 
         partial_items = list(grp_p.items())
@@ -530,8 +479,12 @@ def prune_transcripts_fast(
         results2 = []
 
         pids = [pid for pid, _ in partial_items]
-        g_arrays = [gl if (gl is not None and gl.size > 0) else None for _, gl in partial_items]
-        removed_lists = _cy_prune.prune_cells(g_arrays, W, float(threshold))
+        g_arrays = [gc[0] if (gc is not None and gc[0].size > 0) else None
+                    for _, gc in partial_items]
+        tc_arrays = [gc[1] if (gc is not None and gc[0].size > 0) else None
+                     for _, gc in partial_items]
+        removed_lists = _cy_prune.prune_cells_retained(
+            g_arrays, tc_arrays, W, float(threshold))
         for pid, removed in zip(pids, removed_lists):
             if removed:
                 results2.append((pid, removed))
@@ -607,6 +560,9 @@ def prune_transcripts_fast(
     aux = {
         "genes": genes,
         "gene_to_idx": gene_to_idx,
+        # Symmetric CSR: the whole-cell / NOSEG cascade + rescue do bidirectional
+        # W[i,j]/W[j,i] lookups, so aux["W"] must be symmetric (the former dense
+        # path stored a symmetric matrix; an upper-tri panel here over-merges).
         "W": W,
         "partial_map": partial_map,
         "threshold": threshold,

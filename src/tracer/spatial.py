@@ -471,20 +471,25 @@ def annotate_unassigned_components_fast(
         pbar_groupby.update(1)
         pbar_groupby.set_description("grouping")
 
+    comp_gene_counts = {}
     for comp_id, group in df_candidate.groupby("_comp_id_local", sort=True):
-        g_local = np.sort(group["_gene_idx_local"].dropna().astype(int).unique())
+        a = group["_gene_idx_local"].dropna().astype(int).to_numpy()
+        g_local, c_local = np.unique(a, return_counts=True)   # g ascending
         if g_local.size > 0:
             comp_gene_map[comp_id] = np.asarray(g_local, dtype=np.int32)
+            comp_gene_counts[comp_id] = np.asarray(c_local, dtype=np.int32)
 
     if show_progress:
         pbar_groupby.update(1)
         pbar_groupby.close()
 
-    # Bulk-prune all components through the Cython kernel.
+    # Bulk-prune all components through the tx-weighted Cython kernel.
     if len(comp_gene_map) > 0:
         comp_keys = sorted(comp_gene_map.keys())
         g_arrays = [comp_gene_map[k] if comp_gene_map[k].size > 0 else None for k in comp_keys]
-        removed_lists = _cy_prune.prune_cells(g_arrays, W, float(npmi_threshold))
+        tc_arrays = [comp_gene_counts[k] if comp_gene_map[k].size > 0 else None for k in comp_keys]
+        removed_lists = _cy_prune.prune_cells_retained(
+            g_arrays, tc_arrays, W, float(npmi_threshold))
 
         # Pre-compute comp_id → row-positions ONCE (replaces the
         # O(N × n_comps) per-comp full-df mask in the loop below).
@@ -899,6 +904,33 @@ def enforce_spatial_coherence_per_label(
         print(f"per-label CC: {n_split:,} labels split, "
               f"{n_skipped_small:,} skipped (size < {min_size_for_split})")
     return df_out
+
+
+def _fast_percentile(a: np.ndarray, q: float) -> float:
+    """Single-percentile of a small 1-D array, matching numpy's default
+    ``method="linear"`` bit-for-bit but without ``np.percentile``'s per-call
+    overhead (dtype validation, ``unique``, ``argpartition``, generic ``lerp``).
+
+    Hot path in the Rescue veto: called once per (candidate, entity) that
+    reaches the aggregate gate — ~1e6 calls/pass, where ``np.percentile``'s
+    fixed cost dominates. ``a`` is assumed finite (callers pre-filter to
+    signal pairs, dropping NaN/near-zero). Replicates numpy's ``_lerp``
+    precision branch (``t < 0.5`` vs ``t >= 0.5``) so boundary vetoes are
+    identical to the previous ``np.percentile`` result.
+    """
+    n = a.size
+    if n == 1:
+        return float(a[0])
+    s = np.sort(a)
+    vidx = (q / 100.0) * (n - 1)
+    lo = int(vidx)              # floor (vidx >= 0)
+    frac = vidx - lo
+    if frac == 0.0:
+        return float(s[lo])
+    diff = s[lo + 1] - s[lo]
+    if frac < 0.5:
+        return float(s[lo] + frac * diff)
+    return float(s[lo + 1] - (1.0 - frac) * diff)
 
 
 def _make_negative_set_lookup(W, neg_npmi_threshold: float):
@@ -1666,7 +1698,7 @@ def reassign_unassigned_grid_pool(
         )
     _ensure_reproducibility_seed()
     from .stitching import build_entity_table
-    from .graph import bin_xy, neighbor_bins
+    from .graph import bin_xy, neighbor_bins, neighbor_bins_batch
 
     if unassigned_labels is None:
         unassigned_labels = set(UNASSIGNED_LABELS)
@@ -1791,12 +1823,14 @@ def reassign_unassigned_grid_pool(
     # the standard veto modes. Falls back to the legacy Python loop for
     # any unusual shape.
     use_cython_batch = (
-        not W_is_sparse
-        and len(coord_cols) >= 2
+        len(coord_cols) >= 2
         and veto_mode in ("min", "mean", "hybrid")
         # Cython batch supports both distance and witness rank policies
         # (witness branch landed 2026-05-15 in _cy_prune.pyx). No
-        # rank_policy gate here.
+        # rank_policy gate here. W may be dense (single full-matrix call)
+        # or sparse (gene-blocked: one densified (1, G) row per gene,
+        # reusing the same kernel — O(G) memory, no G×G materialization;
+        # see the call site below).
     )
 
     # For witness mode we need entity sizes (total assigned-tx count
@@ -1851,25 +1885,19 @@ def reassign_unassigned_grid_pool(
                 bin_data_arr[write_cursor[ri]] = li
                 write_cursor[ri] += 1
 
-            # Build the bin-key → remap-idx dict (Python-side; only used
-            # to populate nb_bins_arr below — Cython sees only int32 idx).
-            bin_key_to_remap = {int(bk): i for i, bk in enumerate(unique_bin_keys.tolist())}
-
-            # Neighbor-bin matrix [n_una, 9] (remap indices; -1 if a
-            # bin has no assigned-tx).
-            nb_bins_arr = np.full((len(una_idx), 9), -1, dtype=np.int64)
-            for i_una, bk_val_raw in enumerate(una_bin_keys.tolist()):
-                bk_val_int = int(bk_val_raw)
-                # Self bin
-                self_remap = bin_key_to_remap.get(bk_val_int, -1)
-                nb_bins_arr[i_una, 0] = self_remap
-                # 8 neighbor bins
-                nbs = neighbor_bins(bk_val_int, topology="8")
-                for nb_pos, nb_val in enumerate(nbs):
-                    if 1 + nb_pos >= 9:
-                        break
-                    nb_remap = bin_key_to_remap.get(int(nb_val), -1)
-                    nb_bins_arr[i_una, 1 + nb_pos] = nb_remap
+            # Neighbor-bin matrix [n_una, 9] (remap indices; -1 if a bin
+            # has no assigned-tx). Vectorized: compute all 9 neighbor keys
+            # at once (col 0 = self), then map each to its remap index via
+            # searchsorted on the sorted `unique_bin_keys`. Bit-identical
+            # to the former per-tx neighbor_bins + dict-lookup loop, which
+            # dominated grid setup once the Cython kernel got fast (~26% of
+            # a rescue pass).
+            nb_keys = neighbor_bins_batch(una_bin_keys)          # (n_una, 9)
+            _pos = np.searchsorted(unique_bin_keys, nb_keys)
+            _pos_c = np.clip(_pos, 0, unique_bin_keys.size - 1)
+            nb_bins_arr = np.where(
+                unique_bin_keys[_pos_c] == nb_keys, _pos_c, -1
+            ).astype(np.int64)
 
     # Run the Cython batch ONLY if all preconditions still hold after
     # the CSR construction above (which may have set use_cython_batch
@@ -1878,7 +1906,6 @@ def reassign_unassigned_grid_pool(
         # Cast inputs to expected dtypes.
         una_coords_c = una_coords.astype(np.float32)
         ass_coords_c = assigned_coords.astype(np.float32)
-        W_c = W if (hasattr(W, "dtype") and W.dtype == np.float32) else np.asarray(W, dtype=np.float32)
         z_bound_for_cy = float(z_bound_eff) if z_col_idx is not None else 0.0
 
         veto_mode_int = (
@@ -1896,13 +1923,13 @@ def reassign_unassigned_grid_pool(
         rank_policy_int = 1 if rank_policy == "witness" else 0
         witness_tiebreak_int = 1 if witness_tiebreak == "gene_fit" else 0
 
-        best_ent_arr, best_dist_arr, reason_arr, sef_arr = (
-            _cy_prune.rescue_per_tx_batch(
-                una_coords_c, una_g_idx, nb_bins_arr,
+        def _run_kernel(coords_blk, g_blk, nb_blk, W_mat, w_row_blk=None):
+            return _cy_prune.rescue_per_tx_batch(
+                coords_blk, g_blk, nb_blk,
                 ass_coords_c, ass_ent_id,
                 bin_offsets, bin_data_arr,
                 ent_gene_offsets, ent_gene_idx,
-                W_c,
+                W_mat,
                 z_bound_for_cy,
                 veto_mode_int,
                 float(mean_threshold),
@@ -1917,8 +1944,59 @@ def reassign_unassigned_grid_pool(
                 int(witness_small_component_cap_divisor),
                 witness_tiebreak_int,
                 ent_size_arr,
+                w_row_blk,
             )
-        )
+
+        n_una_cy = len(una_idx)
+        if not W_is_sparse:
+            # Dense W: single full-matrix pass (legacy fast path).
+            W_c = (W if (hasattr(W, "dtype") and W.dtype == np.float32)
+                   else np.asarray(W, dtype=np.float32))
+            best_ent_arr, best_dist_arr, reason_arr, sef_arr = _run_kernel(
+                una_coords_c, una_g_idx, nb_bins_arr, W_c,
+            )
+            n_sef = int(sef_arr.sum())
+        else:
+            # Sparse W: gene-blocked. rescue_per_tx_batch reads only
+            # ``W[g_idx, :]`` (the tx's own gene row), so we densify ONE
+            # ``(1, G)`` row per distinct gene and reuse the identical
+            # kernel with ``una_g_idx ≡ 0`` — O(G) memory, no G×G
+            # materialization. Structurally-absent entries are NaN (the
+            # kernel skips them), matching ``build_dense_pmi_matrix_small_panel``
+            # bit-for-bit. Group order is irrelevant: each tx's result
+            # depends only on its gene row, its spatial neighborhood, and
+            # the (frozen) per-entity gene sets.
+            G_panel = int(W.shape[0])
+            best_ent_arr = np.full(n_una_cy, -1, dtype=np.int32)
+            best_dist_arr = np.full(n_una_cy, np.nan, dtype=np.float32)
+            reason_arr = np.zeros(n_una_cy, dtype=np.int32)
+            n_sef = 0
+            W_csr = W.tocsr()
+            _order = np.argsort(una_g_idx, kind="stable")
+            _uniq_g, _grp_start = np.unique(una_g_idx[_order], return_index=True)
+            _bounds = _grp_start.tolist() + [n_una_cy]
+            for _bi, _g in enumerate(_uniq_g.tolist()):
+                _blk = _order[_bounds[_bi]:_bounds[_bi + 1]]
+                if _g < 0:
+                    reason_arr[_blk] = 1  # sentinel gene (unmapped): no_candidates
+                    continue
+                _row = np.full(G_panel, np.nan, dtype=np.float32)
+                _csr_row = W_csr.getrow(int(_g))
+                _row[_csr_row.indices] = _csr_row.data
+                # Pass the REAL gene idx as una_g_idx (drives the self-pair
+                # exclusion ``eg == g_idx``) but W-row 0 (the densified
+                # ``(1, G)`` row) — the kernel decouples the two via w_row.
+                _be, _bd, _br, _sef = _run_kernel(
+                    una_coords_c[_blk],
+                    una_g_idx[_blk],
+                    nb_bins_arr[_blk],
+                    _row.reshape(1, G_panel),
+                    w_row_blk=np.zeros(_blk.shape[0], dtype=np.int64),
+                )
+                best_ent_arr[_blk] = _be
+                best_dist_arr[_blk] = _bd
+                reason_arr[_blk] = _br
+                n_sef += int(_sef.sum())
 
         # Translate codes back into label strings + per-tx stats.
         for i in range(len(una_idx)):
@@ -1932,7 +2010,7 @@ def reassign_unassigned_grid_pool(
                     n_blocked_by_neg_veto += 1
                 else:
                     n_no_candidates += 1
-        n_small_entity_fallback = int(sef_arr.sum())
+        n_small_entity_fallback = n_sef
 
     n_coord_cols = len(coord_cols)
     # Legacy Python loop runs only when the Cython batch was NOT used
@@ -2036,9 +2114,9 @@ def reassign_unassigned_grid_pool(
                                     # No real-signal pairs — defer to spatial.
                                     vetoed = False
                                 else:
-                                    p_aggregate = float(np.percentile(
+                                    p_aggregate = _fast_percentile(
                                         pmis[is_signal], aggregator_percentile
-                                    ))
+                                    )
                                     vetoed = p_aggregate <= mean_threshold
                     ent_decision_cache[ent] = vetoed
             else:
@@ -2076,9 +2154,9 @@ def reassign_unassigned_grid_pool(
                             if min_p > min_admit_threshold:
                                 vetoed = False   # unanimous-strong fast-pass
                             else:
-                                p_aggregate = float(np.percentile(
+                                p_aggregate = _fast_percentile(
                                     sig_pmis, aggregator_percentile
-                                ))
+                                )
                                 vetoed = p_aggregate <= mean_threshold
                     ent_decision_cache[ent] = vetoed
 
