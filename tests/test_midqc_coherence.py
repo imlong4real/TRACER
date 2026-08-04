@@ -73,3 +73,50 @@ def test_midqc_demote_legacy_all_pairs_still_demotes():
     )
     assert (out["tracer_id"] == "-1").all()
     assert stats["entities_demoted_low_C"] == 1
+
+
+# ---- P3: coherence-triggered sibling promotion (option A) -------------------
+
+def _main_fails_sibling_passes_aux():
+    """Main C1 (genes 0,1,2) has C<0 (conflict-heavy) -> fails floor.
+    Sibling C1-1 (genes 3,4,5) is all-purity -> passes. Same parent cell_id."""
+    W = np.zeros((6, 6), dtype=np.float32)
+    for (i, j), v in {(0, 1): -0.5, (0, 2): -0.5, (1, 2): 0.3,   # main: 2 conflict, 1 purity
+                      (3, 4): 0.5, (3, 5): 0.5, (4, 5): 0.5}.items():  # sibling: all purity
+        W[i, j] = W[j, i] = v
+    aux = {"gene_to_idx": {f"g{k}": k for k in range(6)}, "W": W}
+    df = pd.DataFrame({
+        "tracer_id":   ["C1", "C1", "C1", "C1-1", "C1-1", "C1-1"],
+        "cell_id":     ["C1", "C1", "C1", "C1",   "C1",   "C1"],
+        "feature_name": ["g0", "g1", "g2", "g3",  "g4",   "g5"],
+        "_etype":      ["cell", "cell", "cell", "partial", "partial", "partial"],
+    })
+    return df, aux
+
+
+def test_midqc_promotes_coherent_sibling_when_main_fails():
+    df, aux = _main_fails_sibling_passes_aux()
+    out, stats = _qc_demote_low_coherence(
+        df, entity_col="tracer_id", aux=aux, min_C=0.05, min_n_genes=2,
+        threshold=0.2, metric="pmi", unassigned_id="-1",
+    )
+    # sibling C1-1 promoted to the main "C1" label with _etype cell
+    promoted = out[out["feature_name"].isin(["g3", "g4", "g5"])]
+    assert (promoted["tracer_id"] == "C1").all()
+    assert (promoted["_etype"] == "cell").all()
+    # the old failing main's tx are released to unassigned
+    old_main = out[out["feature_name"].isin(["g0", "g1", "g2"])]
+    assert (old_main["tracer_id"] == "-1").all()
+    # no orphan "C1-1" label remains
+    assert (out["tracer_id"] != "C1-1").all()
+
+
+def test_midqc_no_sibling_still_drops_main():
+    # main fails, no sibling -> released, nothing promoted (existing behavior)
+    df, aux = _main_fails_sibling_passes_aux()
+    df = df[df["tracer_id"] == "C1"].copy()   # drop the sibling
+    out, stats = _qc_demote_low_coherence(
+        df, entity_col="tracer_id", aux=aux, min_C=0.05, min_n_genes=2,
+        threshold=0.2, metric="pmi", unassigned_id="-1",
+    )
+    assert (out["tracer_id"] == "-1").all()

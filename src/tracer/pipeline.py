@@ -1053,6 +1053,31 @@ def _qc_demote_low_coherence(df_in: pd.DataFrame, *,
     bad_low = (~bad_few) & (C_arr <= min_C)
 
     bad_set = set(entity_ids[bad_few | bad_low].tolist())
+
+    # Option A — coherence-triggered sibling promotion. When a failing MAIN
+    # `cell` has a surviving (floor-clearing) sibling sharing the same parent
+    # cell_id, promote that sibling to the main's label instead of orphaning
+    # the whole nucleus. Reuses no rerank machinery — just a label swap.
+    promotions: dict[str, str] = {}   # sibling label -> failed main's label
+    if bad_set and "cell_id" in df_out.columns:
+        ent_C = {str(e): float(c) for e, c in zip(entity_ids, C_arr)}
+        gb = df_out.groupby(entity_col, sort=False)
+        ent_parent = gb["cell_id"].first().astype(str).to_dict()
+        ent_etype = (gb["_etype"].first().astype(str).to_dict()
+                     if "_etype" in df_out.columns else {})
+        parent_to_ents: dict[str, list[str]] = {}
+        for e, p in ent_parent.items():
+            parent_to_ents.setdefault(p, []).append(str(e))
+        for M in bad_set:
+            if ent_etype and ent_etype.get(M) != "cell":
+                continue   # only rescue a failing main cell
+            sibs = [s for s in parent_to_ents.get(ent_parent.get(M, ""), [])
+                    if s != M and s not in bad_set and s not in promotions
+                    and (not ent_etype or ent_etype.get(s) in ("cell", "partial"))]
+            if sibs:
+                promotions[max(sibs, key=lambda s: ent_C.get(s, -1e18))] = M
+
+    # Release failing entities' original tx to unassigned first...
     n_demoted = 0
     if bad_set:
         mask = df_out[entity_col].isin(bad_set)
@@ -1061,11 +1086,19 @@ def _qc_demote_low_coherence(df_in: pd.DataFrame, *,
         if "_etype" in df_out.columns:
             df_out.loc[mask, "_etype"] = "unknown"
 
+    # ...then promote surviving siblings into the now-freed main labels.
+    for sib, new_label in promotions.items():
+        smask = df_out[entity_col] == sib
+        df_out.loc[smask, entity_col] = new_label
+        if "_etype" in df_out.columns:
+            df_out.loc[smask, "_etype"] = "cell"
+
     return df_out, {
         "entities_examined": int(entity_ids.size),
         "entities_demoted_low_C": int(bad_low.sum()),
         "entities_demoted_few_genes": int(bad_few.sum()),
         "tx_demoted": n_demoted,
+        "entities_promoted": len(promotions),
     }
 
 
