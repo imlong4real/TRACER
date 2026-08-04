@@ -111,6 +111,34 @@ def test_midqc_promotes_coherent_sibling_when_main_fails():
     assert (out["tracer_id"] != "C1-1").all()
 
 
+def test_midqc_promotion_matches_siblings_by_label_not_drifted_cellid():
+    # Regression: a failing main's tx cell_id has DRIFTED (reassignment) to a
+    # different nucleus, and an entity from THAT nucleus must NOT be promoted
+    # into the main's label. Siblings are defined by tracer_id label structure
+    # ({C} main / {C}-{k} partial), not the cell_id column.
+    W = np.zeros((6, 6), dtype=np.float32)
+    for (i, j), v in {(0, 1): -0.5, (0, 2): -0.5, (1, 2): 0.3,     # main "A-1": conflict-heavy -> fails
+                      (3, 4): 0.5, (3, 5): 0.5, (4, 5): 0.5}.items():  # "B-1-1": all purity, passes
+        W[i, j] = W[j, i] = v
+    aux = {"gene_to_idx": {f"g{k}": k for k in range(6)}, "W": W}
+    df = pd.DataFrame({
+        # main A-1's tx have DRIFTED cell_id "B" (not its own "A")
+        "tracer_id":    ["A-1", "A-1", "A-1", "B-1-1", "B-1-1", "B-1-1"],
+        "cell_id":      ["B",   "B",   "B",   "B",     "B",     "B"],
+        "feature_name": ["g0",  "g1",  "g2",  "g3",    "g4",    "g5"],
+        "_etype":       ["cell","cell","cell","partial","partial","partial"],
+    })
+    out, stats = _qc_demote_low_coherence(
+        df, entity_col="tracer_id", aux=aux, min_C=0.05, min_n_genes=2,
+        threshold=0.2, metric="pmi", unassigned_id="-1",
+    )
+    # B-1-1 is NOT a label-sibling of A-1 (prefix "A" vs "B"), so it must NOT be
+    # promoted into "A-1". A-1 fails -> released; B-1-1 untouched.
+    assert (out[out.feature_name.isin(["g0","g1","g2"])]["tracer_id"] == "-1").all()
+    assert (out[out.feature_name.isin(["g3","g4","g5"])]["tracer_id"] == "B-1-1").all()
+    assert stats.get("entities_promoted", 0) == 0
+
+
 def test_midqc_no_sibling_still_drops_main():
     # main fails, no sibling -> released, nothing promoted (existing behavior)
     df, aux = _main_fails_sibling_passes_aux()

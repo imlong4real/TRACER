@@ -1055,25 +1055,53 @@ def _qc_demote_low_coherence(df_in: pd.DataFrame, *,
     bad_set = set(entity_ids[bad_few | bad_low].tolist())
 
     # Option A — coherence-triggered sibling promotion. When a failing MAIN
-    # `cell` has a surviving (floor-clearing) sibling sharing the same parent
-    # cell_id, promote that sibling to the main's label instead of orphaning
-    # the whole nucleus. Reuses no rerank machinery — just a label swap.
+    # `cell` has a surviving (floor-clearing) sibling from the SAME Phase-1
+    # family, promote that sibling to the main's label instead of orphaning
+    # the whole nucleus. Families are keyed by the tracer_id LABEL structure
+    # ({C} main / {C}-{k} partial), NOT the cell_id column — cell_id drifts
+    # from the label after transcript reassignment, so grouping by it would
+    # match entities across nuclei and mislabel the promoted cell.
     promotions: dict[str, str] = {}   # sibling label -> failed main's label
     if bad_set and "cell_id" in df_out.columns:
         ent_C = {str(e): float(c) for e, c in zip(entity_ids, C_arr)}
         gb = df_out.groupby(entity_col, sort=False)
-        ent_parent = gb["cell_id"].first().astype(str).to_dict()
+        ent_cid = gb["cell_id"].agg(
+            lambda s: str(s.astype(str).mode().iat[0])).to_dict()
         ent_etype = (gb["_etype"].first().astype(str).to_dict()
                      if "_etype" in df_out.columns else {})
-        parent_to_ents: dict[str, list[str]] = {}
-        for e, p in ent_parent.items():
-            parent_to_ents.setdefault(p, []).append(str(e))
+
+        def _family(label: str) -> str | None:
+            """Parent cell_id C if `label` is C (main) or C-{k...} (partial),
+            using the entity's own cell_id to strip the suffix (cell_ids may
+            themselves contain dashes). None if the label doesn't structurally
+            match its cell_id — i.e. a reassigned/relabeled entity."""
+            cid = ent_cid.get(label)
+            if cid is None:
+                return None
+            if label == cid:
+                return cid
+            if label.startswith(cid + "-"):
+                suf = label[len(cid) + 1:]
+                if suf and all(p.isdigit() for p in suf.split("-")):
+                    return cid
+            return None
+
+        fam_to_ents: dict[str, list[str]] = {}
+        ent_fam: dict[str, str | None] = {}
+        for e in ent_cid:
+            f = _family(e)
+            ent_fam[e] = f
+            if f is not None:
+                fam_to_ents.setdefault(f, []).append(e)
         for M in bad_set:
-            if ent_etype and ent_etype.get(M) != "cell":
+            if ent_etype.get(M) != "cell":
                 continue   # only rescue a failing main cell
-            sibs = [s for s in parent_to_ents.get(ent_parent.get(M, ""), [])
+            fam = ent_fam.get(M)
+            if fam is None:
+                continue   # drifted/relabeled main: no clean Phase-1 family
+            sibs = [s for s in fam_to_ents.get(fam, [])
                     if s != M and s not in bad_set and s not in promotions
-                    and (not ent_etype or ent_etype.get(s) in ("cell", "partial"))]
+                    and ent_etype.get(s) in ("cell", "partial")]
             if sibs:
                 promotions[max(sibs, key=lambda s: ent_C.get(s, -1e18))] = M
 
