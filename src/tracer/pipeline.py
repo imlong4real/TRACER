@@ -957,7 +957,7 @@ def _qc_demote_low_coherence(df_in: pd.DataFrame, *,
                                threshold: float = 0.05,
                                metric: str = "pmi",
                                unassigned_id: str = "-1",
-                               real_signal_threshold: float = 0.0,
+                               real_signal_threshold: float | None = None,
                                ) -> tuple[pd.DataFrame, dict]:
     """Demote any entity (cell, partial, or component) whose internal
     coherence is below ``min_C``, OR whose distinct-gene count is
@@ -1037,10 +1037,12 @@ def _qc_demote_low_coherence(df_in: pd.DataFrame, *,
     # uses the "real players" denominator (only pairs with |W| above
     # the noise floor count) — making C panel-shape-agnostic across
     # dense (legacy) and sparse (bootstrap, Visium HD) W matrices.
+    # Informative-edges denominator by default (rst = tau) so the coherence
+    # floor is panel-shape-agnostic (purity+conflict=1 over informative pairs).
+    rst = float(threshold) if real_signal_threshold is None else float(real_signal_threshold)
     from tracer._cy_prune import coherence_count_per_entity_batch
     C_arr, _P_arr, _N_arr = coherence_count_per_entity_batch(
-        offsets, flat_genes, W, float(threshold),
-        float(real_signal_threshold),
+        offsets, flat_genes, W, float(threshold), rst,
     )
 
     # Decide demotion per entity
@@ -1681,7 +1683,9 @@ def run_segmented_pipeline(df: pd.DataFrame,
             df_grouped, entity_col="tracer_id", aux=aux,
             min_C=float(MID_QC_C_FLOOR), min_n_genes=2,
             threshold=PMI_THR, metric="pmi", unassigned_id="-1",
-            real_signal_threshold=REAL_SIGNAL_THRESHOLD,
+            # rst defaults to threshold (tau): informative-edges denominator,
+            # panel-shape-agnostic. Decoupled from the Rescue veto's
+            # REAL_SIGNAL_THRESHOLD (0.05), which stays as-is.
         )
         mid_did_anything = True
     if mid_did_anything:
@@ -1902,7 +1906,9 @@ def run_noseg_pipeline(df: pd.DataFrame, npmi_panel: pd.DataFrame,
             df_grouped, entity_col="tracer_id", aux=aux,
             min_C=float(MID_QC_C_FLOOR), min_n_genes=2,
             threshold=PMI_THR, metric="pmi", unassigned_id="-1",
-            real_signal_threshold=REAL_SIGNAL_THRESHOLD,
+            # rst defaults to threshold (tau): informative-edges denominator,
+            # panel-shape-agnostic. Decoupled from the Rescue veto's
+            # REAL_SIGNAL_THRESHOLD (0.05), which stays as-is.
         )
         mid_did_anything = True
     if mid_did_anything:

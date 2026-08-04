@@ -2822,7 +2822,7 @@ def compute_cell_coherence(
     *,
     threshold: float = 0.2,
     cell_ids=None,
-    real_signal_threshold: float = 0.0,
+    real_signal_threshold: float | None = None,
 ):
     """Per-cell count-based coherence — the canonical cell-quality metric,
     identical to the segmentation's ``stitching.coherence(mode="count")``.
@@ -2862,8 +2862,12 @@ def compute_cell_coherence(
         np.asarray(col_idx, dtype=np.int32)[cols], dtype=np.int32
     )
     W32 = np.ascontiguousarray(npmi_mat, dtype=np.float32)
+    # Informative-edges denominator by default (rst = tau): pairs with
+    # |w| <= rst are excluded from BOTH numerator and denominator, so
+    # purity + conflict == 1 over the informative edges. Regime-consistent.
+    rst = float(threshold) if real_signal_threshold is None else float(real_signal_threshold)
     coherence, purity, conflict = coherence_count_per_entity_batch(
-        offsets, flat_genes, W32, float(threshold), float(real_signal_threshold),
+        offsets, flat_genes, W32, float(threshold), rst,
     )
 
     total = purity + conflict
