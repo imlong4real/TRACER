@@ -1069,6 +1069,7 @@ def _qc_demote_low_coherence(df_in: pd.DataFrame, *,
             lambda s: str(s.astype(str).mode().iat[0])).to_dict()
         ent_etype = (gb["_etype"].first().astype(str).to_dict()
                      if "_etype" in df_out.columns else {})
+        ent_size = {str(e): int(n) for e, n in gb.size().items()}  # tx per entity
 
         def _family(label: str) -> str | None:
             """Parent cell_id C if `label` is C (main) or C-{k...} (partial),
@@ -1103,7 +1104,16 @@ def _qc_demote_low_coherence(df_in: pd.DataFrame, *,
                     if s != M and s not in bad_set and s not in promotions
                     and ent_etype.get(s) in ("cell", "partial")]
             if sibs:
-                promotions[max(sibs, key=lambda s: ent_C.get(s, -1e18))] = M
+                # Floor is the quality GATE (already applied via `s not in
+                # bad_set`). Among survivors pick the LARGEST by tx count —
+                # count-coherence is inflated at small tx counts, so it's a
+                # poor selector, and the promoted main should carry the
+                # nucleus's mass (and act as the rescue sink for the released
+                # tx). Coherence only breaks size ties.
+                promotions[max(
+                    sibs,
+                    key=lambda s: (ent_size.get(s, 0), ent_C.get(s, -1e18)),
+                )] = M
 
     # Release failing entities' original tx to unassigned first...
     n_demoted = 0

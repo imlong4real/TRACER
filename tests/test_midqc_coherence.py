@@ -148,3 +148,54 @@ def test_midqc_no_sibling_still_drops_main():
         threshold=0.2, metric="pmi", unassigned_id="-1",
     )
     assert (out["tracer_id"] == "-1").all()
+
+
+def _main_fails_two_survivors_aux():
+    """Main C1 (genes 0,1,2) fails (2 conflict, 1 purity -> C<0).
+    Sibling C1-1 = TINY (genes 3,4,5, all-purity -> C=1.0, 3 tx).
+    Sibling C1-2 = LARGE (12 genes 6..17, C=(55-11)/66=0.667, 12 tx).
+    The floor gates both in; among survivors the LARGER (C1-2) should win,
+    NOT the higher-coherence tiny one."""
+    n = 18
+    W = np.zeros((n, n), dtype=np.float32)
+    def _set(i, j, v): W[i, j] = W[j, i] = v
+    # main: conflict-heavy -> fails floor
+    _set(0, 1, -0.5); _set(0, 2, -0.5); _set(1, 2, 0.3)
+    # tiny sibling: perfect purity, coherence 1.0
+    _set(3, 4, 0.5); _set(3, 5, 0.5); _set(4, 5, 0.5)
+    # large sibling: 11-gene positive clique (6..16) + one all-negative gene (17)
+    pos = list(range(6, 17))          # 11 genes
+    for a in range(len(pos)):
+        for b in range(a + 1, len(pos)):
+            _set(pos[a], pos[b], 0.5)  # 55 positive pairs
+    for g in pos:
+        _set(g, 17, -0.5)              # 11 negative pairs -> C = 44/66 = 0.667
+    aux = {"gene_to_idx": {f"g{k}": k for k in range(n)}, "W": W}
+    df = pd.DataFrame({
+        "tracer_id":   ["C1"] * 3 + ["C1-1"] * 3 + ["C1-2"] * 12,
+        "cell_id":     ["C1"] * 18,
+        "feature_name": [f"g{k}" for k in [0, 1, 2, 3, 4, 5, *range(6, 18)]],
+        "_etype":      ["cell"] * 3 + ["partial"] * 3 + ["partial"] * 12,
+    })
+    return df, aux
+
+
+def test_midqc_promotes_largest_floor_clearing_sibling_not_highest_coh():
+    # Among floor-clearing siblings, the LARGER (more tx) must be promoted,
+    # even though the tiny sibling has strictly higher coherence (1.0 > 0.667).
+    df, aux = _main_fails_two_survivors_aux()
+    out, stats = _qc_demote_low_coherence(
+        df, entity_col="tracer_id", aux=aux, min_C=0.05, min_n_genes=2,
+        threshold=0.2, metric="pmi", unassigned_id="-1",
+    )
+    # the LARGE sibling's tx (g6..g17) are promoted to the main "C1" label
+    large = out[out["feature_name"].isin([f"g{k}" for k in range(6, 18)])]
+    assert (large["tracer_id"] == "C1").all()
+    assert (large["_etype"] == "cell").all()
+    # the tiny high-coherence sibling is NOT promoted; keeps its own label
+    tiny = out[out["feature_name"].isin(["g3", "g4", "g5"])]
+    assert (tiny["tracer_id"] == "C1-1").all()
+    # failing main's original tx released
+    old_main = out[out["feature_name"].isin(["g0", "g1", "g2"])]
+    assert (old_main["tracer_id"] == "-1").all()
+    assert stats["entities_promoted"] == 1
