@@ -1141,6 +1141,12 @@ def _qc_demote_low_coherence(df_in: pd.DataFrame, *,
 
 
 NUCLEAR_ONLY_ADMIT = True   # restrict 1b/1c to nuclear tx; cyto via Rescue
+# Fallback cells (<3 nuclear genes → whole-cell seed) are exempted from the
+# nuclear-only restriction: they admit whole-cell tx in 1b/1c. Without this,
+# a thin nucleus whose 1-2 nuclear reads don't fit the whole-cell seed dies
+# even when its local program is perfectly coherent (~726 recoverable cells,
+# 0 lost, on the pdac cPMI ROI). Only coherence-floor-failing seeds still die.
+FALLBACK_WHOLE_CELL_ADMIT = True
 # 2026-05-13: RESCUE_NEG_THR paired with PMI_THR (both 0.2 in PMI scale).
 # Symmetric ± 0.2 dead zone around chance.
 RESCUE_NEG_THR = -0.2
@@ -1572,6 +1578,7 @@ def run_segmented_pipeline(df: pd.DataFrame,
             min_nuclear_genes=3,
             seed_coherence_floor=SEED_COHERENCE_FLOOR,
             nuclear_only_admit=NUCLEAR_ONLY_ADMIT,
+            fallback_whole_cell_admit=FALLBACK_WHOLE_CELL_ADMIT,
             tx_weighted=TX_WEIGHTED_PRUNE,
             veto_mode=_p1_veto_mode,
             mean_admit_threshold=_p1_mean_admit,

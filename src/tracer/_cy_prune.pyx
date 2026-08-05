@@ -357,6 +357,9 @@ cdef cnp.ndarray _prune_cells_nuclear_seed_core(
     double aggregator_percentile,
     double real_signal_threshold,
     double neg_npmi_threshold,
+    int fallback_whole_cell_admit = 0,   # 1 ⇒ fallback (<min_nuclear_genes) cells
+                                          #     admit whole-cell tx in 1b/1c (the
+                                          #     whole-cell seed already used cyto genes)
 ):
     """Shared orchestration for the dense and sparse nuclear-seed prune.
 
@@ -376,6 +379,7 @@ cdef cnp.ndarray _prune_cells_nuclear_seed_core(
     cdef cnp.ndarray[cnp.int32_t, ndim=1] tx_inds_arr
     cdef cnp.int32_t[:] tx_inds_mv
     cdef int n_cell_tx, ti, tx_row, g, n_unique_nuc, fitted, n_unique_all
+    cdef int is_fallback   # per-cell: took the whole-cell fallback seed path
 
     # Reusable scratch buffers
     cdef cnp.ndarray[cnp.int32_t, ndim=1] uniq_nuc
@@ -429,6 +433,7 @@ cdef cnp.ndarray _prune_cells_nuclear_seed_core(
             # Fallback: prune on whole-cell gene set (matches the Python
             # reference impl). Phase 1b/1c still run on the resulting
             # seed.
+            is_fallback = 1
             all_genes = []
             for ti in range(n_cell_tx):
                 tx_row = tx_inds_mv[ti]
@@ -451,6 +456,7 @@ cdef cnp.ndarray _prune_cells_nuclear_seed_core(
                 W_indptr, W_indices, W_data, use_sparse, threshold)
         else:
             # ---- Phase 1a: nuclear seed (tx-weighted) ----
+            is_fallback = 0
             # Per-gene nuclear tx counts for the tx-weighted greedy.
             nuc_arr = np.asarray(nuc_genes, dtype=np.int32)
             tx_counts_nuc = np.zeros(n_unique_nuc, dtype=np.int32)
@@ -489,8 +495,13 @@ cdef cnp.ndarray _prune_cells_nuclear_seed_core(
                 # No gene index — leave as unassigned (already default 2)
                 rejected_rows.append(tx_row)
                 continue
-            if nuclear_only_admit and not tx_nuc_mv[tx_row]:
+            if (nuclear_only_admit and not tx_nuc_mv[tx_row]
+                    and not (is_fallback and fallback_whole_cell_admit)):
                 # Cytoplasmic tx skipped — stays unassigned for Rescue.
+                # EXCEPT for fallback cells when fallback_whole_cell_admit:
+                # the seed was built from whole-cell genes anyway, and the
+                # thin nucleus can't veto its dominant local program with a
+                # noisy nuclear/cyto boundary.
                 continue
             # Check if g is in seed (linear scan; seed_len typically tiny)
             fitted = 0
@@ -569,7 +580,8 @@ cdef cnp.ndarray _prune_cells_nuclear_seed_core(
             g = tx_gene_mv[tx_row]
             if g < 0:
                 continue
-            if nuclear_only_admit and not tx_nuc_mv[tx_row]:
+            if (nuclear_only_admit and not tx_nuc_mv[tx_row]
+                    and not (is_fallback and fallback_whole_cell_admit)):
                 continue
             fitted = 0
             for j in range(sub_seed_len):
@@ -617,6 +629,7 @@ def prune_cells_nuclear_seed(
     double aggregator_percentile=25.0,
     double real_signal_threshold=0.0,
     double neg_npmi_threshold=-0.2,
+    int fallback_whole_cell_admit=0,
 ):
     """Batch nuclear-seed prune over many cells — DENSE PMI backend.
 
@@ -673,6 +686,7 @@ def prune_cells_nuclear_seed(
         seed_coherence_floor, nuclear_only_admit, tx_weighted,
         veto_mode, min_admit_threshold, mean_admit_threshold,
         aggregator_percentile, real_signal_threshold, neg_npmi_threshold,
+        fallback_whole_cell_admit,
     )
 
 
@@ -695,6 +709,7 @@ def prune_cells_nuclear_seed_sparse(
     double aggregator_percentile=25.0,
     double real_signal_threshold=0.0,
     double neg_npmi_threshold=-0.2,
+    int fallback_whole_cell_admit=0,
 ):
     """Batch nuclear-seed prune over many cells — SPARSE CSR PMI backend.
 
@@ -721,6 +736,7 @@ def prune_cells_nuclear_seed_sparse(
         seed_coherence_floor, nuclear_only_admit, tx_weighted,
         veto_mode, min_admit_threshold, mean_admit_threshold,
         aggregator_percentile, real_signal_threshold, neg_npmi_threshold,
+        fallback_whole_cell_admit,
     )
 
 
