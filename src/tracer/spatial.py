@@ -1,6 +1,8 @@
 """Phase 3/5/6: spatial analysis — components, coherence enforcement, reassignment."""
 
+import functools
 import math
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -14,6 +16,26 @@ from . import _cy_prune, _cy_spatial
 from ._repro import _ensure_reproducibility_seed
 from ._utils import prepare_transcript_df
 from .graph import build_graph, to_networkx  # noqa: F401 — used internally/callers
+
+
+def _deprecated(reason: str):
+    """Decorator: emit a DeprecationWarning on call, then delegate unchanged.
+
+    Used to retire the legacy reassign_* rescue variants (superseded by
+    :func:`reassign_unassigned_grid_pool` + :func:`guarded_rescue`) without
+    breaking any external import in the same release.
+    """
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            warnings.warn(
+                f"{fn.__name__} is deprecated: {reason}",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            return fn(*args, **kwargs)
+        return wrapper
+    return deco
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +151,13 @@ def finalize_unassigned(
     df.loc[mask, col] = unassigned_label
     if cell_id_col in df.columns:
         df.loc[mask, cell_id_col] = cell_id_unassigned_label
+    # Enforce the published invariant: a sentinel entity label carries
+    # _etype == "unknown". Dropped tx may arrive with a stale "cell"/"partial"
+    # etype (e.g. an input-unassigned tx defaulted to "cell" at Prune, or a
+    # demoted entity's leftover) — reset so entity-level aggregation over the
+    # published _etype column never counts a dropped tx as a real entity.
+    if "_etype" in df.columns:
+        df.loc[mask, "_etype"] = "unknown"
     return df
 
 
@@ -991,6 +1020,7 @@ def _make_negative_set_lookup(W, neg_npmi_threshold: float):
 
 
 # ---------- Phase 6: Reassign unassigned transcripts to nearby partials/components ----------
+@_deprecated("unused legacy variant; use reassign_unassigned_grid_pool / guarded_rescue")
 def reassign_unassigned_to_nearby_entities(
     df_spatial: pd.DataFrame,
     entity_summary: pd.DataFrame | None = None,  # deprecated; ignored under new algo
@@ -1220,35 +1250,13 @@ def reassign_unassigned_to_nearby_entities(
                 df[out_col] = col_data.cat.add_categories(sorted(new_cats))
         df.iloc[sel_rows, col_pos] = new_labels[matched]
 
-        # Propagate _etype for Rescue-promoted tx so they don't carry
-        # stale "unknown" values into downstream stages. Look up the
-        # target entity's etype from existing tx already labeled with
-        # that entity.
+        # Propagate _etype so each target entity stays HOMOGENEOUS (target type
+        # from pre-existing members only). See _etype.propagate_etype_to_moved.
         if "_etype" in df.columns:
-            target_labels = pd.Series(new_labels[matched]).astype(str)
-            # Build label → etype from tx that already have non-unknown etype
-            etype_series = df["_etype"].astype(str)
-            label_series = df[out_col].astype(str)
-            known_mask = (etype_series != "unknown") & (~label_series.isin(
-                {"-1", "DROP", "UNASSIGNED", "nan"}
-            ))
-            if known_mask.any():
-                label_to_etype = (
-                    pd.DataFrame({
-                        "lab": label_series[known_mask].to_numpy(),
-                        "etype": etype_series[known_mask].to_numpy(),
-                    })
-                    .drop_duplicates("lab")
-                    .set_index("lab")["etype"]
-                )
-                new_etype = target_labels.map(label_to_etype)
-                # Apply only where we found a mapping
-                ok = new_etype.notna().to_numpy()
-                if ok.any():
-                    sel_with_etype = sel_rows[ok]
-                    df.loc[df.index[sel_with_etype], "_etype"] = (
-                        new_etype[ok].astype(str).to_numpy()
-                    )
+            from ._etype import propagate_etype_to_moved
+            propagate_etype_to_moved(
+                df, sel_rows, new_labels[matched], entity_col=out_col,
+            )
 
     if n_reassigned > 0:
         d_arr = matched_dist[matched]
@@ -1395,6 +1403,7 @@ def demote_small_entities(
     return df_out, n_demoted
 
 
+@_deprecated("unused legacy variant; use reassign_unassigned_grid_pool / guarded_rescue")
 def reassign_unassigned_by_gene_compat(
     df: pd.DataFrame,
     aux: dict,
@@ -2307,34 +2316,15 @@ def reassign_unassigned_grid_pool(
                 df_out[out_col] = col_data.cat.add_categories(sorted(new_cats))
         df_out.iloc[sel_rows, col_pos] = new_labels[matched]
 
-        # Propagate _etype for the rescued tx — copy the target
-        # entity's etype from an already-assigned tx with that label.
-        # Without this, rescued tx keep stale 'unknown' etype values
-        # which would bias entity-level aggregation in downstream
-        # build_entity_table calls.
+        # Propagate _etype so each target entity stays HOMOGENEOUS. The target
+        # type is derived from its pre-existing members only (excludes the just-
+        # moved rows), so a stale etype riding in on a rescued tx can neither
+        # define nor mix the target. See _etype.propagate_etype_to_moved.
         if "_etype" in df_out.columns:
-            target_labels = pd.Series(new_labels[matched]).astype(str)
-            etype_series = df_out["_etype"].astype(str)
-            label_series = df_out[out_col].astype(str)
-            known_mask = (etype_series != "unknown") & (~label_series.isin(
-                {"-1", "DROP", "UNASSIGNED", "nan"}
-            ))
-            if known_mask.any():
-                label_to_etype = (
-                    pd.DataFrame({
-                        "lab": label_series[known_mask].to_numpy(),
-                        "etype": etype_series[known_mask].to_numpy(),
-                    })
-                    .drop_duplicates("lab")
-                    .set_index("lab")["etype"]
-                )
-                new_etype = target_labels.map(label_to_etype)
-                ok = new_etype.notna().to_numpy()
-                if ok.any():
-                    sel_with_etype = sel_rows[ok]
-                    df_out.loc[df_out.index[sel_with_etype], "_etype"] = (
-                        new_etype[ok].astype(str).to_numpy()
-                    )
+            from ._etype import propagate_etype_to_moved
+            propagate_etype_to_moved(
+                df_out, sel_rows, new_labels[matched], entity_col=out_col,
+            )
 
     n_reassigned = int(matched.sum())
     if n_reassigned > 0:
@@ -2362,7 +2352,7 @@ def reassign_unassigned_grid_pool(
     }
 
 
-def pre_stage2_rescue(
+def guarded_rescue(
     df: pd.DataFrame,
     aux: dict,
     *,
@@ -2394,9 +2384,11 @@ def pre_stage2_rescue(
     offpanel_first_entity: bool = False,
     pos_npmi_threshold=None,  # deprecated; ignored. Kept for back-compat.
 ) -> tuple[pd.DataFrame, int, int, dict]:
-    """Pre-Stage-2 rescue: tight-scale NPMI-categorical reassignment of
+    """Guarded rescue: tight-scale NPMI-categorical reassignment of
     Stage-1-pruned transcripts, guarded by a same-bin same-gene cluster
-    check that preserves potential novel UNASSIGNED_* components.
+    check that preserves potential novel UNASSIGNED_* components. Runs at
+    Rescue, Post-Group Rescue, and the NOSEG equivalent (formerly named
+    ``pre_stage2_rescue``).
 
     Algorithm
     ---------
@@ -2516,6 +2508,18 @@ def pre_stage2_rescue(
     return df_out, n_reassigned, n_skipped, stats
 
 
+@_deprecated("renamed to guarded_rescue")
+def pre_stage2_rescue(*args, **kwargs):
+    """Deprecated alias for :func:`guarded_rescue`.
+
+    The "pre_stage2" name predates the numbered-stage retirement — this
+    guard-wrapper runs at three points (Rescue, Post-Group Rescue, and via
+    the NOSEG path), none of which is "stage 2". Use ``guarded_rescue``.
+    """
+    return guarded_rescue(*args, **kwargs)
+
+
+@_deprecated("unused legacy variant; use reassign_unassigned_grid_pool / guarded_rescue")
 def reassign_unassigned_to_nearest_tx_no_neg(
     df: pd.DataFrame,
     aux: dict,
@@ -2737,6 +2741,7 @@ def reassign_unassigned_to_nearest_tx_no_neg(
     }
 
 
+@_deprecated("unused legacy variant; use reassign_unassigned_grid_pool / guarded_rescue")
 def reassign_unassigned_to_nearby_entities_fast(
     df_spatial: pd.DataFrame,
     entity_summary: pd.DataFrame = None,

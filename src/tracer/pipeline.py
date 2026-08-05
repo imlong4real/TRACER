@@ -25,7 +25,7 @@ from tracer.pruning import prune_transcripts_fast, prune_genes_by_pmi_greedy
 from tracer.spatial import (
     annotate_unassigned_components_fast,
     enforce_spatial_coherence_fast,
-    pre_stage2_rescue,
+    guarded_rescue,
     reassign_unassigned_grid_pool,
     demote_small_entities,
     finalize_unassigned,
@@ -1697,7 +1697,7 @@ def run_segmented_pipeline(df: pd.DataFrame,
     df_rescued = df_pruned
     n_rescued = 0
     for _pass in range(cfg.rescue.max_passes):
-        df_rescued, n_pass_rescued, _, _ = pre_stage2_rescue(
+        df_rescued, n_pass_rescued, _, _ = guarded_rescue(
             df_rescued, aux=aux,
             entity_col="tracer_id", gene_col="feature_name",
             coord_cols=("x", "y", "z"), out_col="tracer_id",
@@ -1775,7 +1775,7 @@ def run_segmented_pipeline(df: pd.DataFrame,
     # Group's UNASSIGNED_* couldn't be Rescue targets in the main pass.
     if cfg.rescue.post_group_passes > 0:
         for _pass in range(cfg.rescue.post_group_passes):
-            df_grouped, n_pass_rescued, _, _ = pre_stage2_rescue(
+            df_grouped, n_pass_rescued, _, _ = guarded_rescue(
                 df_grouped, aux=aux,
                 entity_col="tracer_id", gene_col="feature_name",
                 coord_cols=("x", "y", "z"), out_col="tracer_id",
@@ -1998,7 +1998,7 @@ def run_noseg_pipeline(df: pd.DataFrame, npmi_panel: pd.DataFrame,
     # Post-Group Rescue (opt-in) — see segmented runner for rationale.
     if cfg.rescue.post_group_passes > 0:
         for _pass in range(cfg.rescue.post_group_passes):
-            df_grouped, n_pass_rescued, _, _ = pre_stage2_rescue(
+            df_grouped, n_pass_rescued, _, _ = guarded_rescue(
                 df_grouped, aux=aux,
                 entity_col="tracer_id", gene_col="feature_name",
                 coord_cols=("x", "y", "z"), out_col="tracer_id",

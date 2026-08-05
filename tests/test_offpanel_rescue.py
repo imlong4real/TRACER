@@ -7,7 +7,7 @@ already defer-admits. Default OFF preserves bit-exact behavior."""
 import numpy as np
 import pandas as pd
 import scipy.sparse as sp
-from tracer.spatial import reassign_unassigned_grid_pool, pre_stage2_rescue
+from tracer.spatial import reassign_unassigned_grid_pool, guarded_rescue
 
 
 def _aux():
@@ -72,9 +72,9 @@ def test_offpanel_never_rescues_control_probes():
 
 def test_pre_stage2_reclaims_offpanel_when_enabled():
     # off-panel handling must be part of the STANDARD rescue loop, not only
-    # Final Rescue — pre_stage2_rescue (Main + Post-Group) delegates to
+    # Final Rescue — guarded_rescue (Main + Post-Group) delegates to
     # reassign_unassigned_grid_pool and must pass the flag through.
-    out, n, n_skip, stats = pre_stage2_rescue(
+    out, n, n_skip, stats = guarded_rescue(
         _df(), _aux(), entity_col="tracer_id", out_col="tracer_id",
         G=5.0, cluster_guard_n=0, offpanel_first_entity=True,
     )
@@ -83,7 +83,7 @@ def test_pre_stage2_reclaims_offpanel_when_enabled():
 
 
 def test_pre_stage2_offpanel_off_by_default():
-    out, n, n_skip, stats = pre_stage2_rescue(
+    out, n, n_skip, stats = guarded_rescue(
         _df(), _aux(), entity_col="tracer_id", out_col="tracer_id",
         G=5.0, cluster_guard_n=0,
     )
