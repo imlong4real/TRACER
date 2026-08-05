@@ -293,6 +293,18 @@ class RescueConfig:
     # mean PMI of the orphan gene against the candidate's seed gene set).
     witness_tiebreak: Literal["distance", "gene_fit"] = "gene_fit"
 
+    # Opt-in (default False = bit-exact legacy). Assign unassigned tx whose
+    # gene is ABSENT from the PMI panel (e.g. housekeeping ACTB, which
+    # self-eliminates from a PMI panel) to the first assigned entity in their
+    # Moore neighborhood — proximity only, no PMI. Without it these
+    # zero-signal tx (57% of the residual nuclear-unassigned pool on the
+    # PDAC panel; ACTB alone ~32%) can never be rescued and are discarded at
+    # Finalize. Consumed by every rescue loop. Control/blank probes are
+    # guarded out (``spatial.NONGENE_FEATURE_PREFIXES``), so it is safe on
+    # unfiltered input. Default ON: recovering nucleus-interior housekeeping
+    # reads is a straightforward, panel-agnostic win.
+    offpanel_first_entity: bool = True
+
     # ------------------------------------------------------------------
     # Convergence-aware early exit. After each Rescue pass, compare the
     # number admitted to the pre-pass unassigned-pool size. If the

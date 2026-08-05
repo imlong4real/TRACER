@@ -1394,6 +1394,7 @@ cdef void _rescue_one_tx(
     int has_z,
     double z_bound,
     int veto_mode,
+    int offpanel_first_entity,       # 1 ⇒ g_idx<0 tx take nearest-bin entity (no PMI)
     int rs_active,
     double rs_thr,
     double agg_p,
@@ -1453,6 +1454,37 @@ cdef void _rescue_one_tx(
     g_idx = <int> una_g_mv[i]
     w_row = <int> una_w_mv[i]
     if g_idx < 0:
+        # Off-panel gene (no PMI row). When enabled, assign to the FIRST
+        # assigned entity encountered in the 9-bin neighborhood — self bin
+        # first (nb col 0), z-bounded, proximity only, no PMI/veto. Mirrors
+        # the reference Python pass. Else: no candidate (legacy).
+        if offpanel_first_entity:
+            for j in range(9):
+                b = <int> nb_bins_mv[i, j]
+                if b < 0 or b >= max_bin_key_plus_one:
+                    continue
+                off_lo = <int> bin_off_mv[b]
+                off_hi = <int> bin_off_mv[b + 1]
+                for k in range(off_lo, off_hi):
+                    ass_li = <int> bin_data_mv[k]
+                    if has_z:
+                        dz = ass_c_mv[ass_li, 2] - una_c_mv[i, 2]
+                        if dz < 0: dz = -dz
+                        if dz > z_bound:
+                            continue
+                    ent = ass_ent_mv[ass_li]
+                    if ent < 0 or ent >= n_ent:
+                        continue
+                    dx = ass_c_mv[ass_li, 0] - una_c_mv[i, 0]
+                    dy = ass_c_mv[ass_li, 1] - una_c_mv[i, 1]
+                    d = dx * dx + dy * dy
+                    if has_z:
+                        dz = ass_c_mv[ass_li, 2] - una_c_mv[i, 2]
+                        d += dz * dz
+                    best_ent_mv[i] = ent
+                    best_dist_mv[i] = <cnp.float32_t> (d ** 0.5)
+                    reason_mv[i] = 0
+                    return
         reason_mv[i] = 1
         return
 
@@ -1675,6 +1707,7 @@ def rescue_per_tx_batch(
     int witness_tiebreak = 1,                             # 0=distance, 1=gene_fit
     cnp.ndarray[cnp.int32_t, ndim=1] ent_size = None,     # entity tx counts; required when rank_policy=1
     cnp.ndarray[cnp.int64_t, ndim=1] una_w_row = None,    # per-tx W row; None ⇒ una_g_idx (dense)
+    int offpanel_first_entity = 0,                        # 1 ⇒ off-panel (g<0) tx take nearest-bin entity
 ):
     """Per-unassigned-tx Rescue batch.
 
@@ -1835,6 +1868,7 @@ def rescue_per_tx_batch(
                 max_touched,
                 n_ent, max_bin_key_plus_one,
                 has_z, z_bound, veto_mode,
+                offpanel_first_entity,
                 rs_active, rs_thr, agg_p,
                 mean_threshold, small_entity_guard_n,
                 neg_npmi_threshold, min_admit_threshold,

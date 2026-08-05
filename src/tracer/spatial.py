@@ -63,6 +63,15 @@ _FIXED_UNASSIGNED_LABELS = frozenset({"-1", "DROP", "UNASSIGNED", "nan"})
 # at five sites in this file.  Now centralized.
 UNASSIGNED_LABELS = _FIXED_UNASSIGNED_LABELS | STAGE_REJECTED_LABELS
 
+# Non-gene features (Xenium control/blank codewords). Panel-absent like real
+# off-panel genes, so `offpanel_first_entity` proximity-rescue must EXCLUDE
+# them — they are instrument noise, never cell content. Only consulted on the
+# off-panel branch; the PMI path is unaffected. Extend for other platforms.
+NONGENE_FEATURE_PREFIXES = (
+    "NegControl", "BLANK", "antisense", "UnassignedCodeword",
+    "DeprecatedCodeword", "Intergenic", "Control",
+)
+
 
 def is_unassigned_label(label) -> bool:
     """True if the label is in the unassigned class (sentinel or stage-rejected)."""
@@ -1623,6 +1632,17 @@ def reassign_unassigned_grid_pool(
     witness_cap: int = 3,
     witness_small_component_cap_divisor: int = 2,
     witness_tiebreak: str = "gene_fit",
+    # Opt-in (default False = bit-exact legacy). When True, unassigned tx
+    # whose gene is ABSENT from the PMI panel (g_idx < 0 — e.g. housekeeping
+    # ACTB, which self-eliminates from a PMI panel) are assigned to the FIRST
+    # assigned entity encountered in their Moore neighborhood — proximity
+    # only, no PMI/veto. The PMI-gated rescue excludes them (they can never
+    # clear it), so without this they are discarded at Finalize.
+    # ASSUMES control/blank probes (Xenium NegControl*/Unassigned*/BLANK/
+    # antisense/Deprecated codewords) are pre-filtered from the input — they
+    # are also panel-absent and would otherwise be proximity-assigned into
+    # cells. Filter them at ingest before enabling this.
+    offpanel_first_entity: bool = False,
     pos_npmi_threshold=None,  # deprecated; ignored. Kept for back-compat.
 ) -> tuple[pd.DataFrame, int, dict]:
     """Grid-bin rescue: distance-priority with NPMI as a negative veto.
@@ -1788,14 +1808,27 @@ def reassign_unassigned_grid_pool(
     for local_i, bk in enumerate(bin_keys_a.tolist()):
         bin_to_local_idxs.setdefault(int(bk), []).append(local_i)
 
-    # Unassigned tx candidates.
+    # Unassigned tx candidates. When ``offpanel_first_entity`` is set, off-panel
+    # tx (gene absent from the PMI panel → g_idx < 0) are KEPT in the candidate
+    # set (only NaN-coord tx dropped) and routed through the Cython kernel's
+    # proximity branch (first assigned entity in the 9-bin neighborhood, no PMI).
+    # Otherwise they are excluded exactly as before (`g_idx >= 0`).
     una_idx = np.where(unassigned_mask)[0]
     una_coords = df_out.iloc[una_idx][list(coord_cols)].to_numpy(dtype=np.float32)
     una_genes = df_out.iloc[una_idx][gene_col].astype(str).to_numpy()
     una_g_idx = np.array(
         [gene_to_idx.get(g, -1) for g in una_genes], dtype=np.int64,
     )
-    valid_u = ~np.isnan(una_coords).any(axis=1) & (una_g_idx >= 0)
+    _coord_ok = ~np.isnan(una_coords).any(axis=1)
+    if offpanel_first_entity:
+        # Keep off-panel (g<0) tx for the kernel's proximity branch, EXCEPT
+        # non-gene control/blank probes (also panel-absent) — never rescue
+        # those. In-panel tx (g>=0) are always kept.
+        _is_ctrl = (pd.Series(una_genes).str.startswith(NONGENE_FEATURE_PREFIXES)
+                    .to_numpy())
+        valid_u = _coord_ok & ~_is_ctrl
+    else:
+        valid_u = _coord_ok & (una_g_idx >= 0)
     una_idx = una_idx[valid_u]
     una_coords = una_coords[valid_u]
     una_g_idx = una_g_idx[valid_u]
@@ -1945,6 +1978,7 @@ def reassign_unassigned_grid_pool(
                 witness_tiebreak_int,
                 ent_size_arr,
                 w_row_blk,
+                int(offpanel_first_entity),
             )
 
         n_una_cy = len(una_idx)
@@ -1978,7 +2012,21 @@ def reassign_unassigned_grid_pool(
             for _bi, _g in enumerate(_uniq_g.tolist()):
                 _blk = _order[_bounds[_bi]:_bounds[_bi + 1]]
                 if _g < 0:
-                    reason_arr[_blk] = 1  # sentinel gene (unmapped): no_candidates
+                    if offpanel_first_entity:
+                        # Off-panel block: the kernel's g<0 proximity branch
+                        # ignores W, so any (1, G) row works. w_row=0.
+                        _be, _bd, _br, _sef = _run_kernel(
+                            una_coords_c[_blk],
+                            una_g_idx[_blk],
+                            nb_bins_arr[_blk],
+                            np.zeros((1, G_panel), dtype=np.float32),
+                            w_row_blk=np.zeros(_blk.shape[0], dtype=np.int64),
+                        )
+                        best_ent_arr[_blk] = _be
+                        best_dist_arr[_blk] = _bd
+                        reason_arr[_blk] = _br
+                    else:
+                        reason_arr[_blk] = 1  # sentinel gene (unmapped): no_candidates
                     continue
                 _row = np.full(G_panel, np.nan, dtype=np.float32)
                 _csr_row = W_csr.getrow(int(_g))
@@ -2023,6 +2071,13 @@ def reassign_unassigned_grid_pool(
 
     for i, (bk, g_idx) in una_iter_for_loop:
         bk = int(bk)
+        if g_idx < 0:
+            # Off-panel tx are handled only by the Cython batch's proximity
+            # branch; the legacy dense loop has no W row for them. Skip
+            # (no-candidate) rather than mis-index W. Reached only on the rare
+            # non-batch fallback path.
+            n_no_candidates += 1
+            continue
         # Collect assigned-tx local indices in bin + 8-neighbors, then
         # apply the z-bound to keep only spatially close candidates.
         local_idxs_raw: list[int] = []
@@ -2289,10 +2344,14 @@ def reassign_unassigned_grid_pool(
     else:
         mean_d = float("nan")
         max_d = float("nan")
+    # Off-panel tx now flow through the kernel proximity branch, so they are
+    # already counted in `matched`; report how many were off-panel for stats.
+    n_offpanel = int(((una_g_idx < 0) & matched).sum()) if len(una_g_idx) else 0
 
     return df_out, n_reassigned, {
         "total_unassigned": n_unassigned,
         "total_reassigned": n_reassigned,
+        "offpanel_reassigned": n_offpanel,
         "n_blocked_by_neg_veto": n_blocked_by_neg_veto,
         "n_no_candidates": n_no_candidates,
         "n_small_entity_fallback": n_small_entity_fallback,
@@ -2329,6 +2388,10 @@ def pre_stage2_rescue(
     witness_cap: int = 3,
     witness_small_component_cap_divisor: int = 2,
     witness_tiebreak: str = "gene_fit",
+    # Opt-in: propagate off-panel (zero-PMI) proximity assignment into this
+    # standard rescue pass (Main + Post-Group). See
+    # ``reassign_unassigned_grid_pool.offpanel_first_entity``.
+    offpanel_first_entity: bool = False,
     pos_npmi_threshold=None,  # deprecated; ignored. Kept for back-compat.
 ) -> tuple[pd.DataFrame, int, int, dict]:
     """Pre-Stage-2 rescue: tight-scale NPMI-categorical reassignment of
@@ -2425,6 +2488,7 @@ def pre_stage2_rescue(
         witness_cap=witness_cap,
         witness_small_component_cap_divisor=witness_small_component_cap_divisor,
         witness_tiebreak=witness_tiebreak,
+        offpanel_first_entity=offpanel_first_entity,
     )
 
     # Restore: any tx still holding SHIELD_LABEL after rescue → reset to

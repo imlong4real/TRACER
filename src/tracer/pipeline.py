@@ -1709,6 +1709,7 @@ def run_segmented_pipeline(df: pd.DataFrame,
             witness_cap=cfg.rescue.witness_cap,
             witness_small_component_cap_divisor=cfg.rescue.witness_small_component_cap_divisor,
             witness_tiebreak=cfg.rescue.witness_tiebreak,
+            offpanel_first_entity=cfg.rescue.offpanel_first_entity,
         )
         n_rescued += n_pass_rescued
         if n_pass_rescued == 0:
@@ -1786,6 +1787,7 @@ def run_segmented_pipeline(df: pd.DataFrame,
                 witness_cap=cfg.rescue.witness_cap,
                 witness_small_component_cap_divisor=cfg.rescue.witness_small_component_cap_divisor,
                 witness_tiebreak=cfg.rescue.witness_tiebreak,
+                offpanel_first_entity=cfg.rescue.offpanel_first_entity,
             )
             if n_pass_rescued == 0:
                 break
@@ -1855,6 +1857,7 @@ def run_segmented_pipeline(df: pd.DataFrame,
             witness_cap=cfg.final_rescue.witness_cap,
             witness_small_component_cap_divisor=cfg.final_rescue.witness_small_component_cap_divisor,
             witness_tiebreak=cfg.final_rescue.witness_tiebreak,
+            offpanel_first_entity=cfg.final_rescue.offpanel_first_entity,
         )
         if n_reassigned == 0:
             break
@@ -2007,6 +2010,7 @@ def run_noseg_pipeline(df: pd.DataFrame, npmi_panel: pd.DataFrame,
                 witness_cap=cfg.rescue.witness_cap,
                 witness_small_component_cap_divisor=cfg.rescue.witness_small_component_cap_divisor,
                 witness_tiebreak=cfg.rescue.witness_tiebreak,
+                offpanel_first_entity=cfg.rescue.offpanel_first_entity,
             )
             if n_pass_rescued == 0:
                 break
@@ -2072,6 +2076,7 @@ def run_noseg_pipeline(df: pd.DataFrame, npmi_panel: pd.DataFrame,
             witness_cap=cfg.final_rescue.witness_cap,
             witness_small_component_cap_divisor=cfg.final_rescue.witness_small_component_cap_divisor,
             witness_tiebreak=cfg.final_rescue.witness_tiebreak,
+            offpanel_first_entity=cfg.final_rescue.offpanel_first_entity,
         )
         if n_reassigned == 0:
             break
