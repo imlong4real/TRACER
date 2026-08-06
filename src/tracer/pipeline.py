@@ -371,6 +371,12 @@ def _spatial_split_phase1_entities(df_in: pd.DataFrame, *,
         "tx_demoted_singletons": 0,
         "tx_total_relabelled": 0,
     }
+    # Accumulate _etype relabels across ALL split entities, applied once after
+    # the loop (the old per-entity `df.loc[mask, "_etype"]=...` was a full-column
+    # categorical setitem + len(df) bool-mask alloc per split entity →
+    # O(n_split × n_tx)).
+    all_to_unknown: list[np.ndarray] = []
+    all_to_partial: list[np.ndarray] = []
 
     for ent, group in df_out.groupby(entity_col, sort=False):
         if ent == unassigned_id or ent == "UNASSIGNED" or ent.startswith("UNASSIGNED_"):
@@ -409,16 +415,12 @@ def _spatial_split_phase1_entities(df_in: pd.DataFrame, *,
         groups_rows.sort(key=lambda a: -len(a))
         stats["entities_split"] += 1
 
-        # Collect (rows, new_etype) updates per parent for batched _etype write.
-        rows_to_unknown_local: list[np.ndarray] = []
-        rows_to_partial_local: list[np.ndarray] = []
-
         for k, gr in enumerate(groups_rows):
             sz = len(gr)
             if sz < min_size:
                 out_labels[gr] = unassigned_id
                 stats["tx_demoted_singletons"] += sz
-                rows_to_unknown_local.append(gr)
+                all_to_unknown.append(gr)
                 continue
             if k == 0:
                 continue  # largest keeps original label (and its existing _etype)
@@ -437,21 +439,17 @@ def _spatial_split_phase1_entities(df_in: pd.DataFrame, *,
             # the parent was a main (depth-1 partial emitted) or a partial
             # (sub-partial emitted) — per the design, sub-partials are
             # "partial" flat.
-            rows_to_partial_local.append(gr)
+            all_to_partial.append(gr)
 
-        # Apply _etype updates for this parent
-        if "_etype" in df_out.columns:
-            if rows_to_unknown_local:
-                rows_concat = np.concatenate(rows_to_unknown_local)
-                mask = np.zeros(len(df_out), dtype=bool)
-                mask[rows_concat] = True
-                df_out.loc[mask, "_etype"] = "unknown"
-            if rows_to_partial_local:
-                rows_concat = np.concatenate(rows_to_partial_local)
-                mask = np.zeros(len(df_out), dtype=bool)
-                mask[rows_concat] = True
-                df_out.loc[mask, "_etype"] = "partial"
-
+    # Apply all _etype changes in ONE positional pass. Row sets are globally
+    # disjoint (each tx belongs to one split entity and one sub-group), so this
+    # is bit-identical to the per-entity masked assignment it replaces.
+    if "_etype" in df_out.columns:
+        _etype_pos = df_out.columns.get_loc("_etype")
+        if all_to_unknown:
+            df_out.iloc[np.concatenate(all_to_unknown), _etype_pos] = "unknown"
+        if all_to_partial:
+            df_out.iloc[np.concatenate(all_to_partial), _etype_pos] = "partial"
     df_out[entity_col] = out_labels
     return df_out, stats
 
