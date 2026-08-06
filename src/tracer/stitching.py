@@ -1020,6 +1020,18 @@ def stitch_entities_hierarchical(
     # is shared with the eager path. See `_stitch_entities_hierarchical_decomposable`
     # docstring for the algorithm rationale + bit-match expectation.
     npmi_mat = aux["W"]
+    # Densify the (small, gene×gene) panel ONCE so each per-candidate coherence()
+    # call takes the dense fast path instead of rebuilding a sparse CSR submatrix
+    # (scipy fancy-indexing — _major/_minor_index_fancy + csr __init__ — dominated
+    # Stitch: ~550k calls). Symmetrize `W + W.T` to match _slice_pmi_submatrix's
+    # sparse branch, which returns `sub + sub.T` on the upper-triangle-only
+    # bootstrap W (exactly one of (a,b)/(b,a) is nonzero → no doubling), so the
+    # per-candidate dense slice is value-identical → bit-identical coherence.
+    import scipy.sparse as _sp
+    if _sp.issparse(npmi_mat):
+        npmi_mat = np.ascontiguousarray(
+            (npmi_mat + npmi_mat.T).toarray(), dtype=np.float32
+        )
     gene_to_idx = aux["gene_to_idx"]
     housekeeping_mask = aux.get("housekeeping_mask")
 
