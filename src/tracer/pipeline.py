@@ -224,6 +224,11 @@ def _phase1_rerank_within_parent_etype(df_in: pd.DataFrame, *,
         ).append(i)
 
     stats = {"n_parents_reranked": 0, "n_tx_relabeled": 0}
+    # Accumulate _etype relabels across ALL parents, applied once after the loop
+    # (the old per-parent `df.loc[mask, "_etype"]=...` was a full-column
+    # categorical setitem per reranked parent → O(n_parents × n_tx)).
+    all_to_cell: list[int] = []
+    all_to_partial: list[int] = []
 
     for parent, depth1_map in parent_to_depth1_rows.items():
         if len(depth1_map) < 2:
@@ -276,8 +281,6 @@ def _phase1_rerank_within_parent_etype(df_in: pd.DataFrame, *,
                 sub_rename[(d1, old_d2j)] = new_idx
 
         all_rows = [r for rows in depth1_map.values() for r in rows]
-        rows_to_cell: list[int] = []
-        rows_to_partial: list[int] = []
         for r in all_rows:
             suffix_idx = _suffix_indices(str(labels[r]), parent)
             assert suffix_idx is not None
@@ -286,27 +289,27 @@ def _phase1_rerank_within_parent_etype(df_in: pd.DataFrame, *,
             if len(suffix_idx) < 2:
                 labels[r] = new_d1
                 if new_d1 == parent:
-                    rows_to_cell.append(r)
+                    all_to_cell.append(r)
                 else:
-                    rows_to_partial.append(r)
+                    all_to_partial.append(r)
             else:
                 new_d2 = sub_rename[(old_d1, suffix_idx[1])]
                 labels[r] = f"{new_d1}-{new_d2}"
                 # sub-partial keeps its existing "partial" etype
 
-        if has_etype:
-            if rows_to_cell:
-                mask = np.zeros(len(df_out), dtype=bool)
-                mask[rows_to_cell] = True
-                df_out.loc[mask, "_etype"] = "cell"
-            if rows_to_partial:
-                mask = np.zeros(len(df_out), dtype=bool)
-                mask[rows_to_partial] = True
-                df_out.loc[mask, "_etype"] = "partial"
-
         stats["n_parents_reranked"] += 1
         stats["n_tx_relabeled"] += len(all_rows)
 
+    # Apply all _etype changes in ONE positional pass. Row sets are globally
+    # disjoint (each tx belongs to one parent and is relabeled to cell OR
+    # partial at most once), so this is bit-identical to the per-parent
+    # masked assignment it replaces.
+    if has_etype:
+        _etype_pos = df_out.columns.get_loc("_etype")
+        if all_to_cell:
+            df_out.iloc[all_to_cell, _etype_pos] = "cell"
+        if all_to_partial:
+            df_out.iloc[all_to_partial, _etype_pos] = "partial"
     df_out[entity_col] = labels
     return df_out, stats
 
