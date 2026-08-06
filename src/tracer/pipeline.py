@@ -1065,8 +1065,28 @@ def _qc_demote_low_coherence(df_in: pd.DataFrame, *,
     if bad_set and "cell_id" in df_out.columns:
         ent_C = {str(e): float(c) for e, c in zip(entity_ids, C_arr)}
         gb = df_out.groupby(entity_col, sort=False)
-        ent_cid = gb["cell_id"].agg(
-            lambda s: str(s.astype(str).mode().iat[0])).to_dict()
+        # Vectorized mode of cell_id per entity (was a per-group Python lambda
+        # calling .mode() over ~150k groups). Count (entity, cell_id) pairs and
+        # per entity take the max-count cell_id, ties broken by the smallest
+        # cell_id — bit-identical to pandas `mode().iat[0]` (mode returns values
+        # sorted ascending, so iat[0] is the smallest among the ties).
+        _cc = pd.DataFrame({
+            "_e": df_out[entity_col].astype(str).to_numpy(),
+            "_cid": df_out["cell_id"].astype(str).to_numpy(),
+        })
+        _mode = (
+            _cc.groupby(["_e", "_cid"], sort=False).size().reset_index(name="_n")
+               .sort_values(["_e", "_n", "_cid"], ascending=[True, False, True],
+                            kind="stable")
+               .drop_duplicates("_e", keep="first")
+               .set_index("_e")["_cid"]
+        )
+        # Reindex to first-appearance order (what `groupby(sort=False)` yields),
+        # so the ent_cid iteration order — and hence the order fam_to_ents lists
+        # are built, which decides max(sibs, key=(size, C)) ties — is bit-
+        # identical to the old per-group agg.
+        _order = pd.unique(df_out[entity_col].astype(str))
+        ent_cid = _mode.reindex(_order).to_dict()
         ent_etype = (gb["_etype"].first().astype(str).to_dict()
                      if "_etype" in df_out.columns else {})
         ent_size = {str(e): int(n) for e, n in gb.size().items()}  # tx per entity
@@ -1125,11 +1145,24 @@ def _qc_demote_low_coherence(df_in: pd.DataFrame, *,
             df_out.loc[mask, "_etype"] = "unknown"
 
     # ...then promote surviving siblings into the now-freed main labels.
-    for sib, new_label in promotions.items():
-        smask = df_out[entity_col] == sib
-        df_out.loc[smask, entity_col] = new_label
-        if "_etype" in df_out.columns:
-            df_out.loc[smask, "_etype"] = "cell"
+    # Vectorized: a single `.map` over the label column, instead of a full-
+    # column string `==` per promotion (the old loop was O(n_promotions × n_tx)
+    # object comparisons — the dominant Mid-QC cost at scale). The sib→main map
+    # is 1:1 with disjoint keys and values (a sib is never itself a target, and
+    # each freed main gets exactly one sib), so one masked assignment is
+    # bit-identical to applying the promotions one at a time.
+    if promotions:
+        mapped = df_out[entity_col].map(promotions)   # sib→main, NaN elsewhere
+        pmask = mapped.notna().to_numpy()
+        if pmask.any():
+            col = df_out[entity_col]
+            if isinstance(col.dtype, pd.CategoricalDtype):
+                new_cats = set(mapped[pmask].unique()) - set(col.cat.categories)
+                if new_cats:
+                    df_out[entity_col] = col.cat.add_categories(sorted(new_cats))
+            df_out.loc[pmask, entity_col] = mapped[pmask].to_numpy()
+            if "_etype" in df_out.columns:
+                df_out.loc[pmask, "_etype"] = "cell"
 
     return df_out, {
         "entities_examined": int(entity_ids.size),
