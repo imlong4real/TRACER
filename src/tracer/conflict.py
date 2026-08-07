@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-from .metrics import build_cell_gene_matrix, build_npmi_matrix
+from .metrics import build_cell_gene_matrix, build_pmi_matrix
 from ._kernels import pair_aggregate_dense, pair_aggregate_topk
 
 # NPMI-value column preference (first present wins).
@@ -44,7 +44,7 @@ class ConflictResult:
     audit: dict = field(default_factory=dict)
 
 
-def load_npmi_long(path, *, npmi_col: str | None = None) -> pd.DataFrame:
+def load_pmi_long(path, *, npmi_col: str | None = None) -> pd.DataFrame:
     """Load a long-format NPMI table (parquet or csv[.gz]) as gene_i/gene_j/NPMI.
 
     The NPMI value column is auto-detected from :data:`_NPMI_COLS` unless
@@ -117,7 +117,7 @@ def score_relative_conflict(
     if feature_col != "feature_name":
         filtered_df = filtered_df.rename(columns={feature_col: "feature_name"})
 
-    npmi_mat, gene_to_idx = build_npmi_matrix(npmi_long)
+    npmi_mat, gene_to_idx = build_pmi_matrix(npmi_long)
     n_background_genes = int(npmi_mat.shape[0])
 
     cell_ids, genes_cell, M, col_idx = build_cell_gene_matrix(

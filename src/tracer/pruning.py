@@ -215,7 +215,7 @@ def _symmetric_csr_arrays(W_upper):
     )
 
 
-def prune_genes_by_npmi_greedy(
+def prune_genes_by_pmi_greedy(
     gene_ids: np.ndarray,
     W: np.ndarray,
     threshold: float = -0.1,
@@ -253,11 +253,11 @@ def prune_genes_by_npmi_greedy(
 
 
 # NOTE: There was previously an attempt here to rebind
-# `prune_genes_by_npmi_greedy` to `_cy_prune.prune_genes_by_npmi_greedy`.
+# `prune_genes_by_pmi_greedy` to `_cy_prune.prune_genes_by_pmi_greedy`.
 # That attribute does not exist on the compiled extension — _cy_prune
 # exposes `prune_cells` (batch over many cells) and `prune_single`, which
 # the `_fast` entry points call directly. The rebind was silently failing
-# under a try/except, so the pure-Python `prune_genes_by_npmi_greedy`
+# under a try/except, so the pure-Python `prune_genes_by_pmi_greedy`
 # above has always been the one running here. Keeping it as the single
 # reference implementation is intentional; the hot path in production
 # uses `_cy_prune.prune_cells` via `prune_transcripts_fast` etc.
@@ -839,7 +839,7 @@ def prune_transcripts_nuclear_seed(
     return df, aux
 
 
-def pairwise_npmi_stats(gene_ids, W):
+def pairwise_pmi_stats(gene_ids, W):
     if gene_ids.size <= 1:
         return dict(
             sum_npmi=np.nan,
@@ -874,7 +874,7 @@ def pairwise_npmi_stats(gene_ids, W):
         n_pairs=int(vals.size),
     )
 
-def diagnostic_npmi_report(df, aux, cell_id):
+def diagnostic_pmi_report(df, aux, cell_id):
     W = aux["W"]
     gene_to_idx = aux["gene_to_idx"]
     cid = str(cell_id)
@@ -885,7 +885,7 @@ def diagnostic_npmi_report(df, aux, cell_id):
     def summarize(name, sub):
         genes = np.sort(sub["feature_name"].astype(str).unique())
         gids = np.sort(pd.Index(genes).map(gene_to_idx).dropna().astype(int).unique())
-        stats = pairwise_npmi_stats(gids, W)
+        stats = pairwise_pmi_stats(gids, W)
         return {
             "stage": name,
             "n_transcripts": len(sub),

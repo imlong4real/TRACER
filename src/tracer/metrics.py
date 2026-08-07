@@ -267,7 +267,7 @@ def _owned_partners(obs_i, obs_j, can_bootstrap, pos):
     return indptr, partner_s, pairref_s
 
 
-def _bootstrap_npmi_for_pairs(
+def _bootstrap_pmi_for_pairs(
     M_sample: sp.csr_matrix,
     pairs_i: np.ndarray,
     pairs_j: np.ndarray,
@@ -1066,7 +1066,7 @@ def _bootstrap_pairs_gather(
         for _ in range(block):
             sample_idx = rng.integers(0, C, size=iter_size)
             M_b = M[sample_idx]
-            npmi_block = _bootstrap_npmi_for_pairs(
+            npmi_block = _bootstrap_pmi_for_pairs(
                 M_b, i_un, j_un, alpha=alpha, metric=metric,
                 pmi_formula=pmi_formula,
             )
@@ -2525,7 +2525,7 @@ def build_cell_gene_matrix(filtered_df, min_transcripts=10, genes_npm=None, cell
     return cell_ids, genes_cell, M, col_idx
 
 #
-def build_npmi_matrix(nucleus_npmi_long):
+def build_pmi_matrix(nucleus_npmi_long):
     """
     Construct a dense NPMI (Normalized Pointwise Mutual Information) matrix
     from a long-format NPMI dataframe.
@@ -2572,7 +2572,9 @@ def build_npmi_matrix(nucleus_npmi_long):
     # went from ~2 s to ~10 ms; at G=5000 the old loop would take minutes.
     i_idx = nucleus_npmi_long["gene_i"].map(gene_to_idx).to_numpy()
     j_idx = nucleus_npmi_long["gene_j"].map(gene_to_idx).to_numpy()
-    vals = nucleus_npmi_long["NPMI"].to_numpy(dtype=float)
+    # Metric-agnostic: the bootstrap panel carries "PMI"; legacy panels "NPMI".
+    _mcol = "PMI" if "PMI" in nucleus_npmi_long.columns else "NPMI"
+    vals = nucleus_npmi_long[_mcol].to_numpy(dtype=float)
 
     npmi_mat = np.zeros((G, G), dtype=float)
     npmi_mat[i_idx, j_idx] = vals
@@ -2779,7 +2781,7 @@ def compute_purity_and_conflict(
     )
 
     # -------- Build NPMI matrix --------
-    npmi_mat, gene_to_idx_all = build_npmi_matrix(nucleus_npmi_long)
+    npmi_mat, gene_to_idx_all = build_pmi_matrix(nucleus_npmi_long)
 
     # -------- Purity --------
     purity_scores, is_pure, purity_thr, purity_df = compute_cell_purity(
@@ -2811,6 +2813,77 @@ def compute_purity_and_conflict(
 
 #
 from ._utils import relu_symmetric  # noqa: E402 — re-exported for back-compat
+
+#
+def compute_cell_coherence(
+    M,
+    col_idx,
+    npmi_mat,
+    *,
+    threshold: float = 0.2,
+    cell_ids=None,
+    real_signal_threshold: float = 0.0,
+):
+    """Per-cell count-based coherence — the canonical cell-quality metric,
+    identical to the segmentation's ``stitching.coherence(mode="count")``.
+
+    For each cell, over its present-gene pairs (i, j) with value ``w``:
+
+        purity     = #(w >  threshold) / |pairs|
+        conflict   = #(w < -threshold) / |pairs|
+        coherence  = purity - conflict
+
+    All bounded ([0,1] / [-1,1]) and metric-scale-robust: it counts pairs
+    rather than summing magnitudes, so it is PMI-safe — a single rare-strong
+    pair cannot dominate (the failure mode of the retired ReLU purity).
+    ``threshold`` defaults to the pipeline PMI enrichment cutoff
+    (0.2 = ``PMI_THR``); pass 0.05 for a bounded NPMI panel.
+
+    Parameters mirror the retired ``compute_cell_purity_relu``: ``M`` is the
+    (n_cells, n_genes) binary presence matrix, ``col_idx`` maps local columns
+    to rows/cols of ``npmi_mat``.
+
+    Returns ``(coherence, purity, conflict, scores_df)`` — per-cell arrays;
+    ``scores_df`` is built only when ``cell_ids`` is given, with columns
+    ``cell_id, purity_score, conflict_score, coherence, relative_purity,
+    relative_conflict, signal_strength`` (signal_strength = fraction of pairs
+    clearing the threshold either way).
+    """
+    from ._cy_prune import coherence_count_per_entity_batch
+
+    present = np.asarray(M) != 0
+    n_cells = present.shape[0]
+    counts = present.sum(axis=1).astype(np.int32)
+    offsets = np.zeros(n_cells + 1, dtype=np.int32)
+    np.cumsum(counts, out=offsets[1:])
+    # np.nonzero returns row-major (cell-sorted) order, aligning with offsets.
+    _rows, cols = np.nonzero(present)
+    flat_genes = np.ascontiguousarray(
+        np.asarray(col_idx, dtype=np.int32)[cols], dtype=np.int32
+    )
+    W32 = np.ascontiguousarray(npmi_mat, dtype=np.float32)
+    coherence, purity, conflict = coherence_count_per_entity_batch(
+        offsets, flat_genes, W32, float(threshold), float(real_signal_threshold),
+    )
+
+    total = purity + conflict
+    with np.errstate(invalid="ignore", divide="ignore"):
+        rel_purity = np.where(total > 0, purity / total, np.nan)
+        rel_conflict = np.where(total > 0, conflict / total, np.nan)
+
+    scores_df = None
+    if cell_ids is not None:
+        scores_df = pd.DataFrame({
+            "cell_id": cell_ids,
+            "purity_score": purity,
+            "conflict_score": conflict,
+            "coherence": coherence,
+            "relative_purity": rel_purity,
+            "relative_conflict": rel_conflict,
+            "signal_strength": total,
+        })
+    return coherence, purity, conflict, scores_df
+
 
 #
 def compute_cell_purity_relu(
@@ -3131,7 +3204,7 @@ def compute_purity_and_conflict_relu(
     )
 
     # -------- Build NPMI matrix --------
-    npmi_mat, gene_to_idx_all = build_npmi_matrix(nucleus_npmi_long)
+    npmi_mat, gene_to_idx_all = build_pmi_matrix(nucleus_npmi_long)
 
     # -------- ReLU-based Purity --------
     purity_scores, is_pure, purity_thr, purity_df = compute_cell_purity_relu(
