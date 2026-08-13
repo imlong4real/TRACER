@@ -72,6 +72,16 @@ def test_segmented_output_single_tracer_id_and_pristine_cell_id():
     assert "UNASSIGNED" not in set(out["tracer_id"].astype(str))
 
 
+def test_partition_nonempty_and_etype_consistent():
+    df, panel = _regression_inputs()
+    from tracer.pipeline import run_segmented_pipeline
+    out, _ = run_segmented_pipeline(df.copy(), panel, cfg=load_config())
+    tid = out["tracer_id"].astype(str)
+    assert (tid[tid != "-1"].value_counts() >= 1).all()
+    # every unassigned tracer_id has _etype unknown, and vice-versa
+    assert set(out.loc[tid == "-1", "_etype"].astype(str)) <= {"unknown"}
+
+
 def test_noseg_output_single_tracer_id_and_pristine_cell_id():
     df, panel = _regression_inputs()
     pristine = df.set_index("transcript_id")["cell_id"].astype(str)
