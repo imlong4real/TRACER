@@ -138,7 +138,7 @@ class TestSegmentedFullVolume:
 
     def test_pipeline_runs_end_to_end(self, seg_result):
         df_out, prog, _ = seg_result
-        assert "stitched" in df_out.columns
+        assert "tracer_id" in df_out.columns
         # 8 stages of progression captured
         assert len(prog) >= 7
 
@@ -147,7 +147,7 @@ class TestSegmentedFullVolume:
         should refine cleanly (high ARI)."""
         df_out, _, _ = seg_result
         truth = df_out["cell_id"].astype(str).values
-        out = df_out["stitched"].astype(str).values
+        out = df_out["tracer_id"].astype(str).values
         mask = out != "-1"
         if mask.sum() < 2:
             pytest.skip("not enough assigned tx")
@@ -166,7 +166,7 @@ class TestSegmentedSection:
 
     def test_section_pipeline_runs(self, seg_section_result):
         df_out, prog, _ = seg_section_result
-        assert "stitched" in df_out.columns
+        assert "tracer_id" in df_out.columns
         assert len(prog) >= 7
 
     def test_section_z_bounds_respected(self, section_inputs):
@@ -191,7 +191,7 @@ class TestSegmentedSection:
 
     def test_final_entity_count_in_range(self, seg_section_result):
         df_out, _, _ = seg_section_result
-        s = df_out["stitched"].astype(str)
+        s = df_out["tracer_id"].astype(str)
         n_distinct = (s != "-1").groupby(s).any().sum()
         # 8 planted cells; clipped cells may fragment or be lost.
         assert 4 <= n_distinct <= 16, (
@@ -200,7 +200,7 @@ class TestSegmentedSection:
 
     def test_coverage_above_50pct(self, seg_section_result):
         df_out, _, _ = seg_section_result
-        c = _final_label_counts(df_out, "stitched")
+        c = _final_label_counts(df_out, "tracer_id")
         coverage = c["assigned"] / c["total"]
         assert coverage > 0.5, f"Coverage {coverage:.1%} below 50%"
 
@@ -209,7 +209,7 @@ class TestSegmentedSection:
         most of their tx and have no nucleus left)."""
         df_out, _, _ = seg_section_result
         truth = df_out["cell_id"].astype(str).values
-        out = df_out["stitched"].astype(str).values
+        out = df_out["tracer_id"].astype(str).values
         mask = out != "-1"
         if mask.sum() < 2:
             pytest.skip("not enough assigned tx")
@@ -232,7 +232,7 @@ class TestSegmentedSection:
 
         # Map transcript_id -> ground-truth cell_id (from input)
         gt_cid = df_in.set_index("transcript_id")["cell_id"].astype(str)
-        out_lbl = df_out.set_index("transcript_id")["stitched"].astype(str)
+        out_lbl = df_out.set_index("transcript_id")["tracer_id"].astype(str)
         idx = gt_cid.index.intersection(out_lbl.index)
         gt_cid = gt_cid.loc[idx]
         out_lbl = out_lbl.loc[idx]
@@ -261,7 +261,7 @@ class TestSegmentedSection:
         (commit 6aa3f3e). No single entity should hold > 85% of
         assigned tx."""
         df_out, _, _ = seg_section_result
-        s = df_out["stitched"].astype(str)
+        s = df_out["tracer_id"].astype(str)
         s = s[s != "-1"]
         if len(s) == 0:
             pytest.skip("no assigned tx")
@@ -280,7 +280,7 @@ class TestSegmentedSection:
 class TestNoSegFullVolume:
     def test_noseg_pipeline_runs_end_to_end(self, noseg_result):
         df_out, _, _ = noseg_result
-        assert "stitched" in df_out.columns
+        assert "tracer_id" in df_out.columns
 
     def test_noseg_handles_xy_only_input(self, synthetic_inputs):
         """VHD / 2D-grid inputs lack a z column. The noseg pipeline
@@ -290,9 +290,9 @@ class TestNoSegFullVolume:
         df_xy = df.drop(columns=["z"])
         assert "z" not in df_xy.columns
         df_out, prog = run_noseg_pipeline(df_xy, panel)
-        assert "stitched" in df_out.columns
+        assert "tracer_id" in df_out.columns
         # No-op assertion: pipeline should produce some assigned tx.
-        assigned = (df_out["stitched"].astype(str) != "-1").sum()
+        assigned = (df_out["tracer_id"].astype(str) != "-1").sum()
         assert assigned > 0, "noseg on xy-only input produced no assigned tx"
 
 
@@ -303,13 +303,13 @@ class TestNoSegFullVolume:
 class TestNoSegSection:
     def test_noseg_section_runs(self, noseg_section_result):
         df_out, _, _ = noseg_section_result
-        assert "stitched" in df_out.columns
+        assert "tracer_id" in df_out.columns
 
     def test_noseg_finds_components(self, noseg_section_result):
         """Group + Stitch should recover a non-trivial number of
         components from the planted cells, even on clipped input."""
         df_out, _, gt = noseg_section_result
-        s = df_out["stitched"].astype(str)
+        s = df_out["tracer_id"].astype(str)
         n_distinct = (s != "-1").groupby(s).any().sum()
         assert n_distinct >= 3, (
             f"Expected ≥3 components, got {n_distinct} "
@@ -327,7 +327,7 @@ class TestNoSegSection:
         general "pathological merger" regression check that would also
         fail if Stitch over-merged."""
         df_out, _, _ = noseg_section_result
-        s = df_out["stitched"].astype(str)
+        s = df_out["tracer_id"].astype(str)
         s = s[s != "-1"]
         if len(s) == 0:
             pytest.skip("no assigned tx")
@@ -360,8 +360,8 @@ class TestSegVsNoSegConsistency:
         seg_out, _, _ = seg_result
         noseg_out, _, _ = noseg_result
 
-        seg_lbl = seg_out.set_index("transcript_id")["stitched"].astype(str)
-        noseg_lbl = noseg_out.set_index("transcript_id")["stitched"].astype(str)
+        seg_lbl = seg_out.set_index("transcript_id")["tracer_id"].astype(str)
+        noseg_lbl = noseg_out.set_index("transcript_id")["tracer_id"].astype(str)
 
         idx = seg_lbl.index.intersection(noseg_lbl.index)
         a = seg_lbl.loc[idx]
@@ -460,8 +460,8 @@ def test_seg_pipeline_cfg_none_matches_load_config(synthetic_inputs):
     df, panel, _gt = synthetic_inputs
     df_a, _ = run_segmented_pipeline(df.copy(), panel)
     df_b, _ = run_segmented_pipeline(df.copy(), panel, cfg=load_config())
-    a = df_a["stitched"].astype(str).reset_index(drop=True)
-    b = df_b["stitched"].astype(str).reset_index(drop=True)
+    a = df_a["tracer_id"].astype(str).reset_index(drop=True)
+    b = df_b["tracer_id"].astype(str).reset_index(drop=True)
     n_diff = int((a != b).sum())
     assert n_diff == 0, (
         f"SEG cfg=None vs cfg=load_config(): {n_diff}/{len(a)} tx labels "
@@ -478,8 +478,8 @@ def test_noseg_pipeline_cfg_none_matches_load_config(synthetic_inputs):
     df, panel, _gt = synthetic_inputs
     df_a, _ = run_noseg_pipeline(df.copy(), panel)
     df_b, _ = run_noseg_pipeline(df.copy(), panel, cfg=load_config())
-    a = df_a["stitched"].astype(str).reset_index(drop=True)
-    b = df_b["stitched"].astype(str).reset_index(drop=True)
+    a = df_a["tracer_id"].astype(str).reset_index(drop=True)
+    b = df_b["tracer_id"].astype(str).reset_index(drop=True)
     n_diff = int((a != b).sum())
     assert n_diff == 0, (
         f"NOSEG cfg=None vs cfg=load_config(): {n_diff}/{len(a)} tx "
@@ -514,8 +514,8 @@ def test_seg_pipeline_witness_rank_policy_engages(synthetic_inputs):
 
     df_a, _ = run_segmented_pipeline(df.copy(), panel, cfg=cfg_dist)
     df_b, _ = run_segmented_pipeline(df.copy(), panel, cfg=cfg_witness)
-    a = df_a["stitched"].astype(str).reset_index(drop=True)
-    b = df_b["stitched"].astype(str).reset_index(drop=True)
+    a = df_a["tracer_id"].astype(str).reset_index(drop=True)
+    b = df_b["tracer_id"].astype(str).reset_index(drop=True)
     n_diff = int((a != b).sum())
     # Witness branch must take effect on at least one tx — on this
     # dense fixture it changes ~9% in practice. The lower bound is set

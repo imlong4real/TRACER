@@ -70,7 +70,7 @@ def _fingerprint(df_out, progression, gt) -> dict:
     """Compute the fingerprint dict to compare against the reference."""
     from tracer._etype import infer_etype_from_label
 
-    s = df_out["stitched"].astype(str)
+    s = df_out["tracer_id"].astype(str)
     if "_etype" in df_out.columns:
         etypes = df_out["_etype"].astype(str)
     else:
@@ -221,8 +221,8 @@ def test_regression_seg_vs_noseg(synthetic_inputs):
     seg_out, _ = run_segmented_pipeline(df, panel)
     noseg_out, _ = run_noseg_pipeline(df, panel)
 
-    seg_lbl = seg_out.set_index("transcript_id")["stitched"].astype(str)
-    noseg_lbl = noseg_out.set_index("transcript_id")["stitched"].astype(str)
+    seg_lbl = seg_out.set_index("transcript_id")["tracer_id"].astype(str)
+    noseg_lbl = noseg_out.set_index("transcript_id")["tracer_id"].astype(str)
     idx = seg_lbl.index.intersection(noseg_lbl.index)
     a = seg_lbl.loc[idx]
     b = noseg_lbl.loc[idx]
