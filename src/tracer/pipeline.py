@@ -1978,6 +1978,11 @@ def run_noseg_pipeline(df: pd.DataFrame, npmi_panel: pd.DataFrame,
     """
     cfg = _resolve_pipeline_cfg(cfg)
     df = df.copy()
+    _input_cell_id = pd.Series(
+        df["cell_id"].astype(str).to_numpy() if "cell_id" in df.columns
+        else np.full(len(df), "-1"),
+        index=df["transcript_id"].to_numpy(),
+    )
     if "z" not in df.columns:
         df["z"] = 0.0
     df["cell_id"] = "-1"
@@ -2160,5 +2165,7 @@ def run_noseg_pipeline(df: pd.DataFrame, npmi_panel: pd.DataFrame,
     # for full rationale).
     finalize_unassigned(df_stitched, col="stitched")
     _record_stage(progression, "Finalize", df_stitched, "stitched")
+
+    df_stitched = _canonicalize_output(df_stitched, _input_cell_id)
 
     return df_stitched, progression

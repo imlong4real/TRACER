@@ -70,3 +70,14 @@ def test_segmented_output_single_tracer_id_and_pristine_cell_id():
     got = out.set_index("transcript_id")["cell_id"].astype(str)
     assert (got.reindex(pristine.index) == pristine).all()
     assert "UNASSIGNED" not in set(out["tracer_id"].astype(str))
+
+
+def test_noseg_output_single_tracer_id_and_pristine_cell_id():
+    df, panel = _regression_inputs()
+    pristine = df.set_index("transcript_id")["cell_id"].astype(str)
+    from tracer.pipeline import run_noseg_pipeline
+    out, _ = run_noseg_pipeline(df.copy(), panel, cfg=load_config())
+    assert "stitched" not in out.columns and "tracer_id" in out.columns
+    got = out.set_index("transcript_id")["cell_id"].astype(str)
+    assert (got.reindex(pristine.index) == pristine).all()
+    assert "UNASSIGNED" not in set(out["tracer_id"].astype(str))
