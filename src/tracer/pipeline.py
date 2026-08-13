@@ -1584,6 +1584,10 @@ def run_segmented_pipeline(df: pd.DataFrame,
     stage_progression : list of state dicts, one per stage.
     """
     cfg = _resolve_pipeline_cfg(cfg)
+    _input_cell_id = pd.Series(
+        df["cell_id"].astype(str).to_numpy(),
+        index=df["transcript_id"].to_numpy(),
+    )
     progression: list[dict[str, Any]] = []
     _record_stage(progression, "input", df.assign(_lbl=df["cell_id"].astype(str)), "_lbl")
 
@@ -1941,6 +1945,8 @@ def run_segmented_pipeline(df: pd.DataFrame,
     # `unassigned_qc_status` column emitted by Group.
     finalize_unassigned(df_stitched, col="stitched")
     _record_stage(progression, "Finalize", df_stitched, "stitched")
+
+    df_stitched = _canonicalize_output(df_stitched, _input_cell_id)
 
     return df_stitched, progression
 

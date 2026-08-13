@@ -2,6 +2,28 @@ import numpy as np
 import pandas as pd
 
 from tracer.pipeline import _canonicalize_output
+from tracer.config import load_config
+from tests.synthetic import (
+    make_synthetic_transcripts,
+    make_synthetic_npmi_panel_for_transcripts,
+)
+
+
+CELLS_KW = dict(
+    n_cells=8,
+    voxels_per_cell_mean=80,
+    tx_per_cell=25,
+    n_genes=12,
+    n_types=3,
+    domain_z_um=10.0,
+    nuclear_layers=2,
+)
+
+
+def _regression_inputs():
+    df, gt = make_synthetic_transcripts(**CELLS_KW, seed=42)
+    panel = make_synthetic_npmi_panel_for_transcripts(df, gt)
+    return df, panel
 
 
 def _frame():
@@ -37,3 +59,14 @@ def test_canonicalize_preserves_component_labels():
     pristine = pd.Series(df["cell_id"].to_numpy(), index=df["transcript_id"])
     out = _canonicalize_output(df, pristine)
     assert list(out["tracer_id"]) == ["c1","UNASSIGNED_7","cascade_3-1","-1"]
+
+
+def test_segmented_output_single_tracer_id_and_pristine_cell_id():
+    df, panel = _regression_inputs()
+    pristine = df.set_index("transcript_id")["cell_id"].astype(str)
+    from tracer.pipeline import run_segmented_pipeline
+    out, _ = run_segmented_pipeline(df.copy(), panel, cfg=load_config())
+    assert "stitched" not in out.columns and "tracer_id" in out.columns
+    got = out.set_index("transcript_id")["cell_id"].astype(str)
+    assert (got.reindex(pristine.index) == pristine).all()
+    assert "UNASSIGNED" not in set(out["tracer_id"].astype(str))
