@@ -1447,6 +1447,9 @@ def _record_stage(progression: list, stage_name: str, df: pd.DataFrame, col: str
         )
 
 
+# Intentionally a superset of the finalize sentinel: adds `__GUARD_SKIP__`
+# (`prune_rejected` is already collapsed to `UNASSIGNED` by
+# `finalize_unassigned`, which runs before this helper).
 _OUTPUT_UNASSIGNED_TOKENS = frozenset(
     {"UNASSIGNED", "-1", "nan", "DROP", "group_rejected",
      "demote_rejected", "__GUARD_SKIP__"}
@@ -1459,11 +1462,12 @@ def _canonicalize_output(df, input_cell_id, *,
     so UNASSIGNED_<n> components are preserved); drop entity_col; restore
     pristine cell_id from input_cell_id (Series indexed by transcript_id).
     Identity only — type lives in _etype."""
+    df = df.copy()
     final = df[entity_col].astype(str).to_numpy()
     is_un = np.isin(final, list(_OUTPUT_UNASSIGNED_TOKENS))
     df["tracer_id"] = np.where(is_un, "-1", final)
     df = df.drop(columns=[entity_col])
-    df["cell_id"] = df[txid_col].map(input_cell_id).astype(object)
+    df["cell_id"] = df[txid_col].map(input_cell_id)
     return df
 
 
@@ -1588,6 +1592,8 @@ def run_segmented_pipeline(df: pd.DataFrame,
         df["cell_id"].astype(str).to_numpy(),
         index=df["transcript_id"].to_numpy(),
     )
+    if not _input_cell_id.index.is_unique:
+        raise ValueError("transcript_id must be unique to restore pristine cell_id")
     progression: list[dict[str, Any]] = []
     _record_stage(progression, "input", df.assign(_lbl=df["cell_id"].astype(str)), "_lbl")
 
@@ -1983,6 +1989,8 @@ def run_noseg_pipeline(df: pd.DataFrame, npmi_panel: pd.DataFrame,
         else np.full(len(df), "-1"),
         index=df["transcript_id"].to_numpy(),
     )
+    if not _input_cell_id.index.is_unique:
+        raise ValueError("transcript_id must be unique to restore pristine cell_id")
     if "z" not in df.columns:
         df["z"] = 0.0
     df["cell_id"] = "-1"
