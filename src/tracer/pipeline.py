@@ -1447,6 +1447,26 @@ def _record_stage(progression: list, stage_name: str, df: pd.DataFrame, col: str
         )
 
 
+_OUTPUT_UNASSIGNED_TOKENS = frozenset(
+    {"UNASSIGNED", "-1", "nan", "DROP", "group_rejected",
+     "demote_rejected", "__GUARD_SKIP__"}
+)
+
+
+def _canonicalize_output(df, input_cell_id, *,
+                         entity_col="stitched", txid_col="transcript_id"):
+    """tracer_id <- final entity label (unassigned tokens -> '-1', exact match
+    so UNASSIGNED_<n> components are preserved); drop entity_col; restore
+    pristine cell_id from input_cell_id (Series indexed by transcript_id).
+    Identity only — type lives in _etype."""
+    final = df[entity_col].astype(str).to_numpy()
+    is_un = np.isin(final, list(_OUTPUT_UNASSIGNED_TOKENS))
+    df["tracer_id"] = np.where(is_un, "-1", final)
+    df = df.drop(columns=[entity_col])
+    df["cell_id"] = df[txid_col].map(input_cell_id).astype(object)
+    return df
+
+
 def _grid_3d_graph_fn(df_in, *, k=None, dist_threshold=None,
                       coord_cols=("x", "y", "z"),
                       G_z=2.0, z_neighborhood_depth=1):
