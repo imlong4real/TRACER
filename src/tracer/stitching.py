@@ -443,6 +443,7 @@ def coherence(
     mode: str = "count",
     threshold: float = 0.05,
     metric: str = "npmi",
+    real_signal_threshold: float = 0.0,
 ) -> tuple[float, float, float]:
     """Unified coherence — returns ``(C, purity, conflict)``.
 
@@ -501,9 +502,17 @@ def coherence(
             "Use metric='pmi' with mode='count' instead."
         )
 
-    # Fast path: count-mode + dense float32 W → Cython kernel.
+    # Informative-edges denominator when ``real_signal_threshold`` (rst) > 0:
+    # count-mode pairs with |w| <= rst are excluded from BOTH numerator and
+    # denominator (so purity + conflict == 1 over informative edges), matching
+    # metrics.compute_cell_coherence / Mid-QC. Default 0.0 == all-pairs, so
+    # Stitch / deltaC are unchanged. The Cython fast path implements all-pairs
+    # only, so it is taken only when rst <= 0.
+    rst = float(real_signal_threshold)
+
+    # Fast path: count-mode (all-pairs) + dense float32 W → Cython kernel.
     # ~5-10× per-call speedup vs numpy at ROI/full scale.
-    if mode == "count":
+    if mode == "count" and rst <= 0.0:
         try:
             import scipy.sparse as _sp
             if not _sp.issparse(npmi_mat) and isinstance(npmi_mat, np.ndarray) \
@@ -526,8 +535,18 @@ def coherence(
         return 0.0, 0.0, 0.0
 
     if mode == "count":
-        purity = float(np.sum(vals > threshold)) / P
-        conflict = float(np.sum(vals < -threshold)) / P
+        if rst > 0.0:
+            # informative edges only: |w| > rst in BOTH numerator and denominator
+            real = np.abs(vals) > rst
+            denom = int(real.sum())
+            if denom == 0:
+                return 0.0, 0.0, 0.0
+            rvals = vals[real]
+            purity = float(np.sum(rvals > threshold)) / denom
+            conflict = float(np.sum(rvals < -threshold)) / denom
+        else:
+            purity = float(np.sum(vals > threshold)) / P
+            conflict = float(np.sum(vals < -threshold)) / P
     else:  # magnitude
         denom = float(np.sum(np.abs(vals)))
         if denom == 0.0:
