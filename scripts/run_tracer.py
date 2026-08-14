@@ -368,6 +368,13 @@ def build_outputs(
         tau = 0.2 if _mcol == "PMI" else 0.05
         log.info("Coherence threshold=%.3f (auto, %s-scale panel)", tau, _mcol)
 
+    # Auto-detect the assignment column: prefer the reconciled `tracer_id`, then
+    # legacy `stitched`/`cell_id` (older outputs or synthetic frames) so scoring
+    # works across output formats instead of KeyError-ing on a fixed default.
+    if label_col not in df_post.columns:
+        label_col = next((c for c in ("tracer_id", "stitched", "cell_id")
+                          if c in df_post.columns), label_col)
+
     if "_etype" in df_post.columns:
         keep_mask = df_post["_etype"].astype(str).isin({"cell", "partial", "component"})
     else:
