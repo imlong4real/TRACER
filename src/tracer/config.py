@@ -85,6 +85,18 @@ class Phase1Config:
     real_signal_threshold: float = 0.05
     neg_npmi_threshold: float = -0.2
 
+    # When False, Phase-1b/1c veto a candidate whose real-signal PMI array vs
+    # the (sub)seed is EMPTY (independent/orthogonal of the seed) instead of
+    # defer-admitting it. For a collapsed 1-gene seed (doublet nucleus) the lone
+    # seed gene is orthogonal to most genes, so the default (True) defer-admits
+    # both anti-correlated programs into the main → negative doublet blob. Set
+    # False to admit only seed-correlated genes → main = one clean program, the
+    # second program falls to the rest-pile and 1c carves it as a partial
+    # (splits the doublet). Trades Prune-stage coverage (recovered by Rescue)
+    # for far fewer Mid-QC demotions. Wired via the _cy_prune module toggle set
+    # around the Prune stage in the pipeline.
+    admit_independent: bool = True
+
     # ------------------------------------------------------------------
     # Phase-1-time Mahalanobis-gated remerge (opt-in).
     # ------------------------------------------------------------------
@@ -308,6 +320,21 @@ class RescueConfig:
     # nucleus-interior housekeeping reads is a straightforward, panel-agnostic
     # win, and leaving them unrescued discards real signal.
     offpanel_first_entity: bool = True
+
+    # When False, a candidate whose real-signal PMI array against the target
+    # entity is EMPTY (no |PMI| > real_signal_threshold edge to ANY of the
+    # entity's genes) is VETOED instead of defer-admitted. Default True =
+    # legacy (defer-admit such orthogonal genes). Distinct from
+    # ``offpanel_first_entity`` (off-panel, no gene index at all) and from the
+    # percentile branch (which already vetoes strongly ANTI-correlated genes):
+    # this gates ORTHOGONAL / unrelated ON-panel genes only. On a 5k-plex panel
+    # at real_signal_threshold=0.2 the defer fires often, so setting the early
+    # rescues strict (rescue.admit_independent=False) while keeping the final
+    # mop-up permissive (final_rescue.admit_independent=True) trims ~70
+    # genes/cell of coherence-neutral filler (coverage 97->94%) with cell
+    # coherence unchanged. Wired via the _cy_prune module toggle set per rescue
+    # stage in the pipeline.
+    admit_independent: bool = True
 
     # ------------------------------------------------------------------
     # Convergence-aware early exit. After each Rescue pass, compare the

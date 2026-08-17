@@ -8,6 +8,19 @@ from cython.parallel cimport prange
 cimport openmp
 
 
+# Test knob (per-pass controllable from Python). When 0, a candidate whose
+# real-signal PMI array vs the entity is EMPTY (n_signal==0 → no |PMI|>rst edge
+# to any entity gene) is VETOED instead of defer-admitted. Default 1 = legacy.
+cdef int _ADMIT_INDEPENDENT = 1
+
+def set_admit_independent(int v):
+    global _ADMIT_INDEPENDENT
+    _ADMIT_INDEPENDENT = v
+
+def get_admit_independent():
+    return _ADMIT_INDEPENDENT
+
+
 cdef inline bint _wget(
     cnp.float32_t[:, :] W,
     const int[::1] W_indptr,
@@ -1311,7 +1324,7 @@ cdef inline int _admission_test(
                 pmi_buf[n_signal] = v
                 n_signal += 1
             if n_signal == 0:
-                return 1  # no real signal → defer (admit)
+                return _ADMIT_INDEPENDENT  # empty real-signal → admit iff flag
             _insertion_sort_floats(pmi_buf, n_signal)
             p_aggregate = _percentile_sorted(pmi_buf, n_signal, aggregator_percentile)
             if legacy_mean_test:
@@ -1362,7 +1375,7 @@ cdef inline int _admission_test(
                 min_signal_f = v
             n_signal += 1
         if n_signal == 0:
-            return 1  # defer
+            return _ADMIT_INDEPENDENT  # empty real-signal → admit iff flag
         if min_signal_f > min_admit_threshold:
             return 1  # unanimous-positive fast-pass
         _insertion_sort_floats(pmi_buf, n_signal)

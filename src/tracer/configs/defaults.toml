@@ -42,6 +42,12 @@ aggregator_percentile = 25.0
 real_signal_threshold = 0.05
 neg_npmi_threshold = -0.2
 
+# When false, Phase-1b/1c veto candidates whose real-signal PMI array vs the
+# (sub)seed is empty (independent of the seed) instead of defer-admitting.
+# Splits collapsed-seed doublets (main = one program, 1c carves the other as a
+# partial); trades Prune coverage (Rescue recovers it) for fewer Mid-QC demotions.
+admit_independent = true
+
 # Phase-1-time Mahalanobis-gated remerge. Sibling of
 # stitch.mahalanobis_d_rescue, applied between Phase1-QC and Rescue.
 # Each candidate entity pair sharing a bin neighborhood is unioned via
@@ -201,6 +207,14 @@ early_exit_admit_ratio = 0.0
 # (no Xenium prior anchored Phase-1). Each pass is bounded by zero-
 # admit exit anyway. Set 0 to disable the Post-Group stage entirely.
 post_group_passes = 3
+
+# When false, a candidate whose real-signal PMI array vs the target entity
+# is EMPTY (no |PMI| > real_signal_threshold edge to any entity gene) is
+# vetoed instead of defer-admitted. True = legacy (admit orthogonal genes).
+# Per-stage strictness: set rescue.admit_independent=false to make the early
+# rescues require real support, and keep final_rescue.admit_independent=true
+# for a permissive mop-up.
+admit_independent = true
 
 
 # ---------------------------------------------------------------------

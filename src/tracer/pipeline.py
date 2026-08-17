@@ -1447,6 +1447,20 @@ def _record_stage(progression: list, stage_name: str, df: pd.DataFrame, col: str
         )
 
 
+def _set_admit_independent(flag: bool) -> None:
+    """Set the `_cy_prune` admit-independent toggle for the NEXT rescue stage.
+    When ``flag`` is False, rescue candidates whose real-signal PMI array vs the
+    target entity is empty (no ``|PMI| > real_signal_threshold`` edge to any
+    entity gene) are VETOED instead of defer-admitted. Restore to True after the
+    stage so Prune / other stages keep legacy behavior. Graceful no-op on a
+    ``.so`` built before the toggle existed."""
+    try:
+        from tracer._cy_prune import set_admit_independent
+        set_admit_independent(1 if flag else 0)
+    except Exception:
+        pass
+
+
 # Intentionally a superset of the finalize sentinel: adds `__GUARD_SKIP__`
 # (`prune_rejected` is already collapsed to `UNASSIGNED` by
 # `finalize_unassigned`, which runs before this helper).
@@ -1632,6 +1646,7 @@ def run_segmented_pipeline(df: pd.DataFrame,
     _p1_agg_pct = getattr(_p1, "aggregator_percentile", 25.0) if _p1 is not None else 25.0
     _p1_rs_thr = getattr(_p1, "real_signal_threshold", 0.05) if _p1 is not None else 0.05
     _p1_neg_thr = getattr(_p1, "neg_npmi_threshold", -0.2) if _p1 is not None else -0.2
+    _set_admit_independent(getattr(_p1, "admit_independent", True) if _p1 is not None else True)
     if "overlaps_nucleus" in df.columns:
         df_pruned, aux = prune_transcripts_nuclear_seed(
             df, npmi_panel,
@@ -1660,6 +1675,7 @@ def run_segmented_pipeline(df: pd.DataFrame,
             metric_col=metric_col, nan_fill=0.0,
             n_jobs=-1, show_progress=False,
         )
+    _set_admit_independent(True)
     _record_stage(progression, "Prune", df_pruned, "tracer_id")
 
     # Phase-1 post-1c nuclear reassignment (opt-in). Closes Gap B:
@@ -1760,6 +1776,7 @@ def run_segmented_pipeline(df: pd.DataFrame,
     # residual into orphan UNASSIGNED_* components.
     df_rescued = df_pruned
     n_rescued = 0
+    _set_admit_independent(cfg.rescue.admit_independent)
     for _pass in range(cfg.rescue.max_passes):
         df_rescued, n_pass_rescued, _, _ = guarded_rescue(
             df_rescued, aux=aux,
@@ -1785,6 +1802,7 @@ def run_segmented_pipeline(df: pd.DataFrame,
         n_rescued += n_pass_rescued
         if n_pass_rescued == 0:
             break
+    _set_admit_independent(True)
     _record_stage(progression, "Rescue", df_rescued, "tracer_id")
 
     if PHASE1_SEG_RESIDUAL_CASCADE:
@@ -1838,6 +1856,7 @@ def run_segmented_pipeline(df: pd.DataFrame,
     # Phase-1 entities AND Group components — closing the gap where
     # Group's UNASSIGNED_* couldn't be Rescue targets in the main pass.
     if cfg.rescue.post_group_passes > 0:
+        _set_admit_independent(cfg.rescue.admit_independent)
         for _pass in range(cfg.rescue.post_group_passes):
             df_grouped, n_pass_rescued, _, _ = guarded_rescue(
                 df_grouped, aux=aux,
@@ -1862,6 +1881,7 @@ def run_segmented_pipeline(df: pd.DataFrame,
             )
             if n_pass_rescued == 0:
                 break
+        _set_admit_independent(True)
         _record_stage(progression, "Post-Group Rescue", df_grouped, "tracer_id")
 
     # Stitch — symmetric kwargs with NOSEG path (close-edges guard removed
@@ -1908,6 +1928,7 @@ def run_segmented_pipeline(df: pd.DataFrame,
     #   (a) hard ceiling at cfg.final_rescue.max_passes
     #   (b) convergence gate at early_exit_admit_ratio (if > 0): break
     #       when a pass admits fewer than ratio * pre-pass-pool tx.
+    _set_admit_independent(cfg.final_rescue.admit_independent)
     for _pass in range(cfg.final_rescue.max_passes):
         df_stitched, n_reassigned, stats = reassign_unassigned_grid_pool(
             df_stitched, aux=aux,
@@ -1939,6 +1960,7 @@ def run_segmented_pipeline(df: pd.DataFrame,
                 and (n_reassigned / n_un_before
                      < cfg.final_rescue.early_exit_admit_ratio)):
             break
+    _set_admit_independent(True)
     _record_stage(progression, "Final Rescue", df_stitched, "stitched")
 
     # Finalize: collapse all stage-rejected / sentinel labels in the
@@ -2070,6 +2092,7 @@ def run_noseg_pipeline(df: pd.DataFrame, npmi_panel: pd.DataFrame,
 
     # Post-Group Rescue (opt-in) — see segmented runner for rationale.
     if cfg.rescue.post_group_passes > 0:
+        _set_admit_independent(cfg.rescue.admit_independent)
         for _pass in range(cfg.rescue.post_group_passes):
             df_grouped, n_pass_rescued, _, _ = guarded_rescue(
                 df_grouped, aux=aux,
@@ -2094,6 +2117,7 @@ def run_noseg_pipeline(df: pd.DataFrame, npmi_panel: pd.DataFrame,
             )
             if n_pass_rescued == 0:
                 break
+        _set_admit_independent(True)
         _record_stage(progression, "Post-Group Rescue", df_grouped, "tracer_id")
 
     # Stitch — entity_col reads `tracer_id` directly (was aliased as
@@ -2136,6 +2160,7 @@ def run_noseg_pipeline(df: pd.DataFrame, npmi_panel: pd.DataFrame,
     #   (a) hard ceiling at cfg.final_rescue.max_passes
     #   (b) convergence gate at early_exit_admit_ratio (if > 0): break
     #       when a pass admits fewer than ratio * pre-pass-pool tx.
+    _set_admit_independent(cfg.final_rescue.admit_independent)
     for _pass in range(cfg.final_rescue.max_passes):
         df_stitched, n_reassigned, stats = reassign_unassigned_grid_pool(
             df_stitched, aux=aux,
@@ -2167,6 +2192,7 @@ def run_noseg_pipeline(df: pd.DataFrame, npmi_panel: pd.DataFrame,
                 and (n_reassigned / n_un_before
                      < cfg.final_rescue.early_exit_admit_ratio)):
             break
+    _set_admit_independent(True)
     _record_stage(progression, "Final Rescue", df_stitched, "stitched")
 
     # Finalize unassigned-class labels → "DROP" (see segmented runner
