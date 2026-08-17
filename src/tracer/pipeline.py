@@ -1174,7 +1174,6 @@ def _qc_demote_low_coherence(df_in: pd.DataFrame, *,
     }
 
 
-NUCLEAR_ONLY_ADMIT = True   # restrict 1b/1c to nuclear tx; cyto via Rescue
 # Fallback cells (<3 nuclear genes → whole-cell seed) are exempted from the
 # nuclear-only restriction: they admit whole-cell tx in 1b/1c. Without this,
 # a thin nucleus whose 1-2 nuclear reads don't fit the whole-cell seed dies
@@ -1656,7 +1655,7 @@ def run_segmented_pipeline(df: pd.DataFrame,
             metric_col=metric_col, nan_fill=0.0,
             min_nuclear_genes=3,
             seed_coherence_floor=SEED_COHERENCE_FLOOR,
-            nuclear_only_admit=NUCLEAR_ONLY_ADMIT,
+            nuclear_only_admit=cfg.phase1.nuclear_only_admit,
             fallback_whole_cell_admit=FALLBACK_WHOLE_CELL_ADMIT,
             tx_weighted=TX_WEIGHTED_PRUNE,
             veto_mode=_p1_veto_mode,

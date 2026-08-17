@@ -75,7 +75,9 @@ class Phase1Config:
     pmi_threshold: float = 0.2
     seed_coherence_floor: float = 0.10
     tx_weighted_prune: bool = True
-    nuclear_only_admit: bool = True
+    # 2026-08-17: default flipped True->False — admit cytoplasm at Prune
+    # rather than deferring cytoplasmic tx to Rescue (see defaults.toml).
+    nuclear_only_admit: bool = False
 
     # 1b admission gate (mirrors RescueConfig's veto knobs)
     veto_mode: Literal["min", "mean", "hybrid"] = "hybrid"
@@ -94,12 +96,12 @@ class Phase1Config:
     # second program falls to the rest-pile and 1c carves it as a partial
     # (splits the doublet). Trades Prune-stage coverage (recovered by Rescue)
     # for far fewer Mid-QC demotions. Wired via the _cy_prune module toggle set
-    # around the Prune stage in the pipeline. Default True (legacy). Set False
-    # ONLY for dense / high-plex panels (e.g. Xenium 5k) where nuclear seeds
-    # collapse into doublet blobs — there it splits doublets (+cells, cleaner).
-    # On standard panels it over-demotes marginal cells with no doublets to
-    # split (validated 2026-08-16: PDAC ROI −8% cells), so it is NOT a default.
-    admit_independent: bool = True
+    # around the Prune stage in the pipeline. 2026-08-17: default flipped
+    # True->False. The −8% over-demotion on standard panels (PDAC ROI) only
+    # appears under nuclear_only_admit=True; paired with the new
+    # nuclear_only_admit=False default that penalty vanishes (see defaults.toml),
+    # while dense / high-plex panels (Xenium 5k) gain the doublet split.
+    admit_independent: bool = False
 
     # ------------------------------------------------------------------
     # Phase-1-time Mahalanobis-gated remerge (opt-in).
