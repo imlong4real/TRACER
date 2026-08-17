@@ -443,7 +443,7 @@ def coherence(
     mode: str = "count",
     threshold: float = 0.05,
     metric: str = "npmi",
-    real_signal_threshold: float = 0.0,
+    real_signal_threshold: float | None = None,
 ) -> tuple[float, float, float]:
     """Unified coherence — returns ``(C, purity, conflict)``.
 
@@ -502,13 +502,14 @@ def coherence(
             "Use metric='pmi' with mode='count' instead."
         )
 
-    # Informative-edges denominator when ``real_signal_threshold`` (rst) > 0:
-    # count-mode pairs with |w| <= rst are excluded from BOTH numerator and
-    # denominator (so purity + conflict == 1 over informative edges), matching
-    # metrics.compute_cell_coherence / Mid-QC. Default 0.0 == all-pairs, so
-    # Stitch / deltaC are unchanged. The Cython fast path implements all-pairs
-    # only, so it is taken only when rst <= 0.
-    rst = float(real_signal_threshold)
+    # Informative-edges denominator: count-mode pairs with |w| <= rst are
+    # excluded from BOTH numerator and denominator (so purity + conflict == 1
+    # over informative edges), matching metrics.compute_cell_coherence / Mid-QC.
+    # rst defaults to ``threshold`` (= τ) 2026-08-16 with the rst=τ unification —
+    # every coherence caller (Stitch/ΔC included) now uses the informative-edges
+    # denominator unless it passes an explicit rst. Pass real_signal_threshold=0.0
+    # for the legacy all-pairs denominator (Cython fast path, taken when rst<=0).
+    rst = float(threshold) if real_signal_threshold is None else float(real_signal_threshold)
 
     # Fast path: count-mode (all-pairs) + dense float32 W → Cython kernel.
     # ~5-10× per-call speedup vs numpy at ROI/full scale.

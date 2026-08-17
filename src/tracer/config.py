@@ -82,7 +82,7 @@ class Phase1Config:
     mean_admit_threshold: float = 0.2
     min_admit_threshold: float = 0.0
     aggregator_percentile: float = 25.0
-    real_signal_threshold: float = 0.05
+    real_signal_threshold: float = 0.2
     neg_npmi_threshold: float = -0.2
 
     # When False, Phase-1b/1c veto a candidate whose real-signal PMI array vs
@@ -94,7 +94,11 @@ class Phase1Config:
     # second program falls to the rest-pile and 1c carves it as a partial
     # (splits the doublet). Trades Prune-stage coverage (recovered by Rescue)
     # for far fewer Mid-QC demotions. Wired via the _cy_prune module toggle set
-    # around the Prune stage in the pipeline.
+    # around the Prune stage in the pipeline. Default True (legacy). Set False
+    # ONLY for dense / high-plex panels (e.g. Xenium 5k) where nuclear seeds
+    # collapse into doublet blobs — there it splits doublets (+cells, cleaner).
+    # On standard panels it over-demotes marginal cells with no doublets to
+    # split (validated 2026-08-16: PDAC ROI −8% cells), so it is NOT a default.
     admit_independent: bool = True
 
     # ------------------------------------------------------------------
@@ -269,8 +273,8 @@ class RescueConfig:
     aggregator_percentile: float = 25.0
     # Real-players gate (cross-cutting, but Rescue-overridable). Pairs
     # with |PMI| ≤ this contribute neither to mean nor to count gates.
-    # Default 0.05 matches the cross-cutting REAL_SIGNAL_THRESHOLD.
-    real_signal_threshold: float = 0.05
+    # Unified to τ (= pmi_threshold 0.2) 2026-08-16 with the rst=τ default flip.
+    real_signal_threshold: float = 0.2
 
     # ------------------------------------------------------------------
     # Rank policy — how a non-vetoed candidate is chosen among the

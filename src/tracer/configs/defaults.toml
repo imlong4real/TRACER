@@ -39,13 +39,15 @@ veto_mode = "hybrid"
 mean_admit_threshold = 0.2
 min_admit_threshold = 0.0
 aggregator_percentile = 25.0
-real_signal_threshold = 0.05
+real_signal_threshold = 0.2
 neg_npmi_threshold = -0.2
 
 # When false, Phase-1b/1c veto candidates whose real-signal PMI array vs the
 # (sub)seed is empty (independent of the seed) instead of defer-admitting.
 # Splits collapsed-seed doublets (main = one program, 1c carves the other as a
 # partial); trades Prune coverage (Rescue recovers it) for fewer Mid-QC demotions.
+# Default true (legacy). Set false ONLY for dense/high-plex panels (Xenium 5k):
+# splits doublets there, but over-demotes standard panels (PDAC ROI: -8% cells).
 admit_independent = true
 
 # Phase-1-time Mahalanobis-gated remerge. Sibling of
@@ -169,7 +171,7 @@ aggregator_percentile = 25.0
 # Real-players gate (cross-cutting, but Rescue-overridable). Pairs
 # with |PMI| ≤ this contribute neither to mean nor to count gates.
 # Default 0.05 matches the cross-cutting REAL_SIGNAL_THRESHOLD.
-real_signal_threshold = 0.05
+real_signal_threshold = 0.2
 
 # Rank policy — how a non-vetoed candidate is chosen among the entities
 # in the 9-bin × z-bound neighborhood of an orphan tx.

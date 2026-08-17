@@ -1272,7 +1272,7 @@ MID_QC_C_FLOOR: float = 0.05
 #         that actually carry information. Required for sparse
 #         bootstrap / Visium HD panels where most off-diagonal cells
 #         are implicit zero rather than NaN.
-REAL_SIGNAL_THRESHOLD: float = 0.05
+REAL_SIGNAL_THRESHOLD: float = 0.2  # unified to τ (=PMI_THR) 2026-08-16
 # Percentile of real-signal PMIs used in the Rescue mean/hybrid veto.
 # 50 = median. <50 = stricter (more pairs must clear mean_threshold).
 # >50 = liberal (tolerates a long left tail of weak/negative pairs).
@@ -1845,8 +1845,8 @@ def run_segmented_pipeline(df: pd.DataFrame,
             min_C=float(MID_QC_C_FLOOR), min_n_genes=2,
             threshold=PMI_THR, metric="pmi", unassigned_id="-1",
             # rst defaults to threshold (tau): informative-edges denominator,
-            # panel-shape-agnostic. Decoupled from the Rescue veto's
-            # REAL_SIGNAL_THRESHOLD (0.05), which stays as-is.
+            # panel-shape-agnostic. Now unified with the Rescue veto's
+            # REAL_SIGNAL_THRESHOLD (also τ) — rst=τ everywhere (2026-08-16).
         )
         mid_did_anything = True
     if mid_did_anything:
@@ -2083,8 +2083,8 @@ def run_noseg_pipeline(df: pd.DataFrame, npmi_panel: pd.DataFrame,
             min_C=float(MID_QC_C_FLOOR), min_n_genes=2,
             threshold=PMI_THR, metric="pmi", unassigned_id="-1",
             # rst defaults to threshold (tau): informative-edges denominator,
-            # panel-shape-agnostic. Decoupled from the Rescue veto's
-            # REAL_SIGNAL_THRESHOLD (0.05), which stays as-is.
+            # panel-shape-agnostic. Now unified with the Rescue veto's
+            # REAL_SIGNAL_THRESHOLD (also τ) — rst=τ everywhere (2026-08-16).
         )
         mid_did_anything = True
     if mid_did_anything:
