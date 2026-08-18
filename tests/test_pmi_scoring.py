@@ -149,8 +149,9 @@ class TestCellCoherenceEquivalence:
             gids = np.flatnonzero(M[c] != 0).astype(np.int64)
             # compute_cell_coherence uses the informative-edges denominator
             # (rst = tau) by default, so the reference must use the same rst.
-            # (stitching.coherence defaults rst=0 = all-pairs for merge/deltaC;
-            # here we pin it to tau to compare like-for-like.)
+            # (stitching.coherence now defaults real_signal_threshold=None → rst=threshold
+            # = informative edges; we pass real_signal_threshold=tau explicitly here to be
+            # unambiguous and like-for-like with compute_cell_coherence.)
             C_ref, p_ref, q_ref = coherence(
                 gids, W, mode="count", threshold=tau, metric=metric,
                 real_signal_threshold=tau)

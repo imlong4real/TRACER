@@ -1647,10 +1647,13 @@ def reassign_unassigned_grid_pool(
     # assigned entity encountered in their Moore neighborhood — proximity
     # only, no PMI/veto. The PMI-gated rescue excludes them (they can never
     # clear it), so without this they are discarded at Finalize.
-    # ASSUMES control/blank probes (Xenium NegControl*/Unassigned*/BLANK/
-    # antisense/Deprecated codewords) are pre-filtered from the input — they
-    # are also panel-absent and would otherwise be proximity-assigned into
-    # cells. Filter them at ingest before enabling this.
+    # SAFETY: control/blank/deprecated probes whose name matches
+    # NONGENE_FEATURE_PREFIXES (Xenium NegControl*/Unassigned*/BLANK/
+    # antisense/DeprecatedCodeword/Intergenic/Control) are automatically
+    # excluded from this off-panel proximity rescue — they are also
+    # panel-absent but are never assigned into cells (see valid_u below).
+    # The only residual recommendation is that any control probe whose name
+    # does NOT match those prefixes should still be pre-filtered at ingest.
     offpanel_first_entity: bool = False,
     pos_npmi_threshold=None,  # deprecated; ignored. Kept for back-compat.
 ) -> tuple[pd.DataFrame, int, dict]:

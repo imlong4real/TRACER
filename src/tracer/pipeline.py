@@ -1597,10 +1597,13 @@ def run_segmented_pipeline(df: pd.DataFrame,
 
     Returns
     -------
-    df_final : DataFrame with ``stitched`` column carrying the final per-tx label.
+    df_final : DataFrame with a ``tracer_id`` column carrying the final per-tx
+        label (the legacy ``stitched`` column has been dropped / canonicalized
+        to ``tracer_id``).
     stage_progression : list of state dicts, one per stage.
     """
     cfg = _resolve_pipeline_cfg(cfg)
+    _set_admit_independent(True)  # reset toggle at entry: never inherit a leaked flag from a prior failed run (Copilot review)
     _input_cell_id = pd.Series(
         df["cell_id"].astype(str).to_numpy(),
         index=df["transcript_id"].to_numpy(),
@@ -2004,6 +2007,7 @@ def run_noseg_pipeline(df: pd.DataFrame, npmi_panel: pd.DataFrame,
         to preserve today's behavior bit-exactly.
     """
     cfg = _resolve_pipeline_cfg(cfg)
+    _set_admit_independent(True)  # reset toggle at entry: never inherit a leaked flag from a prior failed run (Copilot review)
     df = df.copy()
     _input_cell_id = pd.Series(
         df["cell_id"].astype(str).to_numpy() if "cell_id" in df.columns
