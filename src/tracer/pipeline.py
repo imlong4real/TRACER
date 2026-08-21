@@ -25,7 +25,7 @@ from tracer.pruning import prune_transcripts_fast, prune_genes_by_pmi_greedy
 from tracer.spatial import (
     annotate_unassigned_components_fast,
     enforce_spatial_coherence_fast,
-    pre_stage2_rescue,
+    guarded_rescue,
     reassign_unassigned_grid_pool,
     demote_small_entities,
     finalize_unassigned,
@@ -224,6 +224,11 @@ def _phase1_rerank_within_parent_etype(df_in: pd.DataFrame, *,
         ).append(i)
 
     stats = {"n_parents_reranked": 0, "n_tx_relabeled": 0}
+    # Accumulate _etype relabels across ALL parents, applied once after the loop
+    # (the old per-parent `df.loc[mask, "_etype"]=...` was a full-column
+    # categorical setitem per reranked parent → O(n_parents × n_tx)).
+    all_to_cell: list[int] = []
+    all_to_partial: list[int] = []
 
     for parent, depth1_map in parent_to_depth1_rows.items():
         if len(depth1_map) < 2:
@@ -276,8 +281,6 @@ def _phase1_rerank_within_parent_etype(df_in: pd.DataFrame, *,
                 sub_rename[(d1, old_d2j)] = new_idx
 
         all_rows = [r for rows in depth1_map.values() for r in rows]
-        rows_to_cell: list[int] = []
-        rows_to_partial: list[int] = []
         for r in all_rows:
             suffix_idx = _suffix_indices(str(labels[r]), parent)
             assert suffix_idx is not None
@@ -286,27 +289,27 @@ def _phase1_rerank_within_parent_etype(df_in: pd.DataFrame, *,
             if len(suffix_idx) < 2:
                 labels[r] = new_d1
                 if new_d1 == parent:
-                    rows_to_cell.append(r)
+                    all_to_cell.append(r)
                 else:
-                    rows_to_partial.append(r)
+                    all_to_partial.append(r)
             else:
                 new_d2 = sub_rename[(old_d1, suffix_idx[1])]
                 labels[r] = f"{new_d1}-{new_d2}"
                 # sub-partial keeps its existing "partial" etype
 
-        if has_etype:
-            if rows_to_cell:
-                mask = np.zeros(len(df_out), dtype=bool)
-                mask[rows_to_cell] = True
-                df_out.loc[mask, "_etype"] = "cell"
-            if rows_to_partial:
-                mask = np.zeros(len(df_out), dtype=bool)
-                mask[rows_to_partial] = True
-                df_out.loc[mask, "_etype"] = "partial"
-
         stats["n_parents_reranked"] += 1
         stats["n_tx_relabeled"] += len(all_rows)
 
+    # Apply all _etype changes in ONE positional pass. Row sets are globally
+    # disjoint (each tx belongs to one parent and is relabeled to cell OR
+    # partial at most once), so this is bit-identical to the per-parent
+    # masked assignment it replaces.
+    if has_etype:
+        _etype_pos = df_out.columns.get_loc("_etype")
+        if all_to_cell:
+            df_out.iloc[all_to_cell, _etype_pos] = "cell"
+        if all_to_partial:
+            df_out.iloc[all_to_partial, _etype_pos] = "partial"
     df_out[entity_col] = labels
     return df_out, stats
 
@@ -368,6 +371,12 @@ def _spatial_split_phase1_entities(df_in: pd.DataFrame, *,
         "tx_demoted_singletons": 0,
         "tx_total_relabelled": 0,
     }
+    # Accumulate _etype relabels across ALL split entities, applied once after
+    # the loop (the old per-entity `df.loc[mask, "_etype"]=...` was a full-column
+    # categorical setitem + len(df) bool-mask alloc per split entity →
+    # O(n_split × n_tx)).
+    all_to_unknown: list[np.ndarray] = []
+    all_to_partial: list[np.ndarray] = []
 
     for ent, group in df_out.groupby(entity_col, sort=False):
         if ent == unassigned_id or ent == "UNASSIGNED" or ent.startswith("UNASSIGNED_"):
@@ -406,16 +415,12 @@ def _spatial_split_phase1_entities(df_in: pd.DataFrame, *,
         groups_rows.sort(key=lambda a: -len(a))
         stats["entities_split"] += 1
 
-        # Collect (rows, new_etype) updates per parent for batched _etype write.
-        rows_to_unknown_local: list[np.ndarray] = []
-        rows_to_partial_local: list[np.ndarray] = []
-
         for k, gr in enumerate(groups_rows):
             sz = len(gr)
             if sz < min_size:
                 out_labels[gr] = unassigned_id
                 stats["tx_demoted_singletons"] += sz
-                rows_to_unknown_local.append(gr)
+                all_to_unknown.append(gr)
                 continue
             if k == 0:
                 continue  # largest keeps original label (and its existing _etype)
@@ -434,21 +439,17 @@ def _spatial_split_phase1_entities(df_in: pd.DataFrame, *,
             # the parent was a main (depth-1 partial emitted) or a partial
             # (sub-partial emitted) — per the design, sub-partials are
             # "partial" flat.
-            rows_to_partial_local.append(gr)
+            all_to_partial.append(gr)
 
-        # Apply _etype updates for this parent
-        if "_etype" in df_out.columns:
-            if rows_to_unknown_local:
-                rows_concat = np.concatenate(rows_to_unknown_local)
-                mask = np.zeros(len(df_out), dtype=bool)
-                mask[rows_concat] = True
-                df_out.loc[mask, "_etype"] = "unknown"
-            if rows_to_partial_local:
-                rows_concat = np.concatenate(rows_to_partial_local)
-                mask = np.zeros(len(df_out), dtype=bool)
-                mask[rows_concat] = True
-                df_out.loc[mask, "_etype"] = "partial"
-
+    # Apply all _etype changes in ONE positional pass. Row sets are globally
+    # disjoint (each tx belongs to one split entity and one sub-group), so this
+    # is bit-identical to the per-entity masked assignment it replaces.
+    if "_etype" in df_out.columns:
+        _etype_pos = df_out.columns.get_loc("_etype")
+        if all_to_unknown:
+            df_out.iloc[np.concatenate(all_to_unknown), _etype_pos] = "unknown"
+        if all_to_partial:
+            df_out.iloc[np.concatenate(all_to_partial), _etype_pos] = "partial"
     df_out[entity_col] = out_labels
     return df_out, stats
 
@@ -957,7 +958,7 @@ def _qc_demote_low_coherence(df_in: pd.DataFrame, *,
                                threshold: float = 0.05,
                                metric: str = "pmi",
                                unassigned_id: str = "-1",
-                               real_signal_threshold: float = 0.0,
+                               real_signal_threshold: float | None = None,
                                ) -> tuple[pd.DataFrame, dict]:
     """Demote any entity (cell, partial, or component) whose internal
     coherence is below ``min_C``, OR whose distinct-gene count is
@@ -1037,10 +1038,12 @@ def _qc_demote_low_coherence(df_in: pd.DataFrame, *,
     # uses the "real players" denominator (only pairs with |W| above
     # the noise floor count) — making C panel-shape-agnostic across
     # dense (legacy) and sparse (bootstrap, Visium HD) W matrices.
+    # Informative-edges denominator by default (rst = tau) so the coherence
+    # floor is panel-shape-agnostic (purity+conflict=1 over informative pairs).
+    rst = float(threshold) if real_signal_threshold is None else float(real_signal_threshold)
     from tracer._cy_prune import coherence_count_per_entity_batch
     C_arr, _P_arr, _N_arr = coherence_count_per_entity_batch(
-        offsets, flat_genes, W, float(threshold),
-        float(real_signal_threshold),
+        offsets, flat_genes, W, float(threshold), rst,
     )
 
     # Decide demotion per entity
@@ -1051,6 +1054,89 @@ def _qc_demote_low_coherence(df_in: pd.DataFrame, *,
     bad_low = (~bad_few) & (C_arr <= min_C)
 
     bad_set = set(entity_ids[bad_few | bad_low].tolist())
+
+    # Option A — coherence-triggered sibling promotion. When a failing MAIN
+    # `cell` has a surviving (floor-clearing) sibling from the SAME Phase-1
+    # family, promote that sibling to the main's label instead of orphaning
+    # the whole nucleus. Families are keyed by the tracer_id LABEL structure
+    # ({C} main / {C}-{k} partial), NOT the cell_id column — cell_id drifts
+    # from the label after transcript reassignment, so grouping by it would
+    # match entities across nuclei and mislabel the promoted cell.
+    promotions: dict[str, str] = {}   # sibling label -> failed main's label
+    if bad_set and "cell_id" in df_out.columns:
+        ent_C = {str(e): float(c) for e, c in zip(entity_ids, C_arr)}
+        gb = df_out.groupby(entity_col, sort=False)
+        # Vectorized mode of cell_id per entity (was a per-group Python lambda
+        # calling .mode() over ~150k groups). Count (entity, cell_id) pairs and
+        # per entity take the max-count cell_id, ties broken by the smallest
+        # cell_id — bit-identical to pandas `mode().iat[0]` (mode returns values
+        # sorted ascending, so iat[0] is the smallest among the ties).
+        _cc = pd.DataFrame({
+            "_e": df_out[entity_col].astype(str).to_numpy(),
+            "_cid": df_out["cell_id"].astype(str).to_numpy(),
+        })
+        _mode = (
+            _cc.groupby(["_e", "_cid"], sort=False).size().reset_index(name="_n")
+               .sort_values(["_e", "_n", "_cid"], ascending=[True, False, True],
+                            kind="stable")
+               .drop_duplicates("_e", keep="first")
+               .set_index("_e")["_cid"]
+        )
+        # Reindex to first-appearance order (what `groupby(sort=False)` yields),
+        # so the ent_cid iteration order — and hence the order fam_to_ents lists
+        # are built, which decides max(sibs, key=(size, C)) ties — is bit-
+        # identical to the old per-group agg.
+        _order = pd.unique(df_out[entity_col].astype(str))
+        ent_cid = _mode.reindex(_order).to_dict()
+        ent_etype = (gb["_etype"].first().astype(str).to_dict()
+                     if "_etype" in df_out.columns else {})
+        ent_size = {str(e): int(n) for e, n in gb.size().items()}  # tx per entity
+
+        def _family(label: str) -> str | None:
+            """Parent cell_id C if `label` is C (main) or C-{k...} (partial),
+            using the entity's own cell_id to strip the suffix (cell_ids may
+            themselves contain dashes). None if the label doesn't structurally
+            match its cell_id — i.e. a reassigned/relabeled entity."""
+            cid = ent_cid.get(label)
+            if cid is None:
+                return None
+            if label == cid:
+                return cid
+            if label.startswith(cid + "-"):
+                suf = label[len(cid) + 1:]
+                if suf and all(p.isdigit() for p in suf.split("-")):
+                    return cid
+            return None
+
+        fam_to_ents: dict[str, list[str]] = {}
+        ent_fam: dict[str, str | None] = {}
+        for e in ent_cid:
+            f = _family(e)
+            ent_fam[e] = f
+            if f is not None:
+                fam_to_ents.setdefault(f, []).append(e)
+        for M in bad_set:
+            if ent_etype.get(M) != "cell":
+                continue   # only rescue a failing main cell
+            fam = ent_fam.get(M)
+            if fam is None:
+                continue   # drifted/relabeled main: no clean Phase-1 family
+            sibs = [s for s in fam_to_ents.get(fam, [])
+                    if s != M and s not in bad_set and s not in promotions
+                    and ent_etype.get(s) in ("cell", "partial")]
+            if sibs:
+                # Floor is the quality GATE (already applied via `s not in
+                # bad_set`). Among survivors pick the LARGEST by tx count —
+                # count-coherence is inflated at small tx counts, so it's a
+                # poor selector, and the promoted main should carry the
+                # nucleus's mass (and act as the rescue sink for the released
+                # tx). Coherence only breaks size ties.
+                promotions[max(
+                    sibs,
+                    key=lambda s: (ent_size.get(s, 0), ent_C.get(s, -1e18)),
+                )] = M
+
+    # Release failing entities' original tx to unassigned first...
     n_demoted = 0
     if bad_set:
         mask = df_out[entity_col].isin(bad_set)
@@ -1059,15 +1145,41 @@ def _qc_demote_low_coherence(df_in: pd.DataFrame, *,
         if "_etype" in df_out.columns:
             df_out.loc[mask, "_etype"] = "unknown"
 
+    # ...then promote surviving siblings into the now-freed main labels.
+    # Vectorized: a single `.map` over the label column, instead of a full-
+    # column string `==` per promotion (the old loop was O(n_promotions × n_tx)
+    # object comparisons — the dominant Mid-QC cost at scale). The sib→main map
+    # is 1:1 with disjoint keys and values (a sib is never itself a target, and
+    # each freed main gets exactly one sib), so one masked assignment is
+    # bit-identical to applying the promotions one at a time.
+    if promotions:
+        mapped = df_out[entity_col].map(promotions)   # sib→main, NaN elsewhere
+        pmask = mapped.notna().to_numpy()
+        if pmask.any():
+            col = df_out[entity_col]
+            if isinstance(col.dtype, pd.CategoricalDtype):
+                new_cats = set(mapped[pmask].unique()) - set(col.cat.categories)
+                if new_cats:
+                    df_out[entity_col] = col.cat.add_categories(sorted(new_cats))
+            df_out.loc[pmask, entity_col] = mapped[pmask].to_numpy()
+            if "_etype" in df_out.columns:
+                df_out.loc[pmask, "_etype"] = "cell"
+
     return df_out, {
         "entities_examined": int(entity_ids.size),
         "entities_demoted_low_C": int(bad_low.sum()),
         "entities_demoted_few_genes": int(bad_few.sum()),
         "tx_demoted": n_demoted,
+        "entities_promoted": len(promotions),
     }
 
 
-NUCLEAR_ONLY_ADMIT = True   # restrict 1b/1c to nuclear tx; cyto via Rescue
+# Fallback cells (<3 nuclear genes → whole-cell seed) are exempted from the
+# nuclear-only restriction: they admit whole-cell tx in 1b/1c. Without this,
+# a thin nucleus whose 1-2 nuclear reads don't fit the whole-cell seed dies
+# even when its local program is perfectly coherent (~726 recoverable cells,
+# 0 lost, on the pdac cPMI ROI). Only coherence-floor-failing seeds still die.
+FALLBACK_WHOLE_CELL_ADMIT = True
 # 2026-05-13: RESCUE_NEG_THR paired with PMI_THR (both 0.2 in PMI scale).
 # Symmetric ± 0.2 dead zone around chance.
 RESCUE_NEG_THR = -0.2
@@ -1159,7 +1271,7 @@ MID_QC_C_FLOOR: float = 0.05
 #         that actually carry information. Required for sparse
 #         bootstrap / Visium HD panels where most off-diagonal cells
 #         are implicit zero rather than NaN.
-REAL_SIGNAL_THRESHOLD: float = 0.05
+REAL_SIGNAL_THRESHOLD: float = 0.2  # unified to τ (=PMI_THR) 2026-08-16
 # Percentile of real-signal PMIs used in the Rescue mean/hybrid veto.
 # 50 = median. <50 = stricter (more pairs must clear mean_threshold).
 # >50 = liberal (tolerates a long left tail of weak/negative pairs).
@@ -1334,6 +1446,44 @@ def _record_stage(progression: list, stage_name: str, df: pd.DataFrame, col: str
         )
 
 
+def _set_admit_independent(flag: bool) -> None:
+    """Set the `_cy_prune` admit-independent toggle for the NEXT rescue stage.
+    When ``flag`` is False, rescue candidates whose real-signal PMI array vs the
+    target entity is empty (no ``|PMI| > real_signal_threshold`` edge to any
+    entity gene) are VETOED instead of defer-admitted. Restore to True after the
+    stage so Prune / other stages keep legacy behavior. Graceful no-op on a
+    ``.so`` built before the toggle existed."""
+    try:
+        from tracer._cy_prune import set_admit_independent
+        set_admit_independent(1 if flag else 0)
+    except Exception:
+        pass
+
+
+# Intentionally a superset of the finalize sentinel: adds `__GUARD_SKIP__`
+# (`prune_rejected` is already collapsed to `UNASSIGNED` by
+# `finalize_unassigned`, which runs before this helper).
+_OUTPUT_UNASSIGNED_TOKENS = frozenset(
+    {"UNASSIGNED", "-1", "nan", "DROP", "group_rejected",
+     "demote_rejected", "__GUARD_SKIP__"}
+)
+
+
+def _canonicalize_output(df, input_cell_id, *,
+                         entity_col="stitched", txid_col="transcript_id"):
+    """tracer_id <- final entity label (unassigned tokens -> '-1', exact match
+    so UNASSIGNED_<n> components are preserved); drop entity_col; restore
+    pristine cell_id from input_cell_id (Series indexed by transcript_id).
+    Identity only — type lives in _etype."""
+    df = df.copy()
+    final = df[entity_col].astype(str).to_numpy()
+    is_un = np.isin(final, list(_OUTPUT_UNASSIGNED_TOKENS))
+    df["tracer_id"] = np.where(is_un, "-1", final)
+    df = df.drop(columns=[entity_col])
+    df["cell_id"] = df[txid_col].map(input_cell_id)
+    return df
+
+
 def _grid_3d_graph_fn(df_in, *, k=None, dist_threshold=None,
                       coord_cols=("x", "y", "z"),
                       G_z=2.0, z_neighborhood_depth=1):
@@ -1447,10 +1597,19 @@ def run_segmented_pipeline(df: pd.DataFrame,
 
     Returns
     -------
-    df_final : DataFrame with ``stitched`` column carrying the final per-tx label.
+    df_final : DataFrame with a ``tracer_id`` column carrying the final per-tx
+        label (the legacy ``stitched`` column has been dropped / canonicalized
+        to ``tracer_id``).
     stage_progression : list of state dicts, one per stage.
     """
     cfg = _resolve_pipeline_cfg(cfg)
+    _set_admit_independent(True)  # reset toggle at entry: never inherit a leaked flag from a prior failed run (Copilot review)
+    _input_cell_id = pd.Series(
+        df["cell_id"].astype(str).to_numpy(),
+        index=df["transcript_id"].to_numpy(),
+    )
+    if not _input_cell_id.index.is_unique:
+        raise ValueError("transcript_id must be unique to restore pristine cell_id")
     progression: list[dict[str, Any]] = []
     _record_stage(progression, "input", df.assign(_lbl=df["cell_id"].astype(str)), "_lbl")
 
@@ -1489,6 +1648,7 @@ def run_segmented_pipeline(df: pd.DataFrame,
     _p1_agg_pct = getattr(_p1, "aggregator_percentile", 25.0) if _p1 is not None else 25.0
     _p1_rs_thr = getattr(_p1, "real_signal_threshold", 0.05) if _p1 is not None else 0.05
     _p1_neg_thr = getattr(_p1, "neg_npmi_threshold", -0.2) if _p1 is not None else -0.2
+    _set_admit_independent(getattr(_p1, "admit_independent", True) if _p1 is not None else True)
     if "overlaps_nucleus" in df.columns:
         df_pruned, aux = prune_transcripts_nuclear_seed(
             df, npmi_panel,
@@ -1498,7 +1658,8 @@ def run_segmented_pipeline(df: pd.DataFrame,
             metric_col=metric_col, nan_fill=0.0,
             min_nuclear_genes=3,
             seed_coherence_floor=SEED_COHERENCE_FLOOR,
-            nuclear_only_admit=NUCLEAR_ONLY_ADMIT,
+            nuclear_only_admit=cfg.phase1.nuclear_only_admit,
+            fallback_whole_cell_admit=FALLBACK_WHOLE_CELL_ADMIT,
             tx_weighted=TX_WEIGHTED_PRUNE,
             veto_mode=_p1_veto_mode,
             mean_admit_threshold=_p1_mean_admit,
@@ -1516,6 +1677,7 @@ def run_segmented_pipeline(df: pd.DataFrame,
             metric_col=metric_col, nan_fill=0.0,
             n_jobs=-1, show_progress=False,
         )
+    _set_admit_independent(True)
     _record_stage(progression, "Prune", df_pruned, "tracer_id")
 
     # Phase-1 post-1c nuclear reassignment (opt-in). Closes Gap B:
@@ -1616,8 +1778,9 @@ def run_segmented_pipeline(df: pd.DataFrame,
     # residual into orphan UNASSIGNED_* components.
     df_rescued = df_pruned
     n_rescued = 0
+    _set_admit_independent(cfg.rescue.admit_independent)
     for _pass in range(cfg.rescue.max_passes):
-        df_rescued, n_pass_rescued, _, _ = pre_stage2_rescue(
+        df_rescued, n_pass_rescued, _, _ = guarded_rescue(
             df_rescued, aux=aux,
             entity_col="tracer_id", gene_col="feature_name",
             coord_cols=("x", "y", "z"), out_col="tracer_id",
@@ -1636,10 +1799,12 @@ def run_segmented_pipeline(df: pd.DataFrame,
             witness_cap=cfg.rescue.witness_cap,
             witness_small_component_cap_divisor=cfg.rescue.witness_small_component_cap_divisor,
             witness_tiebreak=cfg.rescue.witness_tiebreak,
+            offpanel_first_entity=cfg.rescue.offpanel_first_entity,
         )
         n_rescued += n_pass_rescued
         if n_pass_rescued == 0:
             break
+    _set_admit_independent(True)
     _record_stage(progression, "Rescue", df_rescued, "tracer_id")
 
     if PHASE1_SEG_RESIDUAL_CASCADE:
@@ -1681,7 +1846,9 @@ def run_segmented_pipeline(df: pd.DataFrame,
             df_grouped, entity_col="tracer_id", aux=aux,
             min_C=float(MID_QC_C_FLOOR), min_n_genes=2,
             threshold=PMI_THR, metric="pmi", unassigned_id="-1",
-            real_signal_threshold=REAL_SIGNAL_THRESHOLD,
+            # rst defaults to threshold (tau): informative-edges denominator,
+            # panel-shape-agnostic. Now unified with the Rescue veto's
+            # REAL_SIGNAL_THRESHOLD (also τ) — rst=τ everywhere (2026-08-16).
         )
         mid_did_anything = True
     if mid_did_anything:
@@ -1691,8 +1858,9 @@ def run_segmented_pipeline(df: pd.DataFrame,
     # Phase-1 entities AND Group components — closing the gap where
     # Group's UNASSIGNED_* couldn't be Rescue targets in the main pass.
     if cfg.rescue.post_group_passes > 0:
+        _set_admit_independent(cfg.rescue.admit_independent)
         for _pass in range(cfg.rescue.post_group_passes):
-            df_grouped, n_pass_rescued, _, _ = pre_stage2_rescue(
+            df_grouped, n_pass_rescued, _, _ = guarded_rescue(
                 df_grouped, aux=aux,
                 entity_col="tracer_id", gene_col="feature_name",
                 coord_cols=("x", "y", "z"), out_col="tracer_id",
@@ -1711,9 +1879,11 @@ def run_segmented_pipeline(df: pd.DataFrame,
                 witness_cap=cfg.rescue.witness_cap,
                 witness_small_component_cap_divisor=cfg.rescue.witness_small_component_cap_divisor,
                 witness_tiebreak=cfg.rescue.witness_tiebreak,
+                offpanel_first_entity=cfg.rescue.offpanel_first_entity,
             )
             if n_pass_rescued == 0:
                 break
+        _set_admit_independent(True)
         _record_stage(progression, "Post-Group Rescue", df_grouped, "tracer_id")
 
     # Stitch — symmetric kwargs with NOSEG path (close-edges guard removed
@@ -1760,6 +1930,7 @@ def run_segmented_pipeline(df: pd.DataFrame,
     #   (a) hard ceiling at cfg.final_rescue.max_passes
     #   (b) convergence gate at early_exit_admit_ratio (if > 0): break
     #       when a pass admits fewer than ratio * pre-pass-pool tx.
+    _set_admit_independent(cfg.final_rescue.admit_independent)
     for _pass in range(cfg.final_rescue.max_passes):
         df_stitched, n_reassigned, stats = reassign_unassigned_grid_pool(
             df_stitched, aux=aux,
@@ -1780,6 +1951,7 @@ def run_segmented_pipeline(df: pd.DataFrame,
             witness_cap=cfg.final_rescue.witness_cap,
             witness_small_component_cap_divisor=cfg.final_rescue.witness_small_component_cap_divisor,
             witness_tiebreak=cfg.final_rescue.witness_tiebreak,
+            offpanel_first_entity=cfg.final_rescue.offpanel_first_entity,
         )
         if n_reassigned == 0:
             break
@@ -1790,6 +1962,7 @@ def run_segmented_pipeline(df: pd.DataFrame,
                 and (n_reassigned / n_un_before
                      < cfg.final_rescue.early_exit_admit_ratio)):
             break
+    _set_admit_independent(True)
     _record_stage(progression, "Final Rescue", df_stitched, "stitched")
 
     # Finalize: collapse all stage-rejected / sentinel labels in the
@@ -1802,6 +1975,8 @@ def run_segmented_pipeline(df: pd.DataFrame,
     # `unassigned_qc_status` column emitted by Group.
     finalize_unassigned(df_stitched, col="stitched")
     _record_stage(progression, "Finalize", df_stitched, "stitched")
+
+    df_stitched = _canonicalize_output(df_stitched, _input_cell_id)
 
     return df_stitched, progression
 
@@ -1832,7 +2007,15 @@ def run_noseg_pipeline(df: pd.DataFrame, npmi_panel: pd.DataFrame,
         to preserve today's behavior bit-exactly.
     """
     cfg = _resolve_pipeline_cfg(cfg)
+    _set_admit_independent(True)  # reset toggle at entry: never inherit a leaked flag from a prior failed run (Copilot review)
     df = df.copy()
+    _input_cell_id = pd.Series(
+        df["cell_id"].astype(str).to_numpy() if "cell_id" in df.columns
+        else np.full(len(df), "-1"),
+        index=df["transcript_id"].to_numpy(),
+    )
+    if not _input_cell_id.index.is_unique:
+        raise ValueError("transcript_id must be unique to restore pristine cell_id")
     if "z" not in df.columns:
         df["z"] = 0.0
     df["cell_id"] = "-1"
@@ -1902,7 +2085,9 @@ def run_noseg_pipeline(df: pd.DataFrame, npmi_panel: pd.DataFrame,
             df_grouped, entity_col="tracer_id", aux=aux,
             min_C=float(MID_QC_C_FLOOR), min_n_genes=2,
             threshold=PMI_THR, metric="pmi", unassigned_id="-1",
-            real_signal_threshold=REAL_SIGNAL_THRESHOLD,
+            # rst defaults to threshold (tau): informative-edges denominator,
+            # panel-shape-agnostic. Now unified with the Rescue veto's
+            # REAL_SIGNAL_THRESHOLD (also τ) — rst=τ everywhere (2026-08-16).
         )
         mid_did_anything = True
     if mid_did_anything:
@@ -1910,8 +2095,9 @@ def run_noseg_pipeline(df: pd.DataFrame, npmi_panel: pd.DataFrame,
 
     # Post-Group Rescue (opt-in) — see segmented runner for rationale.
     if cfg.rescue.post_group_passes > 0:
+        _set_admit_independent(cfg.rescue.admit_independent)
         for _pass in range(cfg.rescue.post_group_passes):
-            df_grouped, n_pass_rescued, _, _ = pre_stage2_rescue(
+            df_grouped, n_pass_rescued, _, _ = guarded_rescue(
                 df_grouped, aux=aux,
                 entity_col="tracer_id", gene_col="feature_name",
                 coord_cols=("x", "y", "z"), out_col="tracer_id",
@@ -1930,9 +2116,11 @@ def run_noseg_pipeline(df: pd.DataFrame, npmi_panel: pd.DataFrame,
                 witness_cap=cfg.rescue.witness_cap,
                 witness_small_component_cap_divisor=cfg.rescue.witness_small_component_cap_divisor,
                 witness_tiebreak=cfg.rescue.witness_tiebreak,
+                offpanel_first_entity=cfg.rescue.offpanel_first_entity,
             )
             if n_pass_rescued == 0:
                 break
+        _set_admit_independent(True)
         _record_stage(progression, "Post-Group Rescue", df_grouped, "tracer_id")
 
     # Stitch — entity_col reads `tracer_id` directly (was aliased as
@@ -1975,6 +2163,7 @@ def run_noseg_pipeline(df: pd.DataFrame, npmi_panel: pd.DataFrame,
     #   (a) hard ceiling at cfg.final_rescue.max_passes
     #   (b) convergence gate at early_exit_admit_ratio (if > 0): break
     #       when a pass admits fewer than ratio * pre-pass-pool tx.
+    _set_admit_independent(cfg.final_rescue.admit_independent)
     for _pass in range(cfg.final_rescue.max_passes):
         df_stitched, n_reassigned, stats = reassign_unassigned_grid_pool(
             df_stitched, aux=aux,
@@ -1995,6 +2184,7 @@ def run_noseg_pipeline(df: pd.DataFrame, npmi_panel: pd.DataFrame,
             witness_cap=cfg.final_rescue.witness_cap,
             witness_small_component_cap_divisor=cfg.final_rescue.witness_small_component_cap_divisor,
             witness_tiebreak=cfg.final_rescue.witness_tiebreak,
+            offpanel_first_entity=cfg.final_rescue.offpanel_first_entity,
         )
         if n_reassigned == 0:
             break
@@ -2005,11 +2195,14 @@ def run_noseg_pipeline(df: pd.DataFrame, npmi_panel: pd.DataFrame,
                 and (n_reassigned / n_un_before
                      < cfg.final_rescue.early_exit_admit_ratio)):
             break
+    _set_admit_independent(True)
     _record_stage(progression, "Final Rescue", df_stitched, "stitched")
 
     # Finalize unassigned-class labels → "DROP" (see segmented runner
     # for full rationale).
     finalize_unassigned(df_stitched, col="stitched")
     _record_stage(progression, "Finalize", df_stitched, "stitched")
+
+    df_stitched = _canonicalize_output(df_stitched, _input_cell_id)
 
     return df_stitched, progression

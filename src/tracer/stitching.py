@@ -443,6 +443,7 @@ def coherence(
     mode: str = "count",
     threshold: float = 0.05,
     metric: str = "npmi",
+    real_signal_threshold: float | None = None,
 ) -> tuple[float, float, float]:
     """Unified coherence — returns ``(C, purity, conflict)``.
 
@@ -501,9 +502,18 @@ def coherence(
             "Use metric='pmi' with mode='count' instead."
         )
 
-    # Fast path: count-mode + dense float32 W → Cython kernel.
+    # Informative-edges denominator: count-mode pairs with |w| <= rst are
+    # excluded from BOTH numerator and denominator (so purity + conflict == 1
+    # over informative edges), matching metrics.compute_cell_coherence / Mid-QC.
+    # rst defaults to ``threshold`` (= τ) 2026-08-16 with the rst=τ unification —
+    # every coherence caller (Stitch/ΔC included) now uses the informative-edges
+    # denominator unless it passes an explicit rst. Pass real_signal_threshold=0.0
+    # for the legacy all-pairs denominator (Cython fast path, taken when rst<=0).
+    rst = float(threshold) if real_signal_threshold is None else float(real_signal_threshold)
+
+    # Fast path: count-mode (all-pairs) + dense float32 W → Cython kernel.
     # ~5-10× per-call speedup vs numpy at ROI/full scale.
-    if mode == "count":
+    if mode == "count" and rst <= 0.0:
         try:
             import scipy.sparse as _sp
             if not _sp.issparse(npmi_mat) and isinstance(npmi_mat, np.ndarray) \
@@ -526,8 +536,18 @@ def coherence(
         return 0.0, 0.0, 0.0
 
     if mode == "count":
-        purity = float(np.sum(vals > threshold)) / P
-        conflict = float(np.sum(vals < -threshold)) / P
+        if rst > 0.0:
+            # informative edges only: |w| > rst in BOTH numerator and denominator
+            real = np.abs(vals) > rst
+            denom = int(real.sum())
+            if denom == 0:
+                return 0.0, 0.0, 0.0
+            rvals = vals[real]
+            purity = float(np.sum(rvals > threshold)) / denom
+            conflict = float(np.sum(rvals < -threshold)) / denom
+        else:
+            purity = float(np.sum(vals > threshold)) / P
+            conflict = float(np.sum(vals < -threshold)) / P
     else:  # magnitude
         denom = float(np.sum(np.abs(vals)))
         if denom == 0.0:
@@ -1020,6 +1040,18 @@ def stitch_entities_hierarchical(
     # is shared with the eager path. See `_stitch_entities_hierarchical_decomposable`
     # docstring for the algorithm rationale + bit-match expectation.
     npmi_mat = aux["W"]
+    # Densify the (small, gene×gene) panel ONCE so each per-candidate coherence()
+    # call takes the dense fast path instead of rebuilding a sparse CSR submatrix
+    # (scipy fancy-indexing — _major/_minor_index_fancy + csr __init__ — dominated
+    # Stitch: ~550k calls). Symmetrize `W + W.T` to match _slice_pmi_submatrix's
+    # sparse branch, which returns `sub + sub.T` on the upper-triangle-only
+    # bootstrap W (exactly one of (a,b)/(b,a) is nonzero → no doubling), so the
+    # per-candidate dense slice is value-identical → bit-identical coherence.
+    import scipy.sparse as _sp
+    if _sp.issparse(npmi_mat):
+        npmi_mat = np.ascontiguousarray(
+            (npmi_mat + npmi_mat.T).toarray(), dtype=np.float32
+        )
     gene_to_idx = aux["gene_to_idx"]
     housekeeping_mask = aux.get("housekeeping_mask")
 

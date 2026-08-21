@@ -1,6 +1,6 @@
 {
-  "ami_vs_truth": NaN,
-  "ari_vs_truth": NaN,
+  "ami_vs_truth": 0.7881,
+  "ari_vs_truth": 0.6504,
   "coverage_pct": 42.5,
   "n_cells": 0,
   "n_components": 0,

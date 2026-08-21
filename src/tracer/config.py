@@ -75,15 +75,33 @@ class Phase1Config:
     pmi_threshold: float = 0.2
     seed_coherence_floor: float = 0.10
     tx_weighted_prune: bool = True
-    nuclear_only_admit: bool = True
+    # 2026-08-17: default flipped True->False — admit cytoplasm at Prune
+    # rather than deferring cytoplasmic tx to Rescue (see defaults.toml).
+    nuclear_only_admit: bool = False
 
     # 1b admission gate (mirrors RescueConfig's veto knobs)
     veto_mode: Literal["min", "mean", "hybrid"] = "hybrid"
     mean_admit_threshold: float = 0.2
     min_admit_threshold: float = 0.0
     aggregator_percentile: float = 25.0
-    real_signal_threshold: float = 0.05
+    real_signal_threshold: float = 0.2
     neg_npmi_threshold: float = -0.2
+
+    # When False, Phase-1b/1c veto a candidate whose real-signal PMI array vs
+    # the (sub)seed is EMPTY (independent/orthogonal of the seed) instead of
+    # defer-admitting it. For a collapsed 1-gene seed (doublet nucleus) the lone
+    # seed gene is orthogonal to most genes, so the default (True) defer-admits
+    # both anti-correlated programs into the main → negative doublet blob. Set
+    # False to admit only seed-correlated genes → main = one clean program, the
+    # second program falls to the rest-pile and 1c carves it as a partial
+    # (splits the doublet). Trades Prune-stage coverage (recovered by Rescue)
+    # for far fewer Mid-QC demotions. Wired via the _cy_prune module toggle set
+    # around the Prune stage in the pipeline. 2026-08-17: default flipped
+    # True->False. The −8% over-demotion on standard panels (PDAC ROI) only
+    # appears under nuclear_only_admit=True; paired with the new
+    # nuclear_only_admit=False default that penalty vanishes (see defaults.toml),
+    # while dense / high-plex panels (Xenium 5k) gain the doublet split.
+    admit_independent: bool = False
 
     # ------------------------------------------------------------------
     # Phase-1-time Mahalanobis-gated remerge (opt-in).
@@ -257,8 +275,8 @@ class RescueConfig:
     aggregator_percentile: float = 25.0
     # Real-players gate (cross-cutting, but Rescue-overridable). Pairs
     # with |PMI| ≤ this contribute neither to mean nor to count gates.
-    # Default 0.05 matches the cross-cutting REAL_SIGNAL_THRESHOLD.
-    real_signal_threshold: float = 0.05
+    # Unified to τ (= pmi_threshold 0.2) 2026-08-16 with the rst=τ default flip.
+    real_signal_threshold: float = 0.2
 
     # ------------------------------------------------------------------
     # Rank policy — how a non-vetoed candidate is chosen among the
@@ -292,6 +310,37 @@ class RescueConfig:
     # witness count: "distance" (nearest-tx) or "gene_fit" (highest
     # mean PMI of the orphan gene against the candidate's seed gene set).
     witness_tiebreak: Literal["distance", "gene_fit"] = "gene_fit"
+
+    # Default ON, and it CHANGES OUTPUT relative to the legacy behavior --
+    # this is deliberately not bit-exact. Set False to restore the legacy
+    # partition exactly.
+    #
+    # Assigns unassigned tx whose gene is ABSENT from the PMI panel (e.g.
+    # housekeeping ACTB, which self-eliminates from a PMI panel) to the first
+    # assigned entity in their Moore neighborhood -- proximity only, no PMI.
+    # Without it these zero-signal tx (57% of the residual nuclear-unassigned
+    # pool on the PDAC panel; ACTB alone ~32%) can never be rescued and are
+    # discarded at Finalize. Consumed by every rescue loop. Control/blank
+    # probes are guarded out (``spatial.NONGENE_FEATURE_PREFIXES``), so it is
+    # safe on unfiltered input. Rationale for defaulting ON: recovering
+    # nucleus-interior housekeeping reads is a straightforward, panel-agnostic
+    # win, and leaving them unrescued discards real signal.
+    offpanel_first_entity: bool = True
+
+    # When False, a candidate whose real-signal PMI array against the target
+    # entity is EMPTY (no |PMI| > real_signal_threshold edge to ANY of the
+    # entity's genes) is VETOED instead of defer-admitted. Default True =
+    # legacy (defer-admit such orthogonal genes). Distinct from
+    # ``offpanel_first_entity`` (off-panel, no gene index at all) and from the
+    # percentile branch (which already vetoes strongly ANTI-correlated genes):
+    # this gates ORTHOGONAL / unrelated ON-panel genes only. On a 5k-plex panel
+    # at real_signal_threshold=0.2 the defer fires often, so setting the early
+    # rescues strict (rescue.admit_independent=False) while keeping the final
+    # mop-up permissive (final_rescue.admit_independent=True) trims ~70
+    # genes/cell of coherence-neutral filler (coverage 97->94%) with cell
+    # coherence unchanged. Wired via the _cy_prune module toggle set per rescue
+    # stage in the pipeline.
+    admit_independent: bool = True
 
     # ------------------------------------------------------------------
     # Convergence-aware early exit. After each Rescue pass, compare the

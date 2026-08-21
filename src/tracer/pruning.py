@@ -593,6 +593,7 @@ def prune_transcripts_nuclear_seed(
     skip_phase_1c: bool = False,
     seed_coherence_floor: float = -1e30,
     nuclear_only_admit: bool = False,
+    fallback_whole_cell_admit: bool = False,
     tx_weighted: bool = True,
     veto_mode: str = "mean",
     mean_admit_threshold: float = 0.2,
@@ -767,6 +768,7 @@ def prune_transcripts_nuclear_seed(
             float(aggregator_percentile),
             rs_thr_kernel,
             float(neg_npmi_threshold),
+            1 if fallback_whole_cell_admit else 0,
         )
     else:
         codes = _cy_prune.prune_cells_nuclear_seed(
@@ -786,6 +788,7 @@ def prune_transcripts_nuclear_seed(
             float(aggregator_percentile),
             rs_thr_kernel,
             float(neg_npmi_threshold),
+            1 if fallback_whole_cell_admit else 0,
         )
 
     # Apply codes to out_col. Default state of out_col is the cell_id

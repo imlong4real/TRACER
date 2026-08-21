@@ -9,7 +9,7 @@ sub-programs, not two distinct cells). The ΔC floor protects against
 fusing engulfment doublets where composition rejects strongly.
 
 Canonical cases (DESIGN doc):
-  EMT cell, ΔC = −0.10, D = 0.0    → ACCEPT via rescue
+  EMT cell, ΔC = −0.18, D = 0.0    → ACCEPT via rescue
   jikammne doublet, ΔC = −0.49, D = 0.5  → REJECT (ΔC ≤ floor)
   jiecahje CAF+TAM, ΔC ≪ 0, D = 1.59     → REJECT (ΔC ≤ floor AND D too high)
   Two adjacent M2 macrophages, ΔC = +0.05, D = 2.0 → ACCEPT (ΔC ≥ 0; rescue logic doesn't apply)
@@ -35,7 +35,7 @@ from tracer.stitching import (
 # matrix is +0.6 within either program (block A and block B), and
 # `cross` between cross-program genes. Tunable ΔC:
 #
-#   overlap=0.70, cross=+0.00  → ΔC ≈ -0.065 (in EMT rescue zone)
+#   overlap=0.70, cross=-0.3   → ΔC ≈ -0.18 (in EMT rescue zone)
 #   overlap=0.50, cross=-0.40  → ΔC ≈ -0.426 (below default floor -0.2)
 #   overlap=0.95, cross=+0.30  → ΔC ≈ +0.050 (positive zone)
 # ---------------------------------------------------------------------
@@ -139,12 +139,12 @@ def test_config_floor_must_be_nonpositive():
 # ---------------------------------------------------------------------
 
 def test_emt_concentric_rescue_fires():
-    """Two concentric clouds (D ≈ 0) with overlap=0.70 / cross=0.0 →
-    ΔC ≈ -0.065 (in (-0.2, 0)). Without rescue → split; with rescue
+    """Two concentric clouds (D ≈ 0) with overlap=0.70 / cross=-0.3 →
+    ΔC ≈ -0.18 (in (-0.2, 0)). Without rescue → split; with rescue
     (d=1.0) → merge."""
     rng = np.random.default_rng(0)
     aux, pool_A, pool_B = _build_aux_and_pools(
-        prog_size=10, overlap_frac=0.70, cross=0.0,
+        prog_size=10, overlap_frac=0.70, cross=-0.3,
     )
 
     a = _gauss_entity("a-1-1", 60, center=(0.0, 0.0, 0.0),
@@ -257,7 +257,7 @@ def test_side_by_side_blocked_by_high_d():
     offset. Rescue must NOT fire (D > threshold)."""
     rng = np.random.default_rng(2)
     aux, pool_A, pool_B = _build_aux_and_pools(
-        prog_size=10, overlap_frac=0.70, cross=0.0,
+        prog_size=10, overlap_frac=0.70, cross=-0.3,
     )
 
     # Side-by-side along x: offset 6 µm, tight σ → D large.
@@ -331,7 +331,7 @@ def test_default_none_does_not_invoke_rescue():
     never invoked. Guards back-compat."""
     rng = np.random.default_rng(4)
     aux, pool_A, pool_B = _build_aux_and_pools(
-        prog_size=10, overlap_frac=0.70, cross=0.0,
+        prog_size=10, overlap_frac=0.70, cross=-0.3,
     )
     a = _gauss_entity("a-1-1", 60, center=(0.0, 0.0, 0.0),
                       sigma=2.0, gene_pool=pool_A, rng=rng)
@@ -364,7 +364,7 @@ def test_stitch_homogenizes_merged_etype():
     from tracer._etype import ETYPE_DTYPE
     rng = np.random.default_rng(0)
     aux, pool_A, pool_B = _build_aux_and_pools(
-        prog_size=10, overlap_frac=0.70, cross=0.0,
+        prog_size=10, overlap_frac=0.70, cross=-0.3,
     )
     a = _gauss_entity("a-1-1", 60, center=(0.0, 0.0, 0.0),
                       sigma=2.0, gene_pool=pool_A, rng=rng)

@@ -105,7 +105,7 @@ def build_argparser() -> argparse.ArgumentParser:
                    help="Method-output transcripts parquet.")
     p.add_argument("--label-col", default=None,
                    help="Column to use as final cell label (default: auto-detect "
-                        "'stitched' then 'cell_id').")
+                        "'tracer_id', then 'stitched', then 'cell_id').")
     p.add_argument("--original", type=Path, default=None,
                    help="Optional: pre-method transcripts parquet (enables pre/post).")
     p.add_argument("--transcripts-pre", dest="transcripts_pre_deprecated",
@@ -149,7 +149,7 @@ def detect_label_col(df: pd.DataFrame, requested: str | None) -> str:
         if requested not in df.columns:
             raise SystemExit(f"--label-col {requested!r} not in transcripts.")
         return requested
-    for c in ("stitched", "cell_id"):
+    for c in ("tracer_id", "stitched", "cell_id"):
         if c in df.columns:
             return c
     raise SystemExit(

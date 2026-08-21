@@ -26,9 +26,14 @@ seed_coherence_floor = 0.10
 # multi-tx gene from being killed by a peer module.
 tx_weighted_prune = true
 
-# Restrict Phase-1b/1c admission to nuclear tx; cytoplasmic tx are
-# left for Rescue. Cuts Phase-1 cost ~50% on segmented data.
-nuclear_only_admit = true
+# Restrict Phase-1b/1c admission to nuclear tx (cytoplasm deferred to Rescue).
+# 2026-08-17: default flipped true->false — admit cytoplasm at Prune. On
+# cytoplasm-limited panels (PDAC ~380g) deferring to Rescue leaves recoverable
+# cytoplasm unassigned; at a cell boundary the nuclear-anchored gene call
+# resolves ownership better than Rescue's ambiguous spatial witness. Coverage-
+# neutral-to-positive on PDAC and 5k ovarian. NOTE: the ambient-contamination
+# question is not yet ARI-validated — revisit if a contamination check regresses.
+nuclear_only_admit = false
 
 # Phase 1b admission gate. "hybrid" (default) = real-signal +
 # unanimous-min + percentile-aggregator gate (mirrors Rescue) — catches
@@ -39,8 +44,18 @@ veto_mode = "hybrid"
 mean_admit_threshold = 0.2
 min_admit_threshold = 0.0
 aggregator_percentile = 25.0
-real_signal_threshold = 0.05
+real_signal_threshold = 0.2
 neg_npmi_threshold = -0.2
+
+# When false, Phase-1b/1c veto candidates whose real-signal PMI array vs the
+# (sub)seed is empty (independent of the seed) instead of defer-admitting.
+# Splits collapsed-seed doublets (main = one program; 1c carves the other as a
+# partial). 2026-08-17: default flipped true->false. It over-demotes standard
+# panels ONLY under nuclear_only_admit=true (PDAC ROI -8%); paired with the new
+# nuclear_only_admit=false default that penalty vanishes (PDAC nuc=F: admit=T
+# 1783c vs admit=F 1769c, ~neutral) while dense/high-plex panels (Xenium 5k)
+# gain the doublet split.
+admit_independent = false
 
 # Phase-1-time Mahalanobis-gated remerge. Sibling of
 # stitch.mahalanobis_d_rescue, applied between Phase1-QC and Rescue.
@@ -163,7 +178,7 @@ aggregator_percentile = 25.0
 # Real-players gate (cross-cutting, but Rescue-overridable). Pairs
 # with |PMI| ≤ this contribute neither to mean nor to count gates.
 # Default 0.05 matches the cross-cutting REAL_SIGNAL_THRESHOLD.
-real_signal_threshold = 0.05
+real_signal_threshold = 0.2
 
 # Rank policy — how a non-vetoed candidate is chosen among the entities
 # in the 9-bin × z-bound neighborhood of an orphan tx.
@@ -201,6 +216,14 @@ early_exit_admit_ratio = 0.0
 # (no Xenium prior anchored Phase-1). Each pass is bounded by zero-
 # admit exit anyway. Set 0 to disable the Post-Group stage entirely.
 post_group_passes = 3
+
+# When false, a candidate whose real-signal PMI array vs the target entity
+# is EMPTY (no |PMI| > real_signal_threshold edge to any entity gene) is
+# vetoed instead of defer-admitted. True = legacy (admit orthogonal genes).
+# Per-stage strictness: set rescue.admit_independent=false to make the early
+# rescues require real support, and keep final_rescue.admit_independent=true
+# for a permissive mop-up.
+admit_independent = true
 
 
 # ---------------------------------------------------------------------

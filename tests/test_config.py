@@ -170,6 +170,14 @@ def test_phase1_invariants():
         Phase1Config(seed_coherence_floor=-0.1)
 
 
+def test_fav_config_defaults():
+    """The "fav config" is promoted to the default: both Phase-1
+    admission knobs default False (2026-08-17)."""
+    cfg = load_config()
+    assert cfg.phase1.nuclear_only_admit is False
+    assert cfg.phase1.admit_independent is False
+
+
 @pytest.mark.parametrize("kwargs, match", [
     ({"margin_tx": 0}, "margin_tx"),
     ({"margin_tx": -1}, "margin_tx"),

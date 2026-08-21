@@ -33,6 +33,7 @@ from .spatial import (
     reassign_unassigned_by_gene_compat,
     reassign_unassigned_to_nearest_tx_no_neg,
     reassign_unassigned_grid_pool,
+    guarded_rescue,
     pre_stage2_rescue,
     demote_small_entities,
 )

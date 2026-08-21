@@ -651,7 +651,7 @@ import threading as _threading
 _STAGE_FUNCS = {
     "init_prune": "prune_transcripts_fast",
     "group_cascade": "cascade_as_residual_handler",
-    "post_group_rescue": "pre_stage2_rescue",
+    "post_group_rescue": "guarded_rescue",
     "stitch": "apply_stitching_to_transcripts_memory_efficient",
     "demote": "demote_small_entities",
     "final_rescue": "reassign_unassigned_grid_pool",

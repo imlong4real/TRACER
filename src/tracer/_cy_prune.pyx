@@ -8,6 +8,19 @@ from cython.parallel cimport prange
 cimport openmp
 
 
+# Test knob (per-pass controllable from Python). When 0, a candidate whose
+# real-signal PMI array vs the entity is EMPTY (n_signal==0 → no |PMI|>rst edge
+# to any entity gene) is VETOED instead of defer-admitted. Default 1 = legacy.
+cdef int _ADMIT_INDEPENDENT = 1
+
+def set_admit_independent(int v):
+    global _ADMIT_INDEPENDENT
+    _ADMIT_INDEPENDENT = v
+
+def get_admit_independent():
+    return _ADMIT_INDEPENDENT
+
+
 cdef inline bint _wget(
     cnp.float32_t[:, :] W,
     const int[::1] W_indptr,
@@ -357,6 +370,9 @@ cdef cnp.ndarray _prune_cells_nuclear_seed_core(
     double aggregator_percentile,
     double real_signal_threshold,
     double neg_npmi_threshold,
+    int fallback_whole_cell_admit = 0,   # 1 ⇒ fallback (<min_nuclear_genes) cells
+                                          #     admit whole-cell tx in 1b/1c (the
+                                          #     whole-cell seed already used cyto genes)
 ):
     """Shared orchestration for the dense and sparse nuclear-seed prune.
 
@@ -376,6 +392,7 @@ cdef cnp.ndarray _prune_cells_nuclear_seed_core(
     cdef cnp.ndarray[cnp.int32_t, ndim=1] tx_inds_arr
     cdef cnp.int32_t[:] tx_inds_mv
     cdef int n_cell_tx, ti, tx_row, g, n_unique_nuc, fitted, n_unique_all
+    cdef int is_fallback   # per-cell: took the whole-cell fallback seed path
 
     # Reusable scratch buffers
     cdef cnp.ndarray[cnp.int32_t, ndim=1] uniq_nuc
@@ -429,6 +446,7 @@ cdef cnp.ndarray _prune_cells_nuclear_seed_core(
             # Fallback: prune on whole-cell gene set (matches the Python
             # reference impl). Phase 1b/1c still run on the resulting
             # seed.
+            is_fallback = 1
             all_genes = []
             for ti in range(n_cell_tx):
                 tx_row = tx_inds_mv[ti]
@@ -451,6 +469,7 @@ cdef cnp.ndarray _prune_cells_nuclear_seed_core(
                 W_indptr, W_indices, W_data, use_sparse, threshold)
         else:
             # ---- Phase 1a: nuclear seed (tx-weighted) ----
+            is_fallback = 0
             # Per-gene nuclear tx counts for the tx-weighted greedy.
             nuc_arr = np.asarray(nuc_genes, dtype=np.int32)
             tx_counts_nuc = np.zeros(n_unique_nuc, dtype=np.int32)
@@ -489,8 +508,13 @@ cdef cnp.ndarray _prune_cells_nuclear_seed_core(
                 # No gene index — leave as unassigned (already default 2)
                 rejected_rows.append(tx_row)
                 continue
-            if nuclear_only_admit and not tx_nuc_mv[tx_row]:
+            if (nuclear_only_admit and not tx_nuc_mv[tx_row]
+                    and not (is_fallback and fallback_whole_cell_admit)):
                 # Cytoplasmic tx skipped — stays unassigned for Rescue.
+                # EXCEPT for fallback cells when fallback_whole_cell_admit:
+                # the seed was built from whole-cell genes anyway, and the
+                # thin nucleus can't veto its dominant local program with a
+                # noisy nuclear/cyto boundary.
                 continue
             # Check if g is in seed (linear scan; seed_len typically tiny)
             fitted = 0
@@ -569,7 +593,8 @@ cdef cnp.ndarray _prune_cells_nuclear_seed_core(
             g = tx_gene_mv[tx_row]
             if g < 0:
                 continue
-            if nuclear_only_admit and not tx_nuc_mv[tx_row]:
+            if (nuclear_only_admit and not tx_nuc_mv[tx_row]
+                    and not (is_fallback and fallback_whole_cell_admit)):
                 continue
             fitted = 0
             for j in range(sub_seed_len):
@@ -617,6 +642,7 @@ def prune_cells_nuclear_seed(
     double aggregator_percentile=25.0,
     double real_signal_threshold=0.0,
     double neg_npmi_threshold=-0.2,
+    int fallback_whole_cell_admit=0,
 ):
     """Batch nuclear-seed prune over many cells — DENSE PMI backend.
 
@@ -673,6 +699,7 @@ def prune_cells_nuclear_seed(
         seed_coherence_floor, nuclear_only_admit, tx_weighted,
         veto_mode, min_admit_threshold, mean_admit_threshold,
         aggregator_percentile, real_signal_threshold, neg_npmi_threshold,
+        fallback_whole_cell_admit,
     )
 
 
@@ -695,6 +722,7 @@ def prune_cells_nuclear_seed_sparse(
     double aggregator_percentile=25.0,
     double real_signal_threshold=0.0,
     double neg_npmi_threshold=-0.2,
+    int fallback_whole_cell_admit=0,
 ):
     """Batch nuclear-seed prune over many cells — SPARSE CSR PMI backend.
 
@@ -721,6 +749,7 @@ def prune_cells_nuclear_seed_sparse(
         seed_coherence_floor, nuclear_only_admit, tx_weighted,
         veto_mode, min_admit_threshold, mean_admit_threshold,
         aggregator_percentile, real_signal_threshold, neg_npmi_threshold,
+        fallback_whole_cell_admit,
     )
 
 
@@ -1295,7 +1324,7 @@ cdef inline int _admission_test(
                 pmi_buf[n_signal] = v
                 n_signal += 1
             if n_signal == 0:
-                return 1  # no real signal → defer (admit)
+                return _ADMIT_INDEPENDENT  # empty real-signal → admit iff flag
             _insertion_sort_floats(pmi_buf, n_signal)
             p_aggregate = _percentile_sorted(pmi_buf, n_signal, aggregator_percentile)
             if legacy_mean_test:
@@ -1346,7 +1375,7 @@ cdef inline int _admission_test(
                 min_signal_f = v
             n_signal += 1
         if n_signal == 0:
-            return 1  # defer
+            return _ADMIT_INDEPENDENT  # empty real-signal → admit iff flag
         if min_signal_f > min_admit_threshold:
             return 1  # unanimous-positive fast-pass
         _insertion_sort_floats(pmi_buf, n_signal)
@@ -1394,6 +1423,7 @@ cdef void _rescue_one_tx(
     int has_z,
     double z_bound,
     int veto_mode,
+    int offpanel_first_entity,       # 1 ⇒ g_idx<0 tx take nearest-bin entity (no PMI)
     int rs_active,
     double rs_thr,
     double agg_p,
@@ -1453,6 +1483,37 @@ cdef void _rescue_one_tx(
     g_idx = <int> una_g_mv[i]
     w_row = <int> una_w_mv[i]
     if g_idx < 0:
+        # Off-panel gene (no PMI row). When enabled, assign to the FIRST
+        # assigned entity encountered in the 9-bin neighborhood — self bin
+        # first (nb col 0), z-bounded, proximity only, no PMI/veto. Mirrors
+        # the reference Python pass. Else: no candidate (legacy).
+        if offpanel_first_entity:
+            for j in range(9):
+                b = <int> nb_bins_mv[i, j]
+                if b < 0 or b >= max_bin_key_plus_one:
+                    continue
+                off_lo = <int> bin_off_mv[b]
+                off_hi = <int> bin_off_mv[b + 1]
+                for k in range(off_lo, off_hi):
+                    ass_li = <int> bin_data_mv[k]
+                    if has_z:
+                        dz = ass_c_mv[ass_li, 2] - una_c_mv[i, 2]
+                        if dz < 0: dz = -dz
+                        if dz > z_bound:
+                            continue
+                    ent = ass_ent_mv[ass_li]
+                    if ent < 0 or ent >= n_ent:
+                        continue
+                    dx = ass_c_mv[ass_li, 0] - una_c_mv[i, 0]
+                    dy = ass_c_mv[ass_li, 1] - una_c_mv[i, 1]
+                    d = dx * dx + dy * dy
+                    if has_z:
+                        dz = ass_c_mv[ass_li, 2] - una_c_mv[i, 2]
+                        d += dz * dz
+                    best_ent_mv[i] = ent
+                    best_dist_mv[i] = <cnp.float32_t> (d ** 0.5)
+                    reason_mv[i] = 0
+                    return
         reason_mv[i] = 1
         return
 
@@ -1675,6 +1736,7 @@ def rescue_per_tx_batch(
     int witness_tiebreak = 1,                             # 0=distance, 1=gene_fit
     cnp.ndarray[cnp.int32_t, ndim=1] ent_size = None,     # entity tx counts; required when rank_policy=1
     cnp.ndarray[cnp.int64_t, ndim=1] una_w_row = None,    # per-tx W row; None ⇒ una_g_idx (dense)
+    int offpanel_first_entity = 0,                        # 1 ⇒ off-panel (g<0) tx take nearest-bin entity
 ):
     """Per-unassigned-tx Rescue batch.
 
@@ -1835,6 +1897,7 @@ def rescue_per_tx_batch(
                 max_touched,
                 n_ent, max_bin_key_plus_one,
                 has_z, z_bound, veto_mode,
+                offpanel_first_entity,
                 rs_active, rs_thr, agg_p,
                 mean_threshold, small_entity_guard_n,
                 neg_npmi_threshold, min_admit_threshold,

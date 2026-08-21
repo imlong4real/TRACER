@@ -335,7 +335,7 @@ UNASSIGNED_TOKENS = frozenset({
 def build_outputs(
     df_post: pd.DataFrame, *,
     npmi_panel: pd.DataFrame, log: logging.Logger,
-    label_col: str = "stitched", min_tx: int = 5, tau: float | None = None,
+    label_col: str = "tracer_id", min_tx: int = 5, tau: float | None = None,
     score_mode: str = "count",
 ) -> tuple[pd.DataFrame, "anndata.AnnData"]:
     """Compute per-cell purity/conflict + build cell-by-gene AnnData.
@@ -367,6 +367,13 @@ def build_outputs(
         _mcol = "PMI" if "PMI" in npmi_panel.columns else "NPMI"
         tau = 0.2 if _mcol == "PMI" else 0.05
         log.info("Coherence threshold=%.3f (auto, %s-scale panel)", tau, _mcol)
+
+    # Auto-detect the assignment column: prefer the reconciled `tracer_id`, then
+    # legacy `stitched`/`cell_id` (older outputs or synthetic frames) so scoring
+    # works across output formats instead of KeyError-ing on a fixed default.
+    if label_col not in df_post.columns:
+        label_col = next((c for c in ("tracer_id", "stitched", "cell_id")
+                          if c in df_post.columns), label_col)
 
     if "_etype" in df_post.columns:
         keep_mask = df_post["_etype"].astype(str).isin({"cell", "partial", "component"})
@@ -575,7 +582,7 @@ def main() -> int:
     with timer.time("build_outputs"):
         scores, adata = build_outputs(
             df_post, npmi_panel=panel, log=log,
-            label_col="stitched",
+            label_col="tracer_id",
             min_tx=args.min_tx_per_cell_for_scores, tau=args.tau,
             score_mode=args.score_mode,
         )
