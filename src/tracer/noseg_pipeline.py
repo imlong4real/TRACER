@@ -865,8 +865,17 @@ def _run_one(df, panel, cfg, *, tile_tag: str | None):
     if "bin_id" not in df_final.columns:
         df_final = df_final.merge(df[["transcript_id", "bin_id"]],
                                   on="transcript_id", how="left")
-    keep = _is_real_label(df_final["stitched"])
-    out = df_final.loc[keep, ["bin_id", "x", "y", "feature_name", "stitched"]].copy()
+    # run_noseg_pipeline now canonicalizes its output to `tracer_id`
+    # (pipeline._canonicalize_output drops `stitched`), so reading "stitched"
+    # here raised KeyError for every tile. Same auto-detect rule that
+    # commit 6ec0e90 applied to scripts/run_tracer.py build_outputs; the
+    # column is re-emitted as `stitched` so downstream consumers
+    # (aggregate_profiles(label_col="stitched"), ...) are unchanged.
+    _lab = "tracer_id" if "tracer_id" in df_final.columns else "stitched"
+    keep = _is_real_label(df_final[_lab])
+    out = df_final.loc[keep, ["bin_id", "x", "y", "feature_name", _lab]].copy()
+    if _lab != "stitched":
+        out = out.rename(columns={_lab: "stitched"})
     out["stitched"] = out["stitched"].astype(str)
     if tile_tag is not None:
         out["stitched"] = tile_tag + "::" + out["stitched"]
