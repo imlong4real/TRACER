@@ -3,7 +3,7 @@ takes the whole-cell fallback seed. Under nuclear_only_admit, its cytoplasmic tx
 are skipped in Phase 1b, so if the (thin, non-fitting) nuclear genes don't match
 the whole-cell seed the cell DIES. With fallback_whole_cell_admit=True the
 fallback cell admits its whole-cell tx, forming a main cell on the dominant local
-program. Coherence-floor deaths (incoherent seed) still die either way."""
+program. (seed_coherence_floor was removed 2026-08-23; Mid-QC gates coherence.)"""
 import numpy as np
 from tracer import _cy_prune
 
@@ -25,7 +25,7 @@ def _run(fallback_admit):
     return np.asarray(_cy_prune.prune_cells_nuclear_seed(
         cell, gene, nuc, _W(),
         0.2, 3, 0,                    # threshold, min_nuclear_genes, skip_1c
-        0.10, 1, 1, 1,                # coh_floor, nuclear_only_admit, tx_weighted, veto=mean
+        1, 1, 1,                      # nuclear_only_admit, tx_weighted, veto=mean
         0.0, 0.2, 25.0, 0.0, -0.2,
         int(fallback_admit),
     ))

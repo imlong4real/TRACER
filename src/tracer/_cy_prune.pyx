@@ -21,6 +21,47 @@ def get_admit_independent():
     return _ADMIT_INDEPENDENT
 
 
+# --- diagnostic counters for the per-cell early-exit paths -----------------
+# The prune loop drops cells via several `continue`s; the primary-seed
+# coherence-floor rejection is the destructive one (skips Phase 1b AND 1c,
+# so the cell leaves NO main and NO partial, and Phase1-Rerank has nothing
+# to recover from). Counted here so "how often does this fire?" is
+# answerable without an A/B against a disabled floor. Cheap: the loop is
+# not nogil, and these are plain C increments.
+cdef long _CNT_CELLS = 0
+cdef long _CNT_SEED_EMPTY = 0
+cdef long _CNT_FALLBACK = 0
+cdef long _CNT_THIN_NUCLEUS = 0
+
+
+def reset_prune_counters():
+    global _CNT_CELLS, _CNT_SEED_EMPTY, _CNT_FALLBACK, _CNT_THIN_NUCLEUS
+    _CNT_CELLS = 0
+    _CNT_SEED_EMPTY = 0
+    _CNT_FALLBACK = 0
+    _CNT_THIN_NUCLEUS = 0
+
+
+def get_prune_counters():
+    """Per-cell early-exit tallies since the last ``reset_prune_counters()``.
+
+    cells         : cells visited with >=1 tx
+    seed_empty    : greedy prune returned an empty seed -> cell dropped
+    thin_nucleus  : cells with < min_nuclear_genes unique NUCLEAR genes.
+                    A property of the DATA, so it is scope-invariant.
+    fallback      : cells that ACTUALLY fell back — i.e. thin_nucleus AND
+                    a nuclear seed was requested. Always 0 under
+                    prune_scope="cell", where the whole-cell seed is the
+                    primary path and nothing falls back.
+    """
+    return {
+        "cells": _CNT_CELLS,
+        "seed_empty": _CNT_SEED_EMPTY,
+        "thin_nucleus": _CNT_THIN_NUCLEUS,
+        "fallback": _CNT_FALLBACK,
+    }
+
+
 cdef inline bint _wget(
     cnp.float32_t[:, :] W,
     const int[::1] W_indptr,
@@ -71,36 +112,6 @@ cdef inline bint _wget(
             out[0] = v
             return True
         return False
-
-
-cdef inline double _mean_internal_pmi(
-    cnp.int32_t[:] genes,
-    int n_genes,
-    cnp.float32_t[:, :] W,
-    const int[::1] W_indptr,
-    const int[::1] W_indices,
-    const float[::1] W_data,
-    int use_sparse,
-) nogil:
-    """Mean PMI over off-diagonal pairs within a gene set. Returns
-    +inf when the set has <2 genes (caller treats as "trivially
-    coherent": no pairs means no internal incoherence). Unobserved
-    pairs are skipped (see :func:`_wget`)."""
-    cdef int i, j
-    cdef double total = 0.0
-    cdef int count = 0
-    cdef float v
-    if n_genes < 2:
-        return 1e30
-    for i in range(n_genes):
-        for j in range(i + 1, n_genes):
-            if _wget(W, W_indptr, W_indices, W_data, use_sparse,
-                     genes[i], genes[j], &v):
-                total += v
-                count += 1
-    if count == 0:
-        return 0.0
-    return total / count
 
 
 cdef inline int _mean_pmi_test(
@@ -361,7 +372,6 @@ cdef cnp.ndarray _prune_cells_nuclear_seed_core(
     double threshold,
     int min_nuclear_genes,
     int skip_phase_1c,
-    double seed_coherence_floor,
     int nuclear_only_admit,
     int tx_weighted,
     int veto_mode,
@@ -373,6 +383,10 @@ cdef cnp.ndarray _prune_cells_nuclear_seed_core(
     int fallback_whole_cell_admit = 0,   # 1 ⇒ fallback (<min_nuclear_genes) cells
                                           #     admit whole-cell tx in 1b/1c (the
                                           #     whole-cell seed already used cyto genes)
+    int nuclear_seed_only = 1,           # 1 ⇒ Phase-1a seed from NUCLEAR tx (legacy);
+                                          #     0 ⇒ seed from the WHOLE CELL, so a thin
+                                          #     or incoherent nucleus cannot veto a cell
+                                          #     whose cytoplasm is coherent
 ):
     """Shared orchestration for the dense and sparse nuclear-seed prune.
 
@@ -384,6 +398,7 @@ cdef cnp.ndarray _prune_cells_nuclear_seed_core(
     public :func:`prune_cells_nuclear_seed` /
     :func:`prune_cells_nuclear_seed_sparse` wrappers.
     """
+    global _CNT_CELLS, _CNT_SEED_EMPTY, _CNT_FALLBACK, _CNT_THIN_NUCLEUS
     cdef int n_cells = len(cell_tx_idx_lists)
     cdef cnp.ndarray[cnp.int8_t, ndim=1] out = np.full(n_tx, 2, dtype=np.int8)
     cdef cnp.int8_t[:] out_mv = out
@@ -429,6 +444,7 @@ cdef cnp.ndarray _prune_cells_nuclear_seed_core(
         n_cell_tx = tx_inds_arr.shape[0]
         if n_cell_tx == 0:
             continue
+        _CNT_CELLS += 1
 
         # Collect unique nuclear gene indices for this cell.
         # (Python-level numpy ops here are fine: per-cell, not per-tx.)
@@ -442,11 +458,21 @@ cdef cnp.ndarray _prune_cells_nuclear_seed_core(
         uniq_nuc = np.unique(np.asarray(nuc_genes, dtype=np.int32))
         n_unique_nuc = uniq_nuc.shape[0]
 
-        if n_unique_nuc < min_nuclear_genes:
-            # Fallback: prune on whole-cell gene set (matches the Python
-            # reference impl). Phase 1b/1c still run on the resulting
-            # seed.
-            is_fallback = 1
+        if (not nuclear_seed_only) or n_unique_nuc < min_nuclear_genes:
+            # Whole-cell seed. Two ways to get here:
+            #   (a) nuclear_seed_only == 0 — the caller asked for a CELL
+            #       seed, so Phase 1a uses every tx in the cell. No thin-
+            #       nucleus case exists, so this is not a "fallback".
+            #   (b) the legacy fallback: fewer than min_nuclear_genes
+            #       unique nuclear genes, so a nuclear seed is impossible.
+            # is_fallback stays keyed on (b) alone — it only controls the
+            # 1b/1c nuclear_only_admit exemption for thin nuclei.
+            is_fallback = 1 if n_unique_nuc < min_nuclear_genes else 0
+            if is_fallback:
+                _CNT_THIN_NUCLEUS += 1
+                if nuclear_seed_only:
+                    # only a real FALLBACK when a nuclear seed was wanted
+                    _CNT_FALLBACK += 1
             all_genes = []
             for ti in range(n_cell_tx):
                 tx_row = tx_inds_mv[ti]
@@ -484,14 +510,7 @@ cdef cnp.ndarray _prune_cells_nuclear_seed_core(
         seed_len = seed.shape[0]
         if seed_len == 0:
             # No seed found; all tx → unassigned (code 2 already default)
-            continue
-
-        # Coherence floor on primary seed: reject seeds whose internal
-        # mean PMI is below the floor (avoids accepting a clique that
-        # is merely "non-conflicting" but biologically degenerate).
-        if _mean_internal_pmi(
-                seed_mv, seed_len, W_mv,
-                W_indptr, W_indices, W_data, use_sparse) < seed_coherence_floor:
+            _CNT_SEED_EMPTY += 1
             continue
 
         # ---- Phase 1b: per-tx admit by mean PMI to seed ----
@@ -581,10 +600,6 @@ cdef cnp.ndarray _prune_cells_nuclear_seed_core(
         # clique" sub-seeds from forming spurious partials. Rest-pile
         # tx stay unassigned (code 2, already default) for downstream
         # Rescue to route based on neighbour gene composition.
-        if _mean_internal_pmi(
-                sub_seed_mv, sub_seed_len, W_mv,
-                W_indptr, W_indices, W_data, use_sparse) < seed_coherence_floor:
-            continue
 
         # Re-test rejected tx against sub-seed. When nuclear_only_admit
         # is set, cytoplasmic rejected tx are not eligible for partial
@@ -633,7 +648,6 @@ def prune_cells_nuclear_seed(
     double threshold,
     int min_nuclear_genes,
     int skip_phase_1c,
-    double seed_coherence_floor=-1e30,
     int nuclear_only_admit=0,
     int tx_weighted=1,
     int veto_mode=1,
@@ -643,6 +657,7 @@ def prune_cells_nuclear_seed(
     double real_signal_threshold=0.0,
     double neg_npmi_threshold=-0.2,
     int fallback_whole_cell_admit=0,
+    int nuclear_seed_only=1,
 ):
     """Batch nuclear-seed prune over many cells — DENSE PMI backend.
 
@@ -666,12 +681,6 @@ def prune_cells_nuclear_seed(
         Skip Phase 1a / 1c if a cell has fewer than this many unique nuclear genes.
     skip_phase_1c : int
         If non-zero, skip Phase 1c (rejected tx → unassigned directly).
-    seed_coherence_floor : float
-        Minimum mean internal PMI required for a seed (1a) or sub-seed
-        (1c) to be accepted. Seeds below this floor are rejected:
-        for the primary seed, all that cell's tx → unassigned; for the
-        sub-seed, all rest-pile tx → unassigned (no partial formed).
-        Default -1e30 disables the check (back-compat).
     nuclear_only_admit : int
         If non-zero, restrict 1b admission and 1c re-test to NUCLEAR
         tx only — cytoplasmic tx leave Phase 1 as unassigned (code 2)
@@ -696,10 +705,11 @@ def prune_cells_nuclear_seed(
         _ip, _ix, _dt, 0,
         tx_gene_idx.shape[0],
         threshold, min_nuclear_genes, skip_phase_1c,
-        seed_coherence_floor, nuclear_only_admit, tx_weighted,
+        nuclear_only_admit, tx_weighted,
         veto_mode, min_admit_threshold, mean_admit_threshold,
         aggregator_percentile, real_signal_threshold, neg_npmi_threshold,
         fallback_whole_cell_admit,
+        nuclear_seed_only,
     )
 
 
@@ -713,7 +723,6 @@ def prune_cells_nuclear_seed_sparse(
     double threshold,
     int min_nuclear_genes,
     int skip_phase_1c,
-    double seed_coherence_floor=-1e30,
     int nuclear_only_admit=0,
     int tx_weighted=1,
     int veto_mode=1,
@@ -723,6 +732,7 @@ def prune_cells_nuclear_seed_sparse(
     double real_signal_threshold=0.0,
     double neg_npmi_threshold=-0.2,
     int fallback_whole_cell_admit=0,
+    int nuclear_seed_only=1,
 ):
     """Batch nuclear-seed prune over many cells — SPARSE CSR PMI backend.
 
@@ -746,10 +756,11 @@ def prune_cells_nuclear_seed_sparse(
         W_indptr, W_indices, W_data, 1,
         tx_gene_idx.shape[0],
         threshold, min_nuclear_genes, skip_phase_1c,
-        seed_coherence_floor, nuclear_only_admit, tx_weighted,
+        nuclear_only_admit, tx_weighted,
         veto_mode, min_admit_threshold, mean_admit_threshold,
         aggregator_percentile, real_signal_threshold, neg_npmi_threshold,
         fallback_whole_cell_admit,
+        nuclear_seed_only,
     )
 
 

@@ -70,7 +70,8 @@ def _capture_nuclear_only_admit(df, panel, want: bool, monkeypatch) -> bool:
 
     cfg = PipelineConfig()
     # Configs are frozen; poke the field the same way the task specifies.
-    object.__setattr__(cfg.phase1, "nuclear_only_admit", want)
+    object.__setattr__(cfg.phase1, "prune_scope",
+                       "nuclear" if want else "cell")
 
     with pytest.raises(_StopCapture):
         _pipeline.run_segmented_pipeline(df, panel, cfg=cfg)

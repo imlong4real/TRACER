@@ -16,24 +16,30 @@
 # Validated on PDAC+lung full-tissue: cell C mean 0.80→0.93, p10 0.57→0.82.
 pmi_threshold = 0.2
 
-# Minimum mean-PMI within a Phase-1c sub-seed for it to be accepted.
-# Rejects degenerate small seeds (e.g. a 4-gene cluster carried by a
-# single noisy-PMI edge).
-seed_coherence_floor = 0.10
-
 # Tx-weighted greedy prune: score[i] = sum_j(bad[i,j] * n_tx[j]) with
 # the safeguard "skip if n_tx[i] > score[i]". Prevents a single
 # multi-tx gene from being killed by a peer module.
 tx_weighted_prune = true
 
 # Restrict Phase-1b/1c admission to nuclear tx (cytoplasm deferred to Rescue).
-# 2026-08-17: default flipped true->false — admit cytoplasm at Prune. On
-# cytoplasm-limited panels (PDAC ~380g) deferring to Rescue leaves recoverable
-# cytoplasm unassigned; at a cell boundary the nuclear-anchored gene call
-# resolves ownership better than Rescue's ambiguous spatial witness. Coverage-
-# neutral-to-positive on PDAC and 5k ovarian. NOTE: the ambient-contamination
-# question is not yet ARI-validated — revisit if a contamination check regresses.
-nuclear_only_admit = false
+# Prune scope — ONE knob for the whole Prune stage (Phase-1a SEED source AND
+# Phase-1b/1c admission), so the two halves cannot drift apart.
+#   "cell"    = whole-cell seed + whole-cell admission  (default)
+#   "nuclear" = nuclear seed + nuclear admission        (legacy)
+# The previously-shipped state was a SPLIT-BRAIN (nuclear seed + whole-cell
+# admit): a thin or incoherent nuclear seed gated a whole-cell admission and
+# a seed_coherence_floor failure dropped the WHOLE cell before any cytoplasmic
+# tx was examined (the whole-cell fallback only patches the <3-nuclear-genes
+# COUNT case). "cell" measured strictly better or neutral everywhere tried —
+# VHD HC01 +495 cells / -710 partials; PDAC +39 cells, coherence 0.818->0.833,
+# negative-coherence cells 0.12%->0; ovarian 5k +6 cells — with the gain
+# scaling inversely with nuclear sampling depth. Prefer "nuclear" when the
+# input segmentation is doublet-heavy or low-confidence (over-merged polygons),
+# where anchoring identity on one nucleus is the safer prior.
+# The former per-half booleans (nuclear_only_admit / nuclear_seed_only) are
+# REMOVED: leaving either one settable re-created the split-brain state. A
+# config still naming them fails loudly (the loader rejects unknown keys).
+prune_scope = "cell"
 
 # Phase 1b admission gate. "hybrid" (default) = real-signal +
 # unanimous-min + percentile-aggregator gate (mirrors Rescue) — catches
