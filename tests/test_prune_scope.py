@@ -16,8 +16,14 @@ independent booleans, spanning four states of which only two are coherent:
 ``prune_scope`` makes the incoherent states unreachable through the
 supported API: one enum sets both halves together.
 
-The legacy booleans remain as deprecated overrides (default ``None`` =
-"derive from prune_scope") so existing configs and A/B work keep running.
+The legacy booleans are REMOVED from the config, not deprecated. Keeping
+either as an override would re-open the hole: set only the seed half and
+you are back to nuclear-seed + cell-admit. A stale config fails loudly and
+the error names its replacement — see ``tests/test_retired_config_keys.py``.
+
+The kernel keeps both as FUNCTION arguments
+(``prune_transcripts_nuclear_seed(nuclear_seed_only=, nuclear_only_admit=)``),
+so mixed A/B remains possible below the config layer.
 """
 from __future__ import annotations
 

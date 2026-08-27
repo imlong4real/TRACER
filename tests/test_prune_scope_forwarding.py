@@ -88,3 +88,40 @@ def test_nuclear_only_admit_is_forwarded_from_cfg(synthetic_inputs, monkeypatch,
         f"cfg.phase1.nuclear_only_admit={want} but Prune received "
         f"nuclear_only_admit={got!r} — the field is not wired through."
     )
+
+
+# ---------------------------------------------------------------------------
+# Signature guard for the data-gated integration call site
+# ---------------------------------------------------------------------------
+def test_pdac_integration_kwargs_are_a_valid_signature(synthetic_inputs):
+    """The PDAC ROI test's kwargs must remain callable without the ROI data.
+
+    ``TestPDACEMTHybridAdmission`` sits behind ``pytest.importorskip`` on
+    ``benchmarks/data_loader.py``, which is absent in CI and in most
+    checkouts — so a keyword retired from
+    ``prune_transcripts_nuclear_seed`` can rot there indefinitely without
+    failing a single run. That is exactly what happened to
+    ``seed_coherence_floor``: removed from the signature, left in the call,
+    green everywhere, and a hard ``TypeError`` for anyone who did have the
+    data on their path.
+
+    Binding the same kwargs against a synthetic frame closes the hole: the
+    call is cheap, needs no external data, and fails loudly in CI the moment
+    the signature and the integration call site drift apart.
+    """
+    from tracer.pruning import prune_transcripts_nuclear_seed
+    from tests.test_phase1b_hybrid_admission import PDAC_PRUNE_KWARGS
+
+    df, panel = synthetic_inputs
+    # The kwargs pin `metric_col="PMI"` (the PDAC panel convention) while the
+    # synthetic generator emits NPMI. Alias rather than override the kwarg, so
+    # every value is bound exactly as the integration test binds it.
+    panel = panel.copy()
+    if "PMI" not in panel.columns:
+        panel["PMI"] = panel["NPMI"]
+    # Runs the real prune — a TypeError here means the kwargs no longer match.
+    out, aux = prune_transcripts_nuclear_seed(
+        df.copy(), panel, **PDAC_PRUNE_KWARGS)
+    assert "tracer_id" in out.columns
+    assert len(out) == len(df)
+    assert isinstance(aux, dict)
