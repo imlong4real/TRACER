@@ -132,7 +132,7 @@ def prune_default(synthetic_inputs):
     # Guard: this test only locks the CURRENT default. If the default is
     # reverted to True the assertions below fail (which is the point),
     # but this makes the assumption explicit.
-    assert cfg.phase1.nuclear_only_admit is False
+    assert cfg.phase1.resolve_scope()[1] is False  # admit half: whole-cell
     return _capture_prune_snapshot(df, panel, cfg)
 
 
@@ -142,7 +142,7 @@ def prune_nuclear_only(synthetic_inputs):
     (forced on the frozen dataclass) on the SAME input."""
     df, panel = synthetic_inputs
     cfg = load_config()
-    object.__setattr__(cfg.phase1, "nuclear_only_admit", True)
+    object.__setattr__(cfg.phase1, "prune_scope", "nuclear")
     return _capture_prune_snapshot(df, panel, cfg)
 
 
@@ -231,7 +231,7 @@ def test_default_config_flags(synthetic_inputs):
     """Documents (and guards) the two defaults this file assumes. A
     revert of either surfaces here immediately."""
     cfg = load_config()
-    assert cfg.phase1.nuclear_only_admit is False
+    assert cfg.phase1.resolve_scope()[1] is False  # admit half: whole-cell
     assert cfg.phase1.admit_independent is False
 
 

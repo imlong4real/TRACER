@@ -161,6 +161,28 @@ def test_phase1b_admission_mean_vs_hybrid(veto_mode, expected_admit):
 # ---------------------------------------------------------------------------
 # Integration: PDAC EMT 50 µm ROI — EPCAM-vs-jikageak-1
 # ---------------------------------------------------------------------------
+# Hoisted so the signature this integration test depends on is exercised in CI
+# even though the ROI data is not. `test_prune_scope_forwarding` calls
+# `prune_transcripts_nuclear_seed` with exactly these kwargs on a synthetic
+# frame; without that, a retired keyword here (as `seed_coherence_floor` was)
+# sits behind `importorskip` and never fails a run.
+PDAC_PRUNE_KWARGS = dict(
+    cell_id_col="cell_id",
+    gene_col="feature_name",
+    nuclear_col="overlaps_nucleus",
+    threshold=0.2,
+    unassigned_id="-1",
+    metric_col="PMI",
+    nan_fill=0.0,
+    min_nuclear_genes=3,
+    nuclear_only_admit=True,
+    veto_mode="hybrid",
+    mean_admit_threshold=0.5,
+    aggregator_percentile=25.0,
+    real_signal_threshold=0.05,
+)
+
+
 class TestPDACEMTHybridAdmission:
     @pytest.fixture(scope="class")
     def roi(self):
@@ -197,21 +219,7 @@ class TestPDACEMTHybridAdmission:
 
     def test_hybrid_rejects_epcam_in_jikageak_1(self, roi):
         df, panel = roi
-        df_out, _ = prune_transcripts_nuclear_seed(
-            df, panel,
-            cell_id_col="cell_id",
-            gene_col="feature_name",
-            nuclear_col="overlaps_nucleus",
-            threshold=0.2, unassigned_id="-1",
-            metric_col="PMI", nan_fill=0.0,
-            min_nuclear_genes=3,
-            seed_coherence_floor=0.10,
-            nuclear_only_admit=True,
-            veto_mode="hybrid",
-            mean_admit_threshold=0.5,
-            aggregator_percentile=25.0,
-            real_signal_threshold=0.05,
-        )
+        df_out, _ = prune_transcripts_nuclear_seed(df, panel, **PDAC_PRUNE_KWARGS)
         # Identify EPCAM tx originally assigned to jikageak-1 by input
         # cell_id. Under hybrid, none of them should remain in the main
         # entity for jikageak-1 (they should be demoted to partial or

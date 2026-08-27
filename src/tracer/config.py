@@ -73,11 +73,37 @@ class Phase1Config:
     # 2026-05-13: pmi_threshold raised 0.05 → 0.2 to match the new
     # bootstrap-PMI calibration (PMI=0.2 = 1.22× chance in natural-log).
     pmi_threshold: float = 0.2
-    seed_coherence_floor: float = 0.10
     tx_weighted_prune: bool = True
-    # 2026-08-17: default flipped True->False — admit cytoplasm at Prune
-    # rather than deferring cytoplasmic tx to Rescue (see defaults.toml).
-    nuclear_only_admit: bool = False
+    # ------------------------------------------------------------------
+    # Prune scope — ONE knob for the whole Prune stage (seed + admission).
+    # ------------------------------------------------------------------
+    # Seed source (1a) and admission (1b/1c) used to be two independent
+    # booleans spanning four states, only two of which are coherent:
+    #
+    #   "nuclear" = nuclear seed + nuclear admit  (legacy)
+    #   "cell"    = whole-cell seed + whole-cell admit  (default)
+    #
+    # The other two are incoherent; in particular nuclear-seed + cell-admit
+    # was the shipped SPLIT-BRAIN state where a thin/incoherent nuclear seed
+    # gated a whole-cell admission. ``prune_scope`` makes those unreachable
+    # through the supported API.
+    #
+    # Default "cell": measured strictly better or neutral on every dataset
+    # tried (VHD HC01 +495 cells / -710 partials; PDAC +39 cells, coherence
+    # 0.818->0.833, negative-coherence cells 0.12%->0; ovarian 5k +6 cells).
+    # The gain scales inversely with nuclear sampling depth. Choose
+    # "nuclear" when the segmentation is doublet-heavy or low-confidence
+    # (over-merged polygons), where anchoring identity on a single nucleus
+    # is the safer prior.
+    prune_scope: Literal["nuclear", "cell"] = "cell"
+
+    # NOTE: the former per-half booleans ``nuclear_only_admit`` /
+    # ``nuclear_seed_only`` were REMOVED (2026-08-23). Keeping them as
+    # deprecated overrides re-opened the very hole ``prune_scope`` closes:
+    # setting just one of them reproduces the split-brain state. The TOML
+    # loader rejects unknown keys, and _RETIRED_KEYS gives these three a
+    # migration hint naming the replacement (value-aware: nuclear_only_admit
+    # true/false map to different prune_scope values).
 
     # 1b admission gate (mirrors RescueConfig's veto knobs)
     veto_mode: Literal["min", "mean", "hybrid"] = "hybrid"
@@ -119,15 +145,24 @@ class Phase1Config:
     maha_remerge_d: float | None = 1.0
     maha_remerge_delta_c_floor: float = -0.2
 
+    def resolve_scope(self) -> tuple[bool, bool]:
+        """Return ``(seed_nuclear, admit_nuclear)`` for the Prune stage.
+
+        Both halves come from ``prune_scope`` alone, which is what makes
+        the incoherent mixed states unrepresentable.
+        """
+        nuclear = self.prune_scope == "nuclear"
+        return nuclear, nuclear
+
     def __post_init__(self) -> None:
+        if self.prune_scope not in ("nuclear", "cell"):
+            raise ValueError(
+                f"phase1.prune_scope must be 'nuclear' or 'cell'; "
+                f"got {self.prune_scope!r}"
+            )
         if not (-1.0 <= self.pmi_threshold <= 1.0):
             raise ValueError(
                 f"phase1.pmi_threshold out of range: {self.pmi_threshold}"
-            )
-        if not (0.0 <= self.seed_coherence_floor <= 1.0):
-            raise ValueError(
-                f"phase1.seed_coherence_floor out of range: "
-                f"{self.seed_coherence_floor}"
             )
         if self.veto_mode not in ("min", "mean", "hybrid"):
             raise ValueError(
@@ -882,12 +917,53 @@ def _to_dataclass(merged: dict[str, Any]) -> PipelineConfig:
         valid_fields = {f.name for f in fields(cls)}
         unknown = set(body) - valid_fields
         if unknown:
+            hints = [h for h in (_retired_key_hint(section, k, body[k])
+                                 for k in sorted(unknown)) if h]
+            if hints:
+                raise ValueError(
+                    f"[{section}] uses key(s) removed in a breaking change: "
+                    + "; ".join(hints)
+                )
             raise ValueError(
                 f"[{section}] contains unknown keys: {sorted(unknown)} "
                 f"(valid: {sorted(valid_fields)})"
             )
         kwargs[section] = cls(**body)
     return PipelineConfig(**kwargs)
+
+
+# Keys removed in a breaking change, with the migration to write instead.
+# A stale config should not just fail -- it should say what replaced the key.
+# Values are callables of the offending value so the hint can be specific
+# (e.g. nuclear_only_admit=true maps to a different scope than false).
+_RETIRED_KEYS: dict[tuple[str, str], Any] = {
+    ("phase1", "nuclear_only_admit"): lambda v: (
+        'replaced by phase1.prune_scope = '
+        + ('"nuclear"' if v else '"cell"')
+        + ' -- one enum now sets BOTH the Phase-1a seed source and 1b/1c '
+          'admission, so the two halves cannot disagree'
+    ),
+    ("phase1", "nuclear_seed_only"): lambda v: (
+        'replaced by phase1.prune_scope = '
+        + ('"nuclear"' if v else '"cell"')
+    ),
+    ("phase1", "seed_coherence_floor"): lambda v: (
+        'removed -- it was never wired (the pipeline used a module constant) '
+        'and fired 0-1 times per ROI. Coherence is gated at Mid-QC instead; '
+        'delete this key'
+    ),
+}
+
+
+def _retired_key_hint(section: str, key: str, value: Any) -> str | None:
+    """Migration guidance for a removed key, or None if it is just unknown."""
+    fn = _RETIRED_KEYS.get((section, key))
+    if fn is None:
+        return None
+    try:
+        return f"{key}: {fn(value)}"
+    except Exception:  # never let a hint break the real error
+        return None
 
 
 def load_config(

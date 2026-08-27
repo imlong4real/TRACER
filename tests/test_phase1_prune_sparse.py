@@ -154,7 +154,7 @@ def _make_inputs():
 
 
 KW = dict(min_nuclear_genes=3, skip_phase_1c=0,
-          seed_coherence_floor=-1e30, nuclear_only_admit=0, tx_weighted=1)
+          nuclear_only_admit=0, tx_weighted=1)
 
 
 def _run_dense(W, threshold):

@@ -591,8 +591,8 @@ def prune_transcripts_nuclear_seed(
     housekeeping_neg_thresh: float = -0.05,
     housekeeping_min_strong_count: int = 5,
     skip_phase_1c: bool = False,
-    seed_coherence_floor: float = -1e30,
     nuclear_only_admit: bool = False,
+    nuclear_seed_only: bool = True,
     fallback_whole_cell_admit: bool = False,
     tx_weighted: bool = True,
     veto_mode: str = "mean",
@@ -602,8 +602,23 @@ def prune_transcripts_nuclear_seed(
     real_signal_threshold: float = 0.05,
     neg_npmi_threshold: float = -0.2,
 ):
-    """Nuclear-seed Prune: anchor cell identity on the spatially-compact
-    nucleus, then admit cytoplasmic tx whose gene fits the seed by PMI.
+    """Seeded Prune: establish each cell's identity from a pruned gene
+    seed, then admit the remaining tx whose gene fits that seed by PMI.
+
+    The seed source and the admission scope are each selectable, and the
+    supported config surface (``phase1.prune_scope``) always sets them
+    together — see :meth:`tracer.config.Phase1Config.resolve_scope`:
+
+      ``nuclear_seed_only=True``  — Phase 1a seeds on NUCLEAR tx (legacy).
+      ``nuclear_seed_only=False`` — Phase 1a seeds on the WHOLE CELL; this
+        is what ``prune_scope="cell"`` (the default) selects. A nuclear
+        seed thin enough to be incoherent can no longer veto a cell whose
+        real program is visible only in cytoplasm.
+      ``nuclear_only_admit``     — restricts 1b/1c admission the same way.
+
+    Mixing them (nuclear seed + whole-cell admission) is reachable here but
+    not through the config, because a thin seed gating wide admission is
+    the split-brain state ``prune_scope`` exists to make unrepresentable.
 
     If ``skip_phase_1c=True``, the recursive sub-seed carve-out (Phase
     1c) is skipped — rest-pile tx (those that fail Phase 1b admission)
@@ -612,11 +627,13 @@ def prune_transcripts_nuclear_seed(
     style sub-modules.
 
     Per-cell algorithm:
-      Phase 1a: Run the greedy bad-edge pruner on the cell's NUCLEAR-tx
-        gene set only. The retained set is the cell's "seed" — its
-        primary identity, anchored on the spatially compact nucleus.
-        If the cell has fewer than ``min_nuclear_genes`` unique nuclear
-        genes, fall back to the standard whole-cell prune.
+      Phase 1a: Run the greedy bad-edge pruner over the seed gene set —
+        the cell's NUCLEAR-tx genes when ``nuclear_seed_only`` is set,
+        otherwise every gene in the cell. The retained set is the cell's
+        "seed", its primary identity. Under a nuclear seed, a cell with
+        fewer than ``min_nuclear_genes`` unique nuclear genes falls back
+        to the whole-cell prune; under a whole-cell seed no fallback is
+        possible, because the seed is already the whole cell.
 
       Phase 1b: For every tx in the cell (nuclear + cytoplasmic), test
         whether its gene fits the seed by mean PMI. Admit to the main
@@ -759,7 +776,6 @@ def prune_transcripts_nuclear_seed(
             float(threshold),
             int(min_nuclear_genes),
             1 if skip_phase_1c else 0,
-            float(seed_coherence_floor),
             1 if nuclear_only_admit else 0,
             1 if tx_weighted else 0,
             veto_mode_int,
@@ -769,6 +785,7 @@ def prune_transcripts_nuclear_seed(
             rs_thr_kernel,
             float(neg_npmi_threshold),
             1 if fallback_whole_cell_admit else 0,
+            1 if nuclear_seed_only else 0,
         )
     else:
         codes = _cy_prune.prune_cells_nuclear_seed(
@@ -779,7 +796,6 @@ def prune_transcripts_nuclear_seed(
             float(threshold),
             int(min_nuclear_genes),
             1 if skip_phase_1c else 0,
-            float(seed_coherence_floor),
             1 if nuclear_only_admit else 0,
             1 if tx_weighted else 0,
             veto_mode_int,
@@ -789,6 +805,7 @@ def prune_transcripts_nuclear_seed(
             rs_thr_kernel,
             float(neg_npmi_threshold),
             1 if fallback_whole_cell_admit else 0,
+            1 if nuclear_seed_only else 0,
         )
 
     # Apply codes to out_col. Default state of out_col is the cell_id

@@ -87,7 +87,6 @@ def _resolve_stitch_g_z(df: pd.DataFrame, cfg, auto_Gz: float,
 # scale with this. See benchmarks/pdac_pmi_sweep/ and
 # benchmarks/pdac_full_seq{,_thr0}_strict/ for the validation suite.
 PMI_THR = 0.2
-SEED_COHERENCE_FLOOR = 0.10
 TX_WEIGHTED_PRUNE = True   # tx-weighted greedy bad-edge prune (1a/1c)
 SPLIT_PHASE1_DZ = 2.0      # µm; if consecutive z-sorted tx gap > this,
                             #     split entity at that point.
@@ -1649,6 +1648,14 @@ def run_segmented_pipeline(df: pd.DataFrame,
     _p1_rs_thr = getattr(_p1, "real_signal_threshold", 0.05) if _p1 is not None else 0.05
     _p1_neg_thr = getattr(_p1, "neg_npmi_threshold", -0.2) if _p1 is not None else -0.2
     _set_admit_independent(getattr(_p1, "admit_independent", True) if _p1 is not None else True)
+    # Prune scope: one enum drives BOTH the Phase-1a seed source and the
+    # 1b/1c admission, so the split-brain state (nuclear seed gating a
+    # whole-cell admission) cannot be expressed. See Phase1Config.resolve_scope.
+    if _p1 is not None and hasattr(_p1, "resolve_scope"):
+        _p1_seed_only, _p1_admit_only = _p1.resolve_scope()
+    else:  # duck-typed cfg without the enum: default to whole-cell Prune
+        _nuc = getattr(_p1, "prune_scope", "cell") == "nuclear" if _p1 is not None else False
+        _p1_seed_only = _p1_admit_only = _nuc
     if "overlaps_nucleus" in df.columns:
         df_pruned, aux = prune_transcripts_nuclear_seed(
             df, npmi_panel,
@@ -1657,8 +1664,8 @@ def run_segmented_pipeline(df: pd.DataFrame,
             threshold=PMI_THR, unassigned_id="-1",
             metric_col=metric_col, nan_fill=0.0,
             min_nuclear_genes=3,
-            seed_coherence_floor=SEED_COHERENCE_FLOOR,
-            nuclear_only_admit=cfg.phase1.nuclear_only_admit,
+            nuclear_only_admit=_p1_admit_only,
+            nuclear_seed_only=_p1_seed_only,
             fallback_whole_cell_admit=FALLBACK_WHOLE_CELL_ADMIT,
             tx_weighted=TX_WEIGHTED_PRUNE,
             veto_mode=_p1_veto_mode,

@@ -51,6 +51,17 @@ for _p in (str(_REPO_ROOT / "src"), str(_REPO_ROOT)):
         sys.path.insert(0, _p)
 
 
+def _read_microns_per_pixel(spatial_dir) -> float | None:
+    """microns_per_pixel from a spatial/scalefactors_json.json, or None."""
+    f = Path(spatial_dir) / "scalefactors_json.json"
+    if not f.exists():
+        return None
+    try:
+        return float(json.load(open(f)).get("microns_per_pixel"))
+    except (ValueError, TypeError, KeyError):
+        return None
+
+
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -59,11 +70,20 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--spatial-dir", required=True,
                    help="spatial/ dir with tissue_positions + scalefactors.")
     p.add_argument("--geojson", required=True,
-                   help="10x nucleus segmentation GeoJSON (full-res pixels).")
+                   help="10x NUCLEUS segmentation GeoJSON (full-res pixels). "
+                        "Always supplies overlaps_nucleus.")
+    p.add_argument("--cell-geojson", default=None,
+                   help="10x CELL segmentation GeoJSON. When given, cell_id "
+                        "comes from the CELL polygons (so cytoplasmic bins "
+                        "join their cell) while overlaps_nucleus still comes "
+                        "from --geojson. Without it cell_id == nucleus id, "
+                        "which makes the whole-cell Prune scope a no-op: the "
+                        "'cell' is then exactly the nucleus.")
     p.add_argument("--npmi", default=None,
-                   help="NPMI panel csv(.gz); genes restrict the explode "
-                        "(strongly recommended — without it all 18k genes "
-                        "explode). Optional.")
+                   help="PMI/NPMI panel csv(.gz). Defines the panel gene set "
+                        "reported in the explode summary; it does NOT restrict "
+                        "which genes are exploded — pass --panel-genes-only "
+                        "for that. Optional.")
     p.add_argument("--out", required=True, help="Output parquet path.")
     p.add_argument("--bin-size-um", type=float, default=2.0)
     p.add_argument("--roi-size-um", type=float, default=None,
@@ -78,7 +98,18 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--max-transcripts", type=int, default=20_000_000,
                    help="Guardrail: refuse explodes larger than this.")
     p.add_argument("--id-field", default="cell_id",
-                   help="GeoJSON property holding the nucleus id.")
+                   help="GeoJSON property holding the nucleus/cell id. 10x "
+                        "uses the SAME id namespace in both masks.")
+    p.add_argument("--panel-genes-only", action="store_true",
+                   help="Explode ONLY panel genes (legacy). Default: explode "
+                        "ALL matrix genes, so off-panel genes exist to be "
+                        "placed by the off-panel proximity rescue instead of "
+                        "being dropped before the pipeline sees them.")
+    p.add_argument("--allow-frame-mismatch", action="store_true",
+                   help="Proceed even when the binned and segmented outputs "
+                        "report different microns_per_pixel (i.e. came from "
+                        "different spaceranger versions). Off by default: a "
+                        "silent frame mismatch mis-registers every bin.")
     return p.parse_args()
 
 
@@ -114,6 +145,41 @@ def main() -> None:
     margin = 50.0  # px — pad bbox so edge nuclei aren't missed
     bbox = (px.min() - margin, py.min() - margin, px.max() + margin, py.max() + margin)
 
+    # 2b. Registration guard. The polygons live in the full-res microscopy
+    # frame; the bins' pxl_*_in_fullres are only in that same frame when the
+    # binned and segmented outputs came from the same spaceranger run. A
+    # mismatch (e.g. binned 3.0.1 @ 5.7499 um/px vs segmented 4.0.1 @ 0.46428)
+    # silently mis-registers every bin, so fail loudly rather than overlay.
+    _bmpp = _read_microns_per_pixel(Path(args.spatial_dir))
+    _smpp = _read_microns_per_pixel(Path(args.geojson).parent / "spatial")
+    if _bmpp is None or _smpp is None:
+        # Failing OPEN is the dangerous direction here: the whole point of the
+        # check is that a frame mismatch is silent and mis-registers every bin.
+        # We cannot verify, so say so loudly rather than proceed as if verified.
+        _missing = ", ".join(
+            n for n, v in (("binned spatial", _bmpp),
+                           (f"segmented spatial ({Path(args.geojson).parent / 'spatial'})",
+                            _smpp)) if v is None)
+        print(f"[registration] WARNING cannot read microns_per_pixel from "
+              f"{_missing} — frame consistency is UNVERIFIED. If the binned and "
+              f"segmented outputs came from different spaceranger runs the "
+              f"overlay will be silently wrong.")
+    else:
+        _scale = float(_bmpp) / float(_smpp)
+        if abs(_scale - 1.0) < 0.02:
+            print(f"[registration] same frame (scale={_scale:.4f}) — direct overlay")
+        elif args.allow_frame_mismatch:
+            print(f"[registration] WARNING frame mismatch scale={_scale:.4f} "
+                  f"(binned {_bmpp} vs segmented {_smpp} um/px) — proceeding "
+                  f"on --allow-frame-mismatch; overlay is UNRELIABLE")
+        else:
+            raise SystemExit(
+                f"[registration] frame mismatch: binned microns_per_pixel="
+                f"{_bmpp} vs segmented={_smpp} (scale={_scale:.4f}). These "
+                f"outputs are from different spaceranger runs; the bin->polygon "
+                f"overlay would be wrong. Use matching outputs, or pass "
+                f"--allow-frame-mismatch to override.")
+
     # 3. Load nucleus polygons in the ROI bbox + overlay.
     print(f"[geo] loading nuclei within bbox {tuple(round(b) for b in bbox)} px")
     nuclei = load_nucleus_polygons(args.geojson, bbox=bbox, id_field=args.id_field)
@@ -124,20 +190,76 @@ def main() -> None:
           f"({ov_stats['frac_assigned']:.1%}) ambiguous={ov_stats['n_ambiguous']:,} "
           f"({ov_stats['ambiguity_rate']:.2%} of assigned)")
 
-    bin_cell_id = pd.Series(cell_id_arr, index=barcodes)
     bin_overlaps = pd.Series(overlaps_arr, index=barcodes)
 
+    if args.cell_geojson:
+        # cell_id from the CELL mask; overlaps_nucleus stays nucleus-derived.
+        # 10x ships both masks 1:1 on a shared id namespace (cell polygons are
+        # ~5.8x the nucleus area), so a bin inside nucleus N should also fall
+        # inside cell N -- checked below rather than assumed.
+        cells = load_nucleus_polygons(args.cell_geojson, bbox=bbox,
+                                      id_field=args.id_field)
+        print(f"[geo] {len(cells.geoms):,} cell polygons in bbox")
+        cell_arr, cell_ov, cstats = assign_bins_to_nuclei(
+            px, py, cells, multi_rule=args.multi_rule)
+        bin_cell_id = pd.Series(cell_arr, index=barcodes)
+        nuc_only = pd.Series(cell_id_arr, index=barcodes)
+        both = (nuc_only != "-1") & (bin_cell_id != "-1")
+        disagree = int((nuc_only[both] != bin_cell_id[both]).sum())
+        print(f"[overlay] cell-assigned bins={int((bin_cell_id != '-1').sum()):,} "
+              f"({cstats['frac_assigned']:.1%})  nucleus bins="
+              f"{int(bin_overlaps.astype(bool).sum()):,} "
+              f"({ov_stats['frac_assigned']:.1%})")
+        # Agreement alone is measured only where BOTH masks assigned, so a
+        # misregistered or truncated cell mask hides in the excluded set: every
+        # bin it fails to cover leaves `both` and cannot disagree. Check the
+        # containment the geometry guarantees instead — a nucleus bin must fall
+        # inside some cell — so wholesale failure surfaces as orphan coverage.
+        n_nuc_bins = int((nuc_only != "-1").sum())
+        orphan = int(((nuc_only != "-1") & (bin_cell_id == "-1")).sum())
+        orphan_frac = orphan / max(n_nuc_bins, 1)
+        if orphan:
+            print(f"[overlay] WARNING {orphan:,} nuclear bins ({orphan_frac:.2%}) "
+                  f"have NO cell assignment — the cell mask should enclose every "
+                  f"nucleus, so this points at misregistration or a partial "
+                  f"cell geojson")
+        if orphan_frac > 0.05:
+            raise SystemExit(
+                f"[overlay] {orphan_frac:.1%} of nuclear bins have no cell "
+                f"assignment (>5%). The cell mask does not cover the nucleus "
+                f"mask; the overlay would assign cytoplasm to the wrong cells. "
+                f"Check that --cell-geojson and --geojson come from the same "
+                f"segmentation run.")
+        if disagree:
+            print(f"[overlay] WARNING {disagree:,} bins sit in nucleus N but "
+                  f"cell M != N ({disagree / max(int(both.sum()), 1):.2%} of "
+                  f"co-assigned bins) — check registration")
+    else:
+        bin_cell_id = pd.Series(cell_id_arr, index=barcodes)
+        print("[overlay] cell_id == nucleus id (no --cell-geojson): every "
+              "cytoplasmic bin enters as -1 and the whole-cell Prune scope "
+              "is a no-op on this input.")
+
     # 4. Gene panel (restrict explode) — fall back to all matrix genes.
+    all_genes = set(map(str, bins.adata.var_names))
     if args.npmi:
         panel = load_pmi_panel(args.npmi)
         panel_genes = pmi_gene_set(panel)
     else:
-        panel_genes = set(np.asarray(bins.adata.var_names))
-        print("[warn] no --npmi: exploding ALL genes (may be very large).")
+        panel_genes = set(all_genes)
+    # Panel genes define the PMI edge list; explode genes decide which tx are
+    # materialised. Restricting the explode to the panel DROPS off-panel genes
+    # outright and idles the off-panel proximity rescue, so explode everything
+    # unless asked otherwise.
+    explode_genes = panel_genes if args.panel_genes_only else all_genes
+    print(f"[explode-genes] data={len(all_genes):,} "
+          f"in-panel={len(all_genes & panel_genes):,} "
+          f"off-panel={len(all_genes - panel_genes):,} "
+          f"exploding={'panel-only' if args.panel_genes_only else 'ALL'}")
 
     # 5. Explode with per-bin seed + overlaps_nucleus.
     df = explode_to_transcripts(
-        bins, panel_genes=panel_genes, max_transcripts=args.max_transcripts,
+        bins, panel_genes=explode_genes, max_transcripts=args.max_transcripts,
         bin_cell_id=bin_cell_id, bin_overlaps_nucleus=bin_overlaps,
     )
     df["z"] = np.float32(0.0)  # VisiumHD is 2D
@@ -152,16 +274,24 @@ def main() -> None:
     meta = {
         "source_matrix": str(args.matrix_dir),
         "geojson": str(args.geojson),
+        "cell_geojson": str(args.cell_geojson) if args.cell_geojson else None,
         "bin_size_um": args.bin_size_um,
         "roi_size_um": args.roi_size_um,
         "n_bins": int(ov_stats["n_bins"]),
         "n_transcript_rows": n_tx,
         "n_genes": int(df["feature_name"].nunique()),
         "n_nuclei_in_bbox": int(ov_stats["n_nuclei"]),
-        "n_nuclei_seeded": int(bin_cell_id[bin_cell_id != "-1"].nunique()),
+        # Count nuclei from the NUCLEUS overlay, never from `bin_cell_id`:
+        # under --cell-geojson the latter is the cell mask, so deriving it
+        # there reported cells under a field named nuclei.
+        "n_nuclei_seeded": int(
+            pd.Series(cell_id_arr)[pd.Series(cell_id_arr) != "-1"].nunique()),
+        # `cell_id` provenance, so a reader can tell which mask seeded the run.
+        "cell_id_source": "cell_mask" if args.cell_geojson else "nucleus_mask",
+        "n_cells_seeded": int(bin_cell_id[bin_cell_id != "-1"].nunique()),
         "frac_bins_assigned": ov_stats["frac_assigned"],
         "frac_bins_unassigned": 1.0 - ov_stats["frac_assigned"],
-        "frac_tx_nucleus_seeded": float(assigned_tx / n_tx) if n_tx else 0.0,
+        "frac_tx_cell_seeded": float(assigned_tx / n_tx) if n_tx else 0.0,
         "overlap_ambiguity_rate": ov_stats["ambiguity_rate"],
         "multi_rule": args.multi_rule,
         "coord_bounds_um": {

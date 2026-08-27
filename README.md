@@ -119,23 +119,25 @@ python -m tracer.noseg_pipeline \
 See the available options with `python scripts/run_tracer.py --help`. Add `--smoke`
 to the no-segmentation run for a fast ROI-limited end-to-end check.
 
-**VisiumHD seg mode** — nucleus segmentation as the prior
+**VisiumHD seg mode** — cell/nucleus segmentation as the prior
 
-VisiumHD recently starts shipping 10x nucleus polygons. `prepare_visiumhd_seg_input.py`
-overlays the bin centers onto those polygons to derive an `overlaps_nucleus`
-seed per bin (the VisiumHD analogue of imaging `overlaps_nucleus`), then the
-**same** `run_tracer.py` seg pipeline refines it. Two steps:
+VisiumHD ships both 10x cell and nucleus polygons. `prepare_visiumhd_seg_input.py`
+overlays the bin centers onto those polygons to derive a `cell_id` and an
+`overlaps_nucleus` seed per bin (the VisiumHD analogue of imaging
+`overlaps_nucleus`), then the **same** `run_tracer.py` seg pipeline refines it.
+Two steps:
 
 ```bash
-# Step 1 — build a seg-mode transcript table from bins + nucleus masks.
+# Step 1 — build a seg-mode transcript table from bins + cell/nucleus masks.
 # Start with a small ROI (--roi-size-um) before scaling up.
 python scripts/prepare_visiumhd_seg_input.py \
-  --matrix-dir  path/to/segmented_outputs/binned_outputs/square_002um/filtered_feature_bc_matrix \
-  --spatial-dir path/to/segmented_outputs/binned_outputs/square_002um/spatial \
-  --geojson     path/to/segmented_outputs/graphclust_annotated_nucleus_segmentations.geojson \
-  --npmi        npmi.csv.gz \
-  --roi-size-um 300 \
-  --out         results/tracer/seg/roi.parquet
+  --matrix-dir   path/to/segmented_outputs/binned_outputs/square_002um/filtered_feature_bc_matrix \
+  --spatial-dir  path/to/segmented_outputs/binned_outputs/square_002um/spatial \
+  --geojson      path/to/segmented_outputs/graphclust_annotated_nucleus_segmentations.geojson \
+  --cell-geojson path/to/segmented_outputs/graphclust_annotated_cell_segmentations.geojson \
+  --npmi         npmi.csv.gz \
+  --roi-size-um  300 \
+  --out          results/tracer/seg/roi.parquet
 
 # Step 2 — run the standard seg pipeline on the prepared input.
 python scripts/run_tracer.py \
@@ -147,12 +149,27 @@ python scripts/run_tracer.py \
   --seed 1
 ```
 
+`--cell-geojson` is what makes the default `phase1.prune_scope = "cell"`
+meaningful here. Without it `cell_id` is derived from the *nucleus* mask, so
+`cell_id != "-1"` is exactly `overlaps_nucleus == 1`: the "whole cell" is the
+nucleus, every cytoplasmic bin enters as `-1` and is invisible to Prune, and a
+whole-cell seed is a no-op. With it, `cell_id` comes from the cell mask while
+`overlaps_nucleus` stays nucleus-derived — on BTC HC01 that is 72.7% of bins
+cell-assigned versus 14.8% nucleus-only. Pass `--panel-genes-only` to restrict
+the explode to panel genes (legacy); the default explodes every matrix gene, so
+off-panel transcripts exist for the off-panel proximity rescue to place.
+
+The prep refuses to overlay when the binned and segmented outputs report
+different `microns_per_pixel` (i.e. came from different spaceranger runs), since
+the bin→polygon overlay would be silently mis-registered; override with
+`--allow-frame-mismatch` if you know the frames are compatible.
+
 Step 1 also writes a `<out>.meta.json` (bins, transcript rows, genes, nuclei,
-assigned/unassigned fractions, overlap ambiguity rate). The nucleus-seeded
-input makes `run_tracer.py` take the nuclear-seed prune path (whole cells +
-reconstructed partials), unlike noseg mode. The `--multi-rule` flag
+cells, assigned/unassigned fractions, overlap ambiguity rate). The seeded input
+makes `run_tracer.py` take the seeded prune path (whole cells + reconstructed
+partials), unlike noseg mode. The `--multi-rule` flag
 (`nearest_centroid` | `smallest_id`) controls the tie-break when a bin center
-falls inside more than one nucleus.
+falls inside more than one polygon.
 
 > VisiumHD is 2D (constant `z`), so the z-aware stages auto-degrade to 2D with
 > a logged warning — no `--g-z-um` tuning is needed.

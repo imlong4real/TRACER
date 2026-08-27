@@ -166,15 +166,32 @@ def test_rescue_invariants(kwargs, match):
 def test_phase1_invariants():
     with pytest.raises(ValueError, match="pmi_threshold"):
         Phase1Config(pmi_threshold=2.0)
-    with pytest.raises(ValueError, match="seed_coherence_floor"):
-        Phase1Config(seed_coherence_floor=-0.1)
+    with pytest.raises(ValueError, match="prune_scope"):
+        Phase1Config(prune_scope="nucleus")
+    # seed_coherence_floor was REMOVED (2026-08-23): it fired 0-1 times per
+    # ROI (a >=2-gene seed is a clique whose pairs already cleared
+    # pmi_threshold=0.2 > the 0.10 floor, and a 1-gene seed was exempted
+    # outright), while Mid-QC gates the ASSEMBLED entity, covers the
+    # <2-gene case the floor exempted, and demotes with sibling promotion
+    # instead of erasing the whole cell before Phase 1b/1c.
+    with pytest.raises(TypeError):
+        Phase1Config(seed_coherence_floor=0.1)
 
 
 def test_fav_config_defaults():
-    """The "fav config" is promoted to the default: both Phase-1
-    admission knobs default False (2026-08-17)."""
+    """The "fav config" is the default: whole-cell Prune (seed AND
+    admission) + admit_independent False.
+
+    Asserted on the RESOLVED scope rather than the raw per-half booleans,
+    which now default to ``None`` and derive from ``prune_scope``
+    (2026-08-23). This is a stronger lock than the original: it pins the
+    Phase-1a SEED half too, which the old assertion never covered.
+    """
     cfg = load_config()
-    assert cfg.phase1.nuclear_only_admit is False
+    assert cfg.phase1.prune_scope == "cell"
+    seed_nuclear, admit_nuclear = cfg.phase1.resolve_scope()
+    assert seed_nuclear is False, "Phase-1a seed must default to whole-cell"
+    assert admit_nuclear is False, "Phase-1b/1c admission must default to whole-cell"
     assert cfg.phase1.admit_independent is False
 
 
