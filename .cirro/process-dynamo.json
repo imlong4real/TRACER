@@ -4,7 +4,7 @@
     "repository": "GITHUBPUBLIC",
     "script": "workflows/cirro/main.nf",
     "uri": "imlong4real/TRACER",
-    "version": "feat/cirro-tracer-seg-v0.1.1"
+    "version": "be11118baf605a4752c88fe13ff047115d645a54"
   },
   "desc": "Refine Xenium transcript-to-cell assignments with pinned TRACER Seg and an explicit PMI/cPMI reference",
   "documentationUrl": "https://github.com/imlong4real/TRACER/tree/feat/cirro-tracer-seg-v0.1.1/workflows/cirro",
