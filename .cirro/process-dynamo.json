@@ -1,0 +1,18 @@
+{
+  "childProcessIds": [],
+  "code": {
+    "repository": "GITHUBPUBLIC",
+    "script": "workflows/cirro/main.nf",
+    "uri": "imlong4real/TRACER",
+    "version": "feat/cirro-tracer-seg-v0.1.1"
+  },
+  "desc": "Refine Xenium transcript-to-cell assignments with pinned TRACER Seg and an explicit PMI/cPMI reference",
+  "documentationUrl": "https://github.com/imlong4real/TRACER/tree/feat/cirro-tracer-seg-v0.1.1/workflows/cirro",
+  "executor": "NEXTFLOW",
+  "id": "tracer-seg-0-1-1-cirro",
+  "name": "TRACER Seg (Xenium)",
+  "parentProcessIds": [
+    "xenium",
+    "xeniumranger-resegment-1-0"
+  ]
+}

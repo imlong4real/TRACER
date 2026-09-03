@@ -1,0 +1,33 @@
+#!/bin/bash
+# Minimal procfs-backed ps for Nextflow's task monitor.
+#
+# The immutable TRACER image intentionally has no procps package. Nextflow
+# only needs "ps -e -o pid= -o ppid=" to walk the task process tree, so this
+# compatibility shim avoids modifying or installing into the pinned image.
+
+set -euo pipefail
+
+for status in /proc/[0-9]*/status; do
+    pid=''
+    ppid=''
+    if ! {
+        while IFS=$'\t ' read -r key value _; do
+            case "$key" in
+                Pid:)
+                    pid="$value"
+                    ;;
+                PPid:)
+                    ppid="$value"
+                    ;;
+            esac
+            if [[ -n "$pid" && -n "$ppid" ]]; then
+                break
+            fi
+        done < "$status"
+    } 2>/dev/null; then
+        continue
+    fi
+    if [[ -n "$pid" && -n "$ppid" ]]; then
+        printf '%s %s\n' "$pid" "$ppid"
+    fi
+done

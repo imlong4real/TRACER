@@ -1,0 +1,160 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:tracer:cirro:nextflow-schema:0.1.1-cirro.1",
+  "title": "TRACER Seg for Cirro",
+  "description": "Refine Xenium transcript-to-cell assignments with an explicit PMI/cPMI reference.",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "transcripts": {
+      "type": "string",
+      "format": "file-path",
+      "pathType": "dataset",
+      "file": "**/*transcripts*.parquet",
+      "title": "Xenium transcripts",
+      "description": "Xenium transcripts Parquet. Existing cell_id and overlaps_nucleus assignments are used unless vector boundaries are supplied."
+    },
+    "pmi": {
+      "type": "string",
+      "format": "file-path",
+      "pathType": "references",
+      "file": "**/*pmi*.csv*",
+      "title": "PMI / cPMI reference",
+      "description": "Required long-format CSV(.gz) containing gene_i, gene_j, and PMI or NPMI. The selected path and SHA-256 are recorded."
+    },
+    "cell_boundaries": {
+      "type": "string",
+      "format": "file-path",
+      "pathType": "dataset",
+      "file": "**/*boundar*",
+      "title": "Cell boundaries (optional)",
+      "description": "Optional Xenium vector cell boundaries (Parquet/CSV/GeoJSON). When set, polygon membership replaces transcript cell_id."
+    },
+    "nucleus_boundaries": {
+      "type": "string",
+      "format": "file-path",
+      "pathType": "dataset",
+      "file": "**/*boundar*",
+      "title": "Nucleus boundaries (optional)",
+      "description": "Optional Xenium vector nucleus boundaries. When set, polygon membership defines overlaps_nucleus."
+    },
+    "user_config": {
+      "type": "string",
+      "format": "file-path",
+      "pathType": "references",
+      "file": "**/*.toml",
+      "title": "TRACER TOML override (optional)",
+      "description": "Optional TRACER TOML layered after the selected platform preset. The fully resolved config is saved."
+    },
+    "sample_name": {
+      "type": "string",
+      "default": "tracer_sample",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+      "title": "Sample name",
+      "description": "Short output label; letters, numbers, dot, underscore, and dash only."
+    },
+    "platform": {
+      "type": "string",
+      "enum": ["xenium", "atera"],
+      "default": "xenium",
+      "title": "Platform preset",
+      "description": "TRACER preset: xenium for standard panels or atera for Xenium 5K."
+    },
+    "qv_min": {
+      "type": "number",
+      "minimum": 0,
+      "title": "Minimum QV (optional)",
+      "description": "Keep rows with qv strictly greater than this value. Leave blank to keep all QV values."
+    },
+    "remove_control_probes": {
+      "type": "boolean",
+      "default": true,
+      "title": "Remove control probes",
+      "description": "Remove Xenium control and non-gene probes before TRACER."
+    },
+    "drop_unassigned": {
+      "type": "boolean",
+      "default": false,
+      "title": "Drop unassigned transcripts",
+      "description": "Normally false: TRACER uses unassigned transcripts to reconstruct partial cells."
+    },
+    "pmi_threshold": {
+      "type": "number",
+      "title": "PMI threshold (optional)",
+      "description": "Explicit TRACER PMI threshold override. Leave blank for the resolved preset/config value."
+    },
+    "g_z_um": {
+      "type": "string",
+      "pattern": "^(auto|[0-9]+(?:\\.[0-9]+)?)$",
+      "title": "Z-bin size (optional)",
+      "description": "Positive microns or auto. Leave blank for the platform/config value."
+    },
+    "tau": {
+      "type": "number",
+      "minimum": 0,
+      "title": "QC coherence threshold (optional)",
+      "description": "Purity/conflict threshold. Leave blank for metric-aware TRACER defaults."
+    },
+    "min_tx_per_cell_for_scores": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 5,
+      "title": "Minimum transcripts for QC",
+      "description": "Minimum transcripts per cell for purity/conflict scoring."
+    },
+    "score_mode": {
+      "type": "string",
+      "enum": ["count", "magnitude"],
+      "default": "count",
+      "title": "QC score mode",
+      "description": "Count is bounded and recommended; magnitude weights PMI strength."
+    },
+    "seed": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 1,
+      "title": "Random seed",
+      "description": "Deterministic TRACER and Python random seed."
+    },
+    "cpus": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 64,
+      "default": 16,
+      "title": "CPUs",
+      "description": "CPU request and numerical-library thread limit."
+    },
+    "memory_gb": {
+      "type": "integer",
+      "minimum": 8,
+      "maximum": 512,
+      "default": 64,
+      "title": "Initial memory (GB)",
+      "description": "Initial memory request; retry attempts scale this value."
+    },
+    "max_memory_gb": {
+      "type": "integer",
+      "minimum": 8,
+      "maximum": 512,
+      "default": 256,
+      "title": "Maximum retry memory (GB)",
+      "description": "Cap for retry scaling; must be at least initial memory."
+    },
+    "max_retries": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 5,
+      "default": 3,
+      "title": "OOM retries",
+      "description": "Retries for transient/OOM exits; memory increases once per attempt."
+    },
+    "outdir": {
+      "type": "string",
+      "format": "directory-path",
+      "default": "results",
+      "title": "Output directory",
+      "description": "Local output directory. Cirro overrides this with the destination dataset path."
+    }
+  },
+  "required": ["transcripts", "pmi", "sample_name", "platform"]
+}

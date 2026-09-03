@@ -1,0 +1,173 @@
+{
+  "form": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "urn:tracer:cirro:form:0.1.1-cirro.1",
+    "title": "TRACER Seg (Xenium)",
+    "description": "Pinned TRACER Seg refinement with explicit PMI/cPMI input and complete run provenance.",
+    "type": "object",
+    "properties": {
+      "transcripts": {
+        "type": "string",
+        "pathType": "dataset",
+        "file": "**/*transcripts*.parquet",
+        "title": "Xenium transcripts",
+        "description": "Xenium transcripts Parquet with segmentation assignments, or use the optional vector boundaries below."
+      },
+      "pmi": {
+        "type": "string",
+        "pathType": "references",
+        "file": "**/*pmi*.csv*",
+        "title": "PMI / cPMI reference",
+        "description": "Long-format CSV(.gz) with gene_i, gene_j, and PMI or NPMI. Path and SHA-256 are recorded."
+      },
+      "cell_boundaries": {
+        "type": "string",
+        "pathType": "dataset",
+        "file": "**/*boundar*",
+        "title": "Cell boundaries (optional)",
+        "description": "Vector cell boundaries (Parquet/CSV/GeoJSON); polygon membership replaces transcript cell_id."
+      },
+      "nucleus_boundaries": {
+        "type": "string",
+        "pathType": "dataset",
+        "file": "**/*boundar*",
+        "title": "Nucleus boundaries (optional)",
+        "description": "Vector nucleus boundaries; polygon membership defines overlaps_nucleus."
+      },
+      "user_config": {
+        "type": "string",
+        "pathType": "references",
+        "file": "**/*.toml",
+        "title": "TRACER TOML override (optional)",
+        "description": "Optional config layered after the platform preset; the resolved config is saved."
+      },
+      "sample_name": {
+        "type": "string",
+        "default": "tracer_sample",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+        "title": "Sample name",
+        "description": "Output label using letters, numbers, dot, underscore, or dash."
+      },
+      "platform": {
+        "type": "string",
+        "enum": ["xenium", "atera"],
+        "default": "xenium",
+        "title": "Platform preset",
+        "description": "Use xenium for standard panels or atera for Xenium 5K."
+      },
+      "qv_min": {
+        "type": "number",
+        "minimum": 0,
+        "title": "Minimum QV (optional)",
+        "description": "Keep transcripts with qv strictly greater than this value; blank keeps all."
+      },
+      "remove_control_probes": {
+        "type": "boolean",
+        "default": true,
+        "title": "Remove control probes",
+        "description": "Remove Xenium control and non-gene probes before TRACER."
+      },
+      "drop_unassigned": {
+        "type": "boolean",
+        "default": false,
+        "title": "Drop unassigned transcripts",
+        "description": "Normally false because TRACER reconstructs from unassigned transcripts."
+      },
+      "pmi_threshold": {
+        "type": "number",
+        "title": "PMI threshold (optional)",
+        "description": "Explicit threshold override; blank uses the resolved config."
+      },
+      "g_z_um": {
+        "type": "string",
+        "pattern": "^(auto|[0-9]+(?:\\.[0-9]+)?)$",
+        "title": "Z-bin size (optional)",
+        "description": "Positive microns or auto; blank uses the resolved config."
+      },
+      "tau": {
+        "type": "number",
+        "minimum": 0,
+        "title": "QC coherence threshold (optional)",
+        "description": "Purity/conflict threshold; blank uses metric-aware defaults."
+      },
+      "min_tx_per_cell_for_scores": {
+        "type": "integer",
+        "minimum": 1,
+        "default": 5,
+        "title": "Minimum transcripts for QC",
+        "description": "Minimum transcript count for cell purity/conflict scoring."
+      },
+      "score_mode": {
+        "type": "string",
+        "enum": ["count", "magnitude"],
+        "default": "count",
+        "title": "QC score mode",
+        "description": "Count is bounded and recommended; magnitude weights PMI strength."
+      },
+      "seed": {
+        "type": "integer",
+        "minimum": 0,
+        "default": 1,
+        "title": "Random seed",
+        "description": "Deterministic TRACER/Python seed."
+      },
+      "cpus": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 64,
+        "default": 16,
+        "title": "CPUs",
+        "description": "CPU request and numerical-library thread limit."
+      },
+      "memory_gb": {
+        "type": "integer",
+        "minimum": 8,
+        "maximum": 512,
+        "default": 64,
+        "title": "Initial memory (GB)",
+        "description": "Initial request; eligible retries scale this value."
+      },
+      "max_memory_gb": {
+        "type": "integer",
+        "minimum": 8,
+        "maximum": 512,
+        "default": 256,
+        "title": "Maximum retry memory (GB)",
+        "description": "Retry cap; must be at least initial memory."
+      },
+      "max_retries": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 5,
+        "default": 3,
+        "title": "OOM retries",
+        "description": "Retries transient/OOM exits, increasing memory each attempt."
+      }
+    },
+    "required": ["transcripts", "pmi", "sample_name", "platform"]
+  },
+  "ui": {
+    "ui:order": [
+      "transcripts",
+      "pmi",
+      "cell_boundaries",
+      "nucleus_boundaries",
+      "user_config",
+      "sample_name",
+      "platform",
+      "qv_min",
+      "remove_control_probes",
+      "drop_unassigned",
+      "pmi_threshold",
+      "g_z_um",
+      "tau",
+      "min_tx_per_cell_for_scores",
+      "score_mode",
+      "seed",
+      "cpus",
+      "memory_gb",
+      "max_memory_gb",
+      "max_retries"
+    ]
+  }
+}

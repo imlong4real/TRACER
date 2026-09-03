@@ -116,3 +116,12 @@ slurm/
 
 # Agent / tooling local state
 .claude/
+
+# Cirro/Nextflow local validation artifacts
+.nextflow/
+.nextflow.log*
+nxf-tmp.*
+work/
+workflows/cirro/.singularity/
+workflows/cirro/tests/work/
+workflows/cirro/tests/results*/
