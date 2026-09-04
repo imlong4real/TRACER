@@ -1,4 +1,5 @@
 {
+  "input_dir": "$.inputs[0].dataPath",
   "transcripts": "$.dataset.params.transcripts",
   "pmi": "$.dataset.params.pmi",
   "cell_boundaries": "$.dataset.params.cell_boundaries",

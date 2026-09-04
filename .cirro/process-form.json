@@ -16,6 +16,7 @@
       "pmi": {
         "type": "string",
         "pathType": "references",
+        "useS3Path": true,
         "file": "**/*pmi*.csv*",
         "title": "PMI / cPMI reference",
         "description": "Long-format CSV(.gz) with gene_i, gene_j, and PMI or NPMI. Path and SHA-256 are recorded."
@@ -37,6 +38,7 @@
       "user_config": {
         "type": "string",
         "pathType": "references",
+        "useS3Path": true,
         "file": "**/*.toml",
         "title": "TRACER TOML override (optional)",
         "description": "Optional config layered after the platform preset; the resolved config is saved."

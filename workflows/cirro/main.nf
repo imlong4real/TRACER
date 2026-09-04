@@ -22,6 +22,28 @@ def optionalPathChannel(value) {
     return Channel.fromPath(value, checkIfExists: true)
 }
 
+def resolveDatasetPath(value, inputDir) {
+    if (value == null || value.toString().trim().isEmpty()) {
+        return value
+    }
+    def candidate = value.toString()
+    if (candidate ==~ /^[A-Za-z][A-Za-z0-9+.-]*:\/\/.*/ || candidate.startsWith('/')) {
+        return candidate
+    }
+    if (inputDir == null || inputDir.toString().trim().isEmpty()) {
+        return candidate
+    }
+    def base = inputDir.toString().replaceFirst('/+$', '')
+    def relative = candidate.replaceFirst('^/+', '')
+    def baseLeaf = base.tokenize('/').last()
+    if (relative == baseLeaf) {
+        relative = ''
+    } else if (relative.startsWith("${baseLeaf}/")) {
+        relative = relative.substring(baseLeaf.size() + 1)
+    }
+    return relative ? "${base}/${relative}" : base
+}
+
 def sourceB64(value) {
     if (value == null) {
         return ''
@@ -135,6 +157,10 @@ workflow {
     requiredParam('transcripts', params.transcripts)
     requiredParam('pmi', params.pmi)
 
+    def resolved_transcripts = resolveDatasetPath(params.transcripts, params.input_dir)
+    def resolved_cell_boundaries = resolveDatasetPath(params.cell_boundaries, params.input_dir)
+    def resolved_nucleus_boundaries = resolveDatasetPath(params.nucleus_boundaries, params.input_dir)
+
     if (!(params.platform in ['xenium', 'atera'])) {
         error "--platform must be one of: xenium, atera"
     }
@@ -151,11 +177,11 @@ workflow {
         error "--g_z_um must be 'auto' or a positive number"
     }
 
-    transcripts_ch = Channel.fromPath(params.transcripts, checkIfExists: true)
+    transcripts_ch = Channel.fromPath(resolved_transcripts, checkIfExists: true)
     pmi_ch = Channel.fromPath(params.pmi, checkIfExists: true)
     user_config_ch = optionalPathChannel(params.user_config)
-    cell_boundaries_ch = optionalPathChannel(params.cell_boundaries)
-    nucleus_boundaries_ch = optionalPathChannel(params.nucleus_boundaries)
+    cell_boundaries_ch = optionalPathChannel(resolved_cell_boundaries)
+    nucleus_boundaries_ch = optionalPathChannel(resolved_nucleus_boundaries)
     runner_path = file("${projectDir}/bin/run_tracer_seg.py")
     if (!runner_path.exists()) {
         runner_path = file("${projectDir}/workflows/cirro/bin/run_tracer_seg.py")
@@ -189,11 +215,11 @@ workflow {
         params.min_tx_per_cell_for_scores as int,
         params.score_mode,
         params.seed as int,
-        sourceB64(params.transcripts),
+        sourceB64(resolved_transcripts),
         sourceB64(params.pmi),
         sourceB64(params.user_config),
-        sourceB64(params.cell_boundaries),
-        sourceB64(params.nucleus_boundaries),
+        sourceB64(resolved_cell_boundaries),
+        sourceB64(resolved_nucleus_boundaries),
         workflow.commitId ?: 'local-uncommitted',
         workflow.revision ?: 'local'
     )

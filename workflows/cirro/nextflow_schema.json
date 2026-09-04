@@ -17,6 +17,7 @@
     "pmi": {
       "type": "string",
       "format": "file-path",
+      "useS3Path": true,
       "pathType": "references",
       "file": "**/*pmi*.csv*",
       "title": "PMI / cPMI reference",
@@ -41,6 +42,7 @@
     "user_config": {
       "type": "string",
       "format": "file-path",
+      "useS3Path": true,
       "pathType": "references",
       "file": "**/*.toml",
       "title": "TRACER TOML override (optional)",
