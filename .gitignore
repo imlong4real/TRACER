@@ -125,3 +125,4 @@ work/
 workflows/cirro/.singularity/
 workflows/cirro/tests/work/
 workflows/cirro/tests/results*/
+workflows/cirro/tests/*concordance.json
