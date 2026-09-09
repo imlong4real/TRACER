@@ -141,6 +141,89 @@ def load_transcripts_reference(path: Path, *, nucleus_only: bool,
     return X, keep, depth, pd.DataFrame(index=pd.Index(cell_cat.categories))
 
 
+def _classify_counts(X, *, obs=None, tol: float = 1e-6):
+    """Are these integer counts? Everything else is rejected.
+
+    ONE RULE: counts are integers. CP10k, TPM, log1p(CP10k) and any mix of
+    them are non-integral, so integrality alone separates the good case from
+    every bad one.
+
+    Two alternatives I tried and dropped:
+
+    * "row sum == 1e4 or 1e6" names the normalisation but is not robust:
+      normalise to CP10k and THEN drop genes -- an ordinary preprocessing
+      order -- and row sums land nowhere near 1e4 (measured: median 3,378,
+      0.0% of cells within tolerance). Integrality still catches that file.
+
+    * "non-integral AND max < 15 => log-transformed" keys on magnitude, and a
+      deep cell's CP10k values are all small (a 100k-UMI cell with a 100-count
+      gene gives CP10k = 10), so genuinely scaled data can look logged.
+
+    We reject even a per-cell RESCALING, which is provably harmless under the
+    default recipe -- CP10k is invariant to it, and a 38%-TPM GBM reference
+    produced a BIT-IDENTICAL panel. That invariance belongs to `xgt1` +
+    `n_genes`, not to the file: the same reference changes the panel under
+    `count1`/`count2` or `depth_metric=total_counts`. Rejecting once beats
+    tolerating it until someone changes the arm. `--allow-non-integral-counts`
+    is the escape hatch.
+    """
+    X = X.tocsr() if sp.issparse(X) else sp.csr_matrix(X)
+    n = X.shape[0]
+    out = {"n_cells": n, "status": "ok", "n_non_integral": 0, "offending": None}
+    if X.data.size == 0:
+        return out
+    d = X.data.astype(np.float64, copy=False)
+    frac = np.abs(d - np.round(d))
+    if frac.max() <= tol:
+        return out
+    rows = np.repeat(np.arange(n), np.diff(X.indptr))
+    cell_frac = np.zeros(n)
+    np.maximum.at(cell_frac, rows, frac)
+    bad = cell_frac > tol
+    out.update(status="non_integral", n_non_integral=int(bad.sum()),
+               max_deviation=float(frac.max()),
+               offending=_name_batches(bad, obs))
+    return out
+
+
+def _name_batches(mask, obs):
+    """Which batch are the offending cells concentrated in, if any?"""
+    if obs is None:
+        return None
+    for col in ("Project", "orig.ident", "batch", "sample", "sample_id"):
+        if col in getattr(obs, "columns", ()):
+            v = obs[col].astype(str).to_numpy()
+            hits = sorted(k for k in np.unique(v) if mask[v == k].mean() > 0.5)
+            if hits:
+                return f"{col}: {', '.join(hits[:6])}"
+    return None
+
+
+def _report_counts_verdict(v, *, allow_non_integral: bool = False) -> None:
+    """Accept integer counts; otherwise stop, unless explicitly overridden."""
+    if v["status"] == "ok":
+        log(f"counts check PASSED ({v['n_cells']:,} cells, all integral)")
+        return
+    where = f" Concentrated in {v['offending']}." if v.get("offending") else ""
+    msg = (f"counts check FAILED: {v['n_non_integral']:,}/{v['n_cells']:,} cells "
+           f"hold NON-INTEGRAL values (max deviation "
+           f"{v.get('max_deviation', 0):.3f}); this is not a counts matrix."
+           f"{where}")
+    if allow_non_integral:
+        import warnings
+        warnings.warn(msg + " Proceeding under --allow-non-integral-counts.",
+                      RuntimeWarning, stacklevel=2)
+        log("WARNING: " + msg + " Proceeding (--allow-non-integral-counts).")
+        return
+    raise SystemExit(
+        msg + "\n  Fix one of:\n"
+        "    * point --layer at a real counts layer\n"
+        "    * --x-is-log1p-cp10k --depth-obs COL  (recover counts from X)\n"
+        "    * --exclude-obs COL=VALUE             (drop the offending batch)\n"
+        "    * --allow-non-integral-counts         (proceed anyway; safe ONLY "
+        "for a per-cell RESCALING under xgt1+n_genes, NEVER for log1p)")
+
+
 def _check_count_floor(X, raw, obs, tol: float = 1e-3):
     """Warn when a reconstruction does not land on integer counts.
 
@@ -181,7 +264,9 @@ def _check_count_floor(X, raw, obs, tol: float = 1e-3):
 
 def load_reference(h5ad: Path, panel_genes: list[str], *,
                    depth_obs: str | None = None, x_is_log1p_cp10k: bool = False,
-                   exclude_obs: list[str] | None = None):
+                   exclude_obs: list[str] | None = None,
+                   allow_non_integral: bool = False,
+                   verdict_out: dict | None = None):
     """Return (counts_over_panel_genes, kept_gene_names, true_depth, obs).
 
     ``x_is_log1p_cp10k`` recovers integer counts from an atlas that ships
@@ -226,6 +311,14 @@ def load_reference(h5ad: Path, panel_genes: list[str], *,
         log(f"recovered counts from log1p(CP10k): min {X.data.min():.0f} "
             f"max {X.data.max():,.0f}, {X.nnz:,} nonzero")
         _check_count_floor(X, raw, A.obs)
+    # Sanity-check whatever we are about to treat as counts — on the FULL
+    # matrix, before restricting to panel genes, because a subset's maximum is
+    # lower than the whole cell's and the log-vs-continuous split keys on it.
+    _counts_verdict = _classify_counts(X, obs=A.obs)
+    _report_counts_verdict(_counts_verdict, allow_non_integral=allow_non_integral)
+    if verdict_out is not None:
+        verdict_out.update(_counts_verdict)
+
     col = {g: i for i, g in enumerate(vn)}
     sub = X[:, [col[g] for g in keep]].tocsr()
     log(f"reference {A.n_obs:,} cells; panel {len(panel_genes)} genes, "
@@ -319,6 +412,7 @@ def _write_receipt(args, pcfg) -> None:
         "effective_promote": args._effective_promote,
         "canonical_panel_substring":
             "_cpmi_" if args._effective_promote == "cPMI" else "_pmi_",
+        "counts_check": dict(_COUNTS_VERDICT) or None,
         "resolved_panel_config": asdict(pcfg),
         "effective_args": {k: (str(v) if isinstance(v, Path) else v)
                            for k, v in vars(args).items()
@@ -372,6 +466,9 @@ def write_panel(edges, out: Path, name: str, *, promote: str | None = None,
         f"pos {np.mean(v > 0.2):.0%} neg {np.mean(v < -0.2):.0%} -> {p.name}")
 
 
+_COUNTS_VERDICT: dict = {}
+
+
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -401,6 +498,11 @@ def main():
                          "--strategy vanilla.")
     ap.add_argument("--arms", nargs="+", default=None,
                     choices=sorted(ARM_SPECS), help="Presence arms to build.")
+    ap.add_argument("--allow-non-integral-counts", action="store_true",
+                    help="Proceed when the counts matrix is not integral. Safe "
+                         "ONLY for a per-cell RESCALING (CP10k/TPM) under the "
+                         "xgt1 + n_genes recipe, where CP10k normalises the "
+                         "factor away; NEVER for log-transformed values.")
     ap.add_argument("--panel-preset", default=None,
                     help="Panel RECIPE preset (tracer/configs/panels/*.toml). "
                          "Inferred when omitted: --h5ad -> the with-reference "
@@ -522,7 +624,9 @@ def main():
         sub, keep, depth, obs = load_reference(
             args.h5ad, genes, depth_obs=args.depth_obs,
             x_is_log1p_cp10k=args.x_is_log1p_cp10k,
-            exclude_obs=args.exclude_obs)
+            exclude_obs=args.exclude_obs,
+            allow_non_integral=args.allow_non_integral_counts,
+            verdict_out=_COUNTS_VERDICT)
 
     if args.strategy == "vanilla":
         # All cells, natural composition. Both estimators are written as
