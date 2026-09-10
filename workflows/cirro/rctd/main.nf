@@ -84,7 +84,11 @@ PY
     stub:
     """
     mkdir -p entities
-    touch entities/entities_original.h5ad entities/prep_manifest.json entities/genes.txt
+    # emit every requested arm so the downstream fan-out is exercised
+    for arm in \$(echo '${arms}' | tr ',' ' '); do
+        touch "entities/entities_\${arm}.h5ad"
+    done
+    touch entities/prep_manifest.json entities/genes.txt
     """
 }
 
@@ -186,7 +190,9 @@ workflow {
     def resolved_transcripts = resolveDatasetPath(params.transcripts, params.input_dir)
 
     transcripts_ch = Channel.fromPath(resolved_transcripts, checkIfExists: true)
-    reference_ch   = Channel.fromPath(params.reference, checkIfExists: true)
+    // Value channel: the reference is consumed by RCTD_PREP and again by every
+    // RCTD_RUN task. A queue channel can only be consumed once.
+    reference_ch   = Channel.fromPath(params.reference, checkIfExists: true).first()
 
     def script_dir = file("${projectDir}/bin").exists()
         ? file("${projectDir}/bin")
@@ -212,7 +218,7 @@ workflow {
 
     RCTD_RUN(
         arm_inputs,
-        reference_ch.first(),
+        reference_ch,
         rctd_script,
         params.sample_name,
         params.celltype_col,
@@ -249,7 +255,7 @@ workflow {
 
     RCTD_COLLECT(
         RCTD_RUN.out.results.map { it[1] }.collect(),
-        RCTD_PREP.out.entities.collect(),
+        RCTD_PREP.out.entities.flatten().collect(),
         RCTD_PREP.out.manifest,
         collect_script,
         params.sample_name,
