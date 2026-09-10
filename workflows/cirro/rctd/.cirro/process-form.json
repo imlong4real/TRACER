@@ -1,0 +1,84 @@
+{
+  "form": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "urn:tracer:cirro:form:rctd:0.1.0-rctd.1",
+    "title": "TRACER RCTD Label Transfer (GBmap)",
+    "description": "RCTD (spacexr) cell-type label transfer over pre- and post-TRACER entity arms. One shared settings block is applied to every arm.",
+    "type": "object",
+    "properties": {
+      "transcripts": {
+        "type": "string",
+        "pathType": "dataset",
+        "file": "**/*transcripts_tracer_refined*.parquet",
+        "title": "TRACER refined transcripts",
+        "description": "transcripts_tracer_refined.parquet from a TRACER Seg run."
+      },
+      "reference": {
+        "type": "string",
+        "pathType": "references",
+        "useS3Path": true,
+        "file": "**/*.h5ad",
+        "title": "scRNA reference (h5ad)",
+        "description": "Reference h5ad with integer counts in layers['counts'] and the cell-type column below."
+      },
+      "celltype_col": {
+        "type": "string",
+        "default": "gbmap_predicted__annotation_level_3",
+        "title": "Reference cell-type column",
+        "description": "obs column in the reference holding the labels to transfer."
+      },
+      "sample_name": {
+        "type": "string",
+        "default": "tracer_sample",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+        "title": "Sample name"
+      },
+      "patient": { "type": "string", "default": "", "title": "Patient ID (optional)" },
+      "section": { "type": "string", "default": "", "title": "Section label (optional)" },
+      "arms": {
+        "type": "string",
+        "default": "original,post_whole,post_partial,post_all",
+        "title": "Entity arms",
+        "description": "Comma-separated: original, post_whole, post_partial, post_all."
+      },
+      "doublet_mode": {
+        "type": "string",
+        "enum": ["full", "doublet", "multi"],
+        "default": "full",
+        "title": "RCTD mode",
+        "description": "full gives unconstrained weights over all reference types, which is what max-weight and entropy are computed from."
+      },
+      "umi_min": {
+        "type": "integer", "minimum": 1, "default": 10,
+        "title": "Minimum transcripts per entity",
+        "description": "Entities below this are not scored. Applied identically to every arm."
+      },
+      "umi_min_sigma": {
+        "type": "integer", "minimum": 1, "default": 20,
+        "title": "UMI_min_sigma",
+        "description": "spacexr platform-effect estimation floor. Must be low enough that partial-cell arms retain spots."
+      },
+      "gene_cutoff": { "type": "number", "minimum": 0, "default": 0.000125, "title": "RCTD gene_cutoff" },
+      "fc_cutoff": { "type": "number", "minimum": 0, "default": 0.5, "title": "RCTD fc_cutoff" },
+      "min_cells_per_celltype_reference": {
+        "type": "integer", "minimum": 1, "default": 25,
+        "title": "Minimum reference cells per cell type"
+      },
+      "seed": { "type": "integer", "minimum": 0, "default": 1, "title": "Random seed" },
+      "cpus": { "type": "integer", "minimum": 1, "maximum": 64, "default": 16, "title": "CPUs per RCTD task" },
+      "memory_gb": { "type": "integer", "minimum": 8, "maximum": 512, "default": 64, "title": "RCTD memory (GB)" },
+      "prep_memory_gb": { "type": "integer", "minimum": 8, "maximum": 512, "default": 96, "title": "Prep memory (GB)" },
+      "max_memory_gb": { "type": "integer", "minimum": 8, "maximum": 512, "default": 256, "title": "Maximum retry memory (GB)" },
+      "max_retries": { "type": "integer", "minimum": 0, "maximum": 5, "default": 3, "title": "OOM retries" }
+    },
+    "required": ["transcripts", "reference", "sample_name"]
+  },
+  "ui": {
+    "ui:order": [
+      "transcripts", "reference", "celltype_col", "sample_name", "patient", "section",
+      "arms", "doublet_mode", "umi_min", "umi_min_sigma", "gene_cutoff", "fc_cutoff",
+      "min_cells_per_celltype_reference", "seed",
+      "cpus", "memory_gb", "prep_memory_gb", "max_memory_gb", "max_retries"
+    ]
+  }
+}

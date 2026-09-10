@@ -1,0 +1,15 @@
+{
+  "childProcessIds": [],
+  "code": {
+    "repository": "GITHUBPUBLIC",
+    "script": "workflows/cirro/rctd/main.nf",
+    "uri": "imlong4real/TRACER",
+    "version": "feat/cirro-tracer-rctd-v0.1.0"
+  },
+  "desc": "RCTD (spacexr) GBmap label transfer across pre- and post-TRACER entity arms with one shared settings block",
+  "documentationUrl": "https://github.com/imlong4real/TRACER/tree/feat/cirro-tracer-rctd-v0.1.0/workflows/cirro/rctd",
+  "executor": "NEXTFLOW",
+  "id": "tracer-rctd-0-1-0-cirro",
+  "name": "TRACER RCTD Label Transfer (GBmap)",
+  "parentProcessIds": ["tracer-seg-0-1-1-cirro"]
+}
