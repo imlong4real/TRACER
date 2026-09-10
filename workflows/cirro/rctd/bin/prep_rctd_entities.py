@@ -38,8 +38,12 @@ NULL_LABELS = {"UNASSIGNED", "-1", "", "nan", "NaN", "None", "DROP"}
 ARMS = ("original", "post_whole", "post_partial", "post_all")
 
 # Columns actually needed; keeps the streamed footprint small.
-NEEDED = ["cell_id", "tracer_id", "_etype", "feature_name",
-          "x_location", "y_location"]
+REQUIRED = ["cell_id", "tracer_id", "_etype", "feature_name"]
+# TRACER's refined output names the coordinates x/y; a standardised Xenium
+# transcript table names them x_location/y_location. Accept either, and say
+# which was used, rather than silently centroid-ing everything to the origin.
+X_ALIASES = ("x", "x_location", "x_centroid")
+Y_ALIASES = ("y", "y_location", "y_centroid")
 
 
 def parse_args() -> argparse.Namespace:
@@ -173,11 +177,19 @@ def main() -> None:
 
     pf = pq.ParquetFile(args.transcripts)
     have = set(pf.schema_arrow.names)
-    missing = [c for c in ("cell_id", "tracer_id", "_etype", "feature_name") if c not in have]
+    missing = [c for c in REQUIRED if c not in have]
     if missing:
         raise SystemExit(f"transcripts parquet is missing required columns: {missing}")
-    cols = [c for c in NEEDED if c in have]
-    has_xy = "x_location" in have and "y_location" in have
+    xcol = next((c for c in X_ALIASES if c in have), None)
+    ycol = next((c for c in Y_ALIASES if c in have), None)
+    has_xy = xcol is not None and ycol is not None
+    if has_xy:
+        print(f"[prep] coordinates from '{xcol}' / '{ycol}'", flush=True)
+    else:
+        print(f"[prep] WARNING: no coordinate columns among {X_ALIASES} / "
+              f"{Y_ALIASES}; centroids will be 0 and spatial maps unusable",
+              flush=True)
+    cols = REQUIRED + ([xcol, ycol] if has_xy else [])
 
     total = 0
     for rg in range(pf.metadata.num_row_groups):
@@ -189,8 +201,10 @@ def main() -> None:
                 df[c] = df[c].astype(str)
             else:
                 df[c] = df[c].astype(str)
-        x = df["x_location"].to_numpy(dtype=np.float64) if has_xy else np.zeros(len(df))
-        y = df["y_location"].to_numpy(dtype=np.float64) if has_xy else np.zeros(len(df))
+        x = (df[xcol].to_numpy(dtype=np.float64) if has_xy
+             else np.zeros(len(df), dtype=np.float64))
+        y = (df[ycol].to_numpy(dtype=np.float64) if has_xy
+             else np.zeros(len(df), dtype=np.float64))
 
         if "original" in accs:
             m = (~df["cell_id"].isin(NULL_LABELS)).to_numpy()
