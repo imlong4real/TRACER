@@ -68,9 +68,13 @@ def main() -> None:
             print(f"[collect] WARNING: {assign} missing; arm {arm} produced no "
                   f"assignments", flush=True)
             continue
-        a = pd.read_csv(assign, sep="\t")
+        # Force the id column to string: entity labels can look numeric, and a
+        # silent int64 parse here would not match the string obs index, leaving
+        # an empty merge rather than an error.
+        a = pd.read_csv(assign, sep="\t", dtype={"cell_id": str})
         a = a.rename(columns={"cell_id": "entity_id",
                               "dominant_celltype": "gbmap_celltype"})
+        a["entity_id"] = a["entity_id"].astype(str)
 
         # spacexr forbids "/" in cell-type levels, so the reference names were
         # sanitised on the way in; restore the reference's own labels here so
@@ -91,9 +95,15 @@ def main() -> None:
             obs = ent.obs.copy()
             obs.index.name = "entity_id"
             obs = obs.reset_index()
+            obs["entity_id"] = obs["entity_id"].astype(str)
             del ent
 
         df = a.merge(obs, on="entity_id", how="left") if len(obs) else a
+        if len(obs) and df["n_tx"].isna().all():
+            raise SystemExit(
+                f"arm {arm}: no RCTD assignment matched an entity id; "
+                f"assignment ids e.g. {a['entity_id'].head(3).tolist()}, "
+                f"entity ids e.g. {obs['entity_id'].head(3).tolist()}")
         df["arm"] = arm
         df["sample"] = manifest.get("sample", args.sample_name)
         if "patient" not in df or df["patient"].isna().all():
