@@ -72,6 +72,19 @@ def main() -> None:
         a = a.rename(columns={"cell_id": "entity_id",
                               "dominant_celltype": "gbmap_celltype"})
 
+        # spacexr forbids "/" in cell-type levels, so the reference names were
+        # sanitised on the way in; restore the reference's own labels here so
+        # downstream tables carry e.g. "CD4/CD8" rather than "CD4_CD8".
+        nm = d / "celltype_name_map.json"
+        if nm.exists():
+            try:
+                m = json.loads(nm.read_text())
+                if isinstance(m, dict) and m:
+                    a["gbmap_celltype"] = (a["gbmap_celltype"].astype(str)
+                                           .map(lambda v: m.get(v, v)))
+            except Exception as e:
+                print(f"[collect] name map unreadable for {arm}: {e}", flush=True)
+
         obs = pd.DataFrame()
         if arm in h5ads:
             ent = ad.read_h5ad(h5ads[arm], backed="r")
@@ -102,6 +115,9 @@ def main() -> None:
             shutil.copyfile(w, out / f"rctd_weights_{arm}.tsv.gz")
             head = pd.read_csv(w, sep="\t", nrows=1)
             n_types = max(len([c for c in head.columns if c != "cell_id"]), 0)
+            if (d / "celltype_name_map.json").exists():
+                shutil.copyfile(d / "celltype_name_map.json",
+                                out / f"celltype_name_map_{arm}.json")
         else:
             n_types = 0
         df["n_umi_used"] = df.get("n_tx", pd.Series(np.nan, index=df.index))

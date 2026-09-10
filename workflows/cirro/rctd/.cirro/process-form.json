@@ -33,8 +33,16 @@
         "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
         "title": "Sample name"
       },
-      "patient": { "type": "string", "default": "", "title": "Patient ID (optional)" },
-      "section": { "type": "string", "default": "", "title": "Section label (optional)" },
+      "patient": {
+        "type": "string",
+        "default": "",
+        "title": "Patient ID (optional)"
+      },
+      "section": {
+        "type": "string",
+        "default": "",
+        "title": "Section label (optional)"
+      },
       "arms": {
         "type": "string",
         "default": "original,post_whole,post_partial,post_all",
@@ -43,42 +51,124 @@
       },
       "doublet_mode": {
         "type": "string",
-        "enum": ["full", "doublet", "multi"],
+        "enum": [
+          "full",
+          "doublet",
+          "multi"
+        ],
         "default": "full",
         "title": "RCTD mode",
         "description": "full gives unconstrained weights over all reference types, which is what max-weight and entropy are computed from."
       },
       "umi_min": {
-        "type": "integer", "minimum": 1, "default": 10,
+        "type": "integer",
+        "minimum": 1,
+        "default": 10,
         "title": "Minimum transcripts per entity",
         "description": "Entities below this are not scored. Applied identically to every arm."
       },
       "umi_min_sigma": {
-        "type": "integer", "minimum": 1, "default": 20,
+        "type": "integer",
+        "minimum": 1,
+        "default": 20,
         "title": "UMI_min_sigma",
         "description": "spacexr platform-effect estimation floor. Must be low enough that partial-cell arms retain spots."
       },
-      "gene_cutoff": { "type": "number", "minimum": 0, "default": 0.000125, "title": "RCTD gene_cutoff" },
-      "fc_cutoff": { "type": "number", "minimum": 0, "default": 0.5, "title": "RCTD fc_cutoff" },
+      "gene_cutoff": {
+        "type": "number",
+        "minimum": 0,
+        "default": 0.000125,
+        "title": "RCTD gene_cutoff"
+      },
+      "fc_cutoff": {
+        "type": "number",
+        "minimum": 0,
+        "default": 0.5,
+        "title": "RCTD fc_cutoff"
+      },
       "min_cells_per_celltype_reference": {
-        "type": "integer", "minimum": 1, "default": 25,
+        "type": "integer",
+        "minimum": 1,
+        "default": 25,
         "title": "Minimum reference cells per cell type"
       },
-      "seed": { "type": "integer", "minimum": 0, "default": 1, "title": "Random seed" },
-      "cpus": { "type": "integer", "minimum": 1, "maximum": 64, "default": 16, "title": "CPUs per RCTD task" },
-      "memory_gb": { "type": "integer", "minimum": 8, "maximum": 512, "default": 64, "title": "RCTD memory (GB)" },
-      "prep_memory_gb": { "type": "integer", "minimum": 8, "maximum": 512, "default": 96, "title": "Prep memory (GB)" },
-      "max_memory_gb": { "type": "integer", "minimum": 8, "maximum": 512, "default": 256, "title": "Maximum retry memory (GB)" },
-      "max_retries": { "type": "integer", "minimum": 0, "maximum": 5, "default": 3, "title": "OOM retries" }
+      "seed": {
+        "type": "integer",
+        "minimum": 0,
+        "default": 1,
+        "title": "Random seed"
+      },
+      "cpus": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 64,
+        "default": 16,
+        "title": "CPUs per RCTD task"
+      },
+      "memory_gb": {
+        "type": "integer",
+        "minimum": 8,
+        "maximum": 512,
+        "default": 64,
+        "title": "RCTD memory (GB)"
+      },
+      "prep_memory_gb": {
+        "type": "integer",
+        "minimum": 8,
+        "maximum": 512,
+        "default": 96,
+        "title": "Prep memory (GB)"
+      },
+      "max_memory_gb": {
+        "type": "integer",
+        "minimum": 8,
+        "maximum": 512,
+        "default": 256,
+        "title": "Maximum retry memory (GB)"
+      },
+      "max_retries": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 5,
+        "default": 3,
+        "title": "OOM retries"
+      },
+      "reference_min_umi": {
+        "type": "integer",
+        "minimum": 1,
+        "default": 10,
+        "title": "Reference min_UMI",
+        "description": "spacexr Reference() min_UMI. The spacexr default of 100 is calibrated for whole-transcriptome references; on a few-hundred-gene panel it deletes most low-depth cell types."
+      }
     },
-    "required": ["transcripts", "reference", "sample_name"]
+    "required": [
+      "transcripts",
+      "reference",
+      "sample_name"
+    ]
   },
   "ui": {
     "ui:order": [
-      "transcripts", "reference", "celltype_col", "sample_name", "patient", "section",
-      "arms", "doublet_mode", "umi_min", "umi_min_sigma", "gene_cutoff", "fc_cutoff",
-      "min_cells_per_celltype_reference", "seed",
-      "cpus", "memory_gb", "prep_memory_gb", "max_memory_gb", "max_retries"
+      "transcripts",
+      "reference",
+      "celltype_col",
+      "sample_name",
+      "patient",
+      "section",
+      "arms",
+      "doublet_mode",
+      "umi_min",
+      "umi_min_sigma",
+      "gene_cutoff",
+      "fc_cutoff",
+      "reference_min_umi",
+      "min_cells_per_celltype_reference",
+      "seed",
+      "cpus",
+      "memory_gb",
+      "prep_memory_gb",
+      "max_memory_gb",
+      "max_retries"
     ]
   }
 }

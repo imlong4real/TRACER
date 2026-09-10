@@ -28,6 +28,11 @@ import pandas as pd
 import pyarrow.parquet as pq
 import scipy.sparse as sp
 
+# Counts are stored as float32, not an integer dtype: R's anndata reader
+# maps an integer X onto a dgRMatrix whose "x" slot must be double, and
+# Matrix rejects the object outright ("'x' slot is not of type \"double\"").
+COUNT_DTYPE = np.float32
+
 ENTITY_DELIMITER = "-tr-"
 NULL_LABELS = {"UNASSIGNED", "-1", "", "nan", "NaN", "None", "DROP"}
 ARMS = ("original", "post_whole", "post_partial", "post_all")
@@ -108,7 +113,7 @@ class ArmAccumulator:
 
         self.rows.append(codes)
         self.cols.append(col)
-        self.vals.append(np.ones(len(codes), dtype=np.int32))
+        self.vals.append(np.ones(len(codes), dtype=np.float32))
 
         n = len(labels)
         self._grow(n)
@@ -120,13 +125,13 @@ class ArmAccumulator:
                  sample: str, patient: str, section: str) -> ad.AnnData:
         n = len(self.labels)
         if n == 0:
-            X = sp.csr_matrix((0, self.n_genes), dtype=np.int32)
+            X = sp.csr_matrix((0, self.n_genes), dtype=np.float32)
             obs = pd.DataFrame(index=pd.Index([], name="entity_id"))
         else:
             X = sp.coo_matrix(
                 (np.concatenate(self.vals),
                  (np.concatenate(self.rows), np.concatenate(self.cols))),
-                shape=(n, self.n_genes), dtype=np.int32,
+                shape=(n, self.n_genes), dtype=np.float32,
             ).tocsr()
             X.sum_duplicates()
             labels = np.empty(n, dtype=object)

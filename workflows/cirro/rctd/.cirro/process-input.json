@@ -13,6 +13,7 @@
   "gene_cutoff": "$.dataset.params.gene_cutoff",
   "fc_cutoff": "$.dataset.params.fc_cutoff",
   "min_cells_per_celltype_reference": "$.dataset.params.min_cells_per_celltype_reference",
+  "reference_min_umi": "$.dataset.params.reference_min_umi",
   "seed": "$.dataset.params.seed",
   "cpus": "$.dataset.params.cpus",
   "memory_gb": "$.dataset.params.memory_gb",

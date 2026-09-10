@@ -105,6 +105,7 @@ process RCTD_RUN {
     val gene_cutoff
     val fc_cutoff
     val min_cells_ref
+    val reference_min_umi
     val seed
 
     output:
@@ -128,6 +129,8 @@ process RCTD_RUN {
       --gene-cutoff '${gene_cutoff}' \
       --fc-cutoff '${fc_cutoff}' \
       --min-cells-per-celltype-reference '${min_cells_ref}' \
+      --reference-min-umi '${reference_min_umi}' \
+      --celltype-name-map 'rctd_${arm}/celltype_name_map.json' \
       --max-cores '${task.cpus}' \
       --seed '${seed}'
     """
@@ -219,6 +222,7 @@ workflow {
         params.gene_cutoff,
         params.fc_cutoff,
         params.min_cells_per_celltype_reference,
+        params.reference_min_umi,
         params.seed,
     )
 
@@ -230,6 +234,7 @@ workflow {
         gene_cutoff  : params.gene_cutoff,
         fc_cutoff    : params.fc_cutoff,
         min_cells_per_celltype_reference: params.min_cells_per_celltype_reference,
+        reference_min_umi: params.reference_min_umi,
         seed         : params.seed,
         arms         : params.arms,
         reference    : params.reference.toString(),

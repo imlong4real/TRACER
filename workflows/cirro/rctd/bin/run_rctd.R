@@ -80,6 +80,13 @@ parse_args_local <- function() {
     make_option(c("--max-cores"), type = "integer", default = 4),
     make_option(c("--celltype-category-json"), type = "character", default = NULL,
                 help = "JSON mapping cell types to categories (tumor/immune/stromal/...). "),
+    make_option(c("--reference-min-umi"), type = "integer", default = 10,
+                help = paste("spacexr Reference() min_UMI. The spacexr default of 100",
+                             "is calibrated for whole-transcriptome references; on a",
+                             "few-hundred-gene panel it silently deletes most low-depth",
+                             "cell types.")),
+    make_option(c("--celltype-name-map"), type = "character", default = NULL,
+                help = "Write a JSON map of sanitised -> original cell-type names here."),
     make_option(c("--min-cells-per-celltype-reference"), type = "integer",
                 default = 25, help = "Drop reference celltypes below this count."),
     make_option(c("--gene-cutoff"), type = "numeric", default = 0.000125),
@@ -139,7 +146,8 @@ parse_args_local <- function() {
 # Build spacexr Reference + SpatialRNA
 # -----------------------------------------------------------------------------
 build_reference <- function(ref_path, celltype_col, min_cells, seed,
-                             restrict_genes = NULL) {
+                             restrict_genes = NULL, min_umi = 10,
+                             name_map_path = NULL) {
   set.seed(seed)
   obj <- .load_h5ad_counts(ref_path)
   ct <- as.character(obj$obs[[celltype_col]])
@@ -176,10 +184,52 @@ build_reference <- function(ref_path, celltype_col, min_cells, seed,
   counts <- t(obj$X)
   rownames(counts) <- as.character(obj$var_names)
   colnames(counts) <- as.character(obj$obs_names)
+  # spacexr rejects cell-type levels containing "/" and similar path-like
+  # characters. Sanitise, and persist the inverse map so downstream tables can
+  # carry the original reference labels.
+  ct_orig <- ct
+  ct <- gsub("[/\\\\]", "_", ct)
+  chg <- unique(data.frame(sanitised = ct, original = ct_orig,
+                           stringsAsFactors = FALSE))
+  chg <- chg[chg$sanitised != chg$original, , drop = FALSE]
+  if (nrow(chg) > 0) {
+    message(sprintf("[ref] sanitised %d cell-type name(s): %s", nrow(chg),
+                    paste(sprintf("%s -> %s", chg$original, chg$sanitised),
+                          collapse = ", ")))
+  }
+  if (!is.null(name_map_path)) {
+    m <- unique(data.frame(sanitised = ct, original = ct_orig,
+                           stringsAsFactors = FALSE))
+    writeLines(jsonlite::toJSON(stats::setNames(as.list(m$original), m$sanitised),
+                                auto_unbox = TRUE), name_map_path)
+  }
+
   cell_types <- factor(ct, levels = sort(unique(ct)))
   names(cell_types) <- as.character(obj$obs_names)
   nUMI <- Matrix::colSums(counts)
-  ref <- spacexr::Reference(counts, cell_types, nUMI)
+
+  # Retention audit at the chosen min_UMI, per cell type, before spacexr drops
+  # anything. Panel restriction lowers every nUMI, so the spacexr default can
+  # remove whole cell types on a small panel.
+  ret <- data.frame(celltype = as.character(cell_types),
+                    kept = as.integer(nUMI >= min_umi))
+  agg <- do.call(data.frame, stats::aggregate(
+    kept ~ celltype, data = ret,
+    FUN = function(v) c(n = length(v), kept = sum(v))))
+  names(agg) <- c("celltype", "n", "n_kept")
+  agg$pct_kept <- round(100 * agg$n_kept / agg$n, 1)
+  message(sprintf("[ref] min_UMI=%d retention (panel-restricted counts):", min_umi))
+  for (i in seq_len(nrow(agg))) {
+    message(sprintf("[ref]   %-24s %6d -> %6d  (%.1f%%)",
+                    agg$celltype[i], agg$n[i], agg$n_kept[i], agg$pct_kept[i]))
+  }
+  drp <- agg[agg$n_kept < min_cells, , drop = FALSE]
+  if (nrow(drp) > 0) {
+    message(sprintf("[ref] WARNING: %d cell type(s) fall below min_cells=%d after the min_UMI filter: %s",
+                    nrow(drp), min_cells, paste(drp$celltype, collapse = ", ")))
+  }
+
+  ref <- spacexr::Reference(counts, cell_types, nUMI, min_UMI = min_umi)
   ref
 }
 
@@ -364,7 +414,9 @@ main <- function() {
                           args$`reference-celltype-col`,
                           args$`min-cells-per-celltype-reference`,
                           args$seed,
-                          restrict_genes = panel_genes)
+                          restrict_genes = panel_genes,
+                          min_umi = args$`reference-min-umi`,
+                          name_map_path = args$`celltype-name-map`)
 
   runs <- list()
   t0 <- Sys.time()

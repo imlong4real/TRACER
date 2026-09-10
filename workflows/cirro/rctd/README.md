@@ -39,9 +39,40 @@ exists to measure.
 
 ## Reference contract
 
-The reference h5ad must carry **integer counts** in `layers['counts']`
-(`run_rctd.R` prefers that layer, then `raw/X`, then `X`) and the cell-type
-column named by `--celltype_col`.
+The reference h5ad must carry **counts** in `layers['counts']` (`run_rctd.R`
+prefers that layer, then `raw/X`, then `X`) and the cell-type column named by
+`--celltype_col`.
+
+Store counts as a **floating dtype**, not an integer one. R's `anndata` maps an
+integer `X` onto a `dgRMatrix` whose `x` slot must be double, and `Matrix`
+rejects the object outright (`'x' slot is not of type "double"`). The values
+stay integral; only the storage type differs.
+
+### `reference_min_umi` — why the spacexr default is wrong here
+
+`spacexr::Reference()` drops reference cells below `min_UMI`, default **100**.
+That default assumes a whole-transcriptome reference. Once the reference is
+restricted to a few-hundred-gene spatial panel every nUMI falls, and the
+default silently removes whole cell types. Measured on the GBmap level-3
+reference restricted to the 366-gene GBM panel:
+
+| min_UMI | reference cells kept | RG | Plasma B | Mast | B cell |
+|---|---|---|---|---|---|
+| 100 (spacexr default) | 63.0 % | **0 %** | 2.3 % | 11.3 % | 13.7 % |
+| 10 (this workflow) | 95.7 % | 49.1 % | 47.0 % | 19.3 % | 87.4 % |
+
+At the default, RG disappears from the reference entirely and Plasma B keeps
+248 of 10,681 cells, so those labels could never be transferred. The default of
+10 keeps 19 of 20 level-3 types above `min_cells_per_celltype_reference` (only
+`Neuron`, n = 2, falls out, and it is below that floor regardless). The
+per-type retention table is printed into the task log on every run.
+
+### Cell-type name sanitisation
+
+`spacexr` rejects cell-type levels containing `/`, which GBmap level 3 uses in
+`CD4/CD8`. Names are sanitised (`/` and `\` to `_`) before `Reference()`, and
+the inverse map is written to `celltype_name_map.json` per arm; the collector
+restores the reference's own labels in `rctd_entities.parquet`.
 
 ## Outputs
 
