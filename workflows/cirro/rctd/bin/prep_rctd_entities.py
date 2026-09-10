@@ -60,9 +60,11 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def root_cell_id(labels: pd.Series) -> pd.Series:
-    """Original input cell_id behind a TRACER entity label."""
-    return labels.str.split(ENTITY_DELIMITER, n=1).str[0]
+def modal_parent(counts: dict[str, int]) -> str:
+    """Most common pristine input cell_id among an entity's transcripts."""
+    if not counts:
+        return ""
+    return max(counts.items(), key=lambda kv: (kv[1], kv[0]))[0]
 
 
 class ArmAccumulator:
@@ -80,6 +82,12 @@ class ArmAccumulator:
         self.sum_x = np.zeros(0, dtype=np.float64)
         self.sum_y = np.zeros(0, dtype=np.float64)
         self.n_tx = np.zeros(0, dtype=np.int64)
+        # entity index -> {pristine cell_id: transcript count}. The parent is
+        # taken from the data rather than parsed out of the entity label: the
+        # label delimiter is a TRACER-version detail (this pin emits
+        # "<cell_id>-<k>", the source constant declares "-tr-"), and a cell_id
+        # may itself contain dashes.
+        self.parents: dict[int, dict[str, int]] = {}
 
     def _grow(self, n: int) -> None:
         if n <= self.sum_x.size:
@@ -90,7 +98,8 @@ class ArmAccumulator:
         self.n_tx = np.concatenate([self.n_tx, np.zeros(extra, dtype=np.int64)])
 
     def add(self, entity: pd.Series, gene: pd.Series,
-            x: np.ndarray, y: np.ndarray) -> None:
+            x: np.ndarray, y: np.ndarray,
+            parent: pd.Series | None = None) -> None:
         if len(entity) == 0:
             return
         col = gene.map(self.gene_index)
@@ -100,6 +109,7 @@ class ArmAccumulator:
         entity = entity[keep]
         col = col[keep].to_numpy(dtype=np.int32)
         x, y = x[keep], y[keep]
+        parent = parent[keep] if parent is not None else None
 
         # map entity labels -> stable integer ids across row groups.
         # Resolve each *unique* label once, then gather through `inv`; a
@@ -125,6 +135,15 @@ class ArmAccumulator:
         self.sum_y[:n] += np.bincount(codes, weights=y, minlength=n)
         self.n_tx[:n] += np.bincount(codes, minlength=n).astype(np.int64)
 
+        if parent is not None:
+            pc = (pd.DataFrame({"e": codes, "p": parent.to_numpy()})
+                  .groupby(["e", "p"], sort=False).size())
+            for (e, par), cnt in pc.items():
+                if par in NULL_LABELS:
+                    continue
+                d = self.parents.setdefault(int(e), {})
+                d[par] = d.get(par, 0) + int(cnt)
+
     def finalize(self, genes: np.ndarray, entity_type: str,
                  sample: str, patient: str, section: str) -> ad.AnnData:
         n = len(self.labels)
@@ -143,10 +162,12 @@ class ArmAccumulator:
                 labels[i] = lab
             labels = labels.astype(str)
             self._grow(n)
+            parents = np.array([modal_parent(self.parents.get(i, {}))
+                                for i in range(n)], dtype=object)
             obs = pd.DataFrame(
                 {
                     "entity_type": entity_type,
-                    "original_cell_id": root_cell_id(pd.Series(labels)).to_numpy(),
+                    "original_cell_id": parents,
                     "x_centroid": self.sum_x[:n] / np.maximum(self.n_tx[:n], 1),
                     "y_centroid": self.sum_y[:n] / np.maximum(self.n_tx[:n], 1),
                     "n_tx": self.n_tx[:n],
@@ -209,7 +230,7 @@ def main() -> None:
         if "original" in accs:
             m = (~df["cell_id"].isin(NULL_LABELS)).to_numpy()
             accs["original"].add(df.loc[m, "cell_id"], df.loc[m, "feature_name"],
-                                 x[m], y[m])
+                                 x[m], y[m], parent=df.loc[m, "cell_id"])
         post_valid = (~df["tracer_id"].isin(NULL_LABELS)).to_numpy()
         et = df["_etype"].to_numpy()
         for arm, sel in (
@@ -221,7 +242,7 @@ def main() -> None:
                 continue
             m = post_valid & sel
             accs[arm].add(df.loc[m, "tracer_id"], df.loc[m, "feature_name"],
-                          x[m], y[m])
+                          x[m], y[m], parent=df.loc[m, "cell_id"])
         del df, t
         if rg % 10 == 0:
             print(f"[prep]   row group {rg + 1}/{pf.metadata.num_row_groups} "
