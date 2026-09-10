@@ -110,6 +110,7 @@ process RCTD_RUN {
     val fc_cutoff
     val min_cells_ref
     val reference_min_umi
+    val reticulate_python
     val seed
 
     output:
@@ -120,6 +121,20 @@ process RCTD_RUN {
     export OMP_NUM_THREADS='${task.cpus}'
     export OPENBLAS_NUM_THREADS='${task.cpus}'
     export MKL_NUM_THREADS='${task.cpus}'
+
+    # run_rctd.R reads h5ad through reticulate. Left to itself, reticulate
+    # provisions its own ephemeral interpreter with uv and lands in a Python
+    # that has no anndata; point it at the image's own interpreter instead.
+    export RETICULATE_MINICONDA_ENABLED=FALSE
+    export RETICULATE_USE_MANAGED_VENV=no
+    RETICULATE_PYTHON='${reticulate_python}'
+    if [ ! -x "\$RETICULATE_PYTHON" ]; then
+        RETICULATE_PYTHON="\$(command -v python || command -v python3)"
+    fi
+    export RETICULATE_PYTHON
+    # Fail here, loudly, rather than inside reticulate's fallback provisioning.
+    "\$RETICULATE_PYTHON" -c 'import anndata, sys; print("[rctd] reticulate python:", sys.executable, "anndata", anndata.__version__)'
+
     mkdir -p 'rctd_${arm}'
 
     Rscript '${rctd_script}' \
@@ -229,6 +244,7 @@ workflow {
         params.fc_cutoff,
         params.min_cells_per_celltype_reference,
         params.reference_min_umi,
+        params.reticulate_python,
         params.seed,
     )
 
@@ -241,6 +257,7 @@ workflow {
         fc_cutoff    : params.fc_cutoff,
         min_cells_per_celltype_reference: params.min_cells_per_celltype_reference,
         reference_min_umi: params.reference_min_umi,
+        reticulate_python: params.reticulate_python,
         seed         : params.seed,
         arms         : params.arms,
         reference    : params.reference.toString(),
