@@ -1,7 +1,7 @@
 {
   "form": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "$id": "urn:tracer:cirro:form:0.1.1-cirro.1",
+    "$id": "urn:tracer:cirro:form:0.1.1-cirro.2",
     "title": "TRACER Seg (Xenium)",
     "description": "Pinned TRACER Seg refinement with explicit PMI/cPMI input and complete run provenance.",
     "type": "object",
@@ -20,6 +20,11 @@
         "file": "**/*pmi*.csv*",
         "title": "PMI / cPMI reference",
         "description": "Long-format CSV(.gz) with gene_i, gene_j, and PMI or NPMI. Path and SHA-256 are recorded."
+      },
+      "pmi_original_path": {
+        "type": "string",
+        "title": "Original PMI path (optional)",
+        "description": "Original immutable source path to record alongside Cirro's staged reference path."
       },
       "cell_boundaries": {
         "type": "string",
@@ -55,7 +60,7 @@
         "enum": ["xenium", "atera"],
         "default": "xenium",
         "title": "Platform preset",
-        "description": "Use xenium for standard panels or atera for Xenium 5K."
+        "description": "Use xenium for Xenium/Xenium5K or atera for Atera acquisitions."
       },
       "qv_min": {
         "type": "number",
@@ -116,7 +121,7 @@
       "cpus": {
         "type": "integer",
         "minimum": 1,
-        "maximum": 64,
+        "maximum": 128,
         "default": 16,
         "title": "CPUs",
         "description": "CPU request and numerical-library thread limit."
@@ -124,7 +129,7 @@
       "memory_gb": {
         "type": "integer",
         "minimum": 8,
-        "maximum": 512,
+        "maximum": 1024,
         "default": 64,
         "title": "Initial memory (GB)",
         "description": "Initial request; eligible retries scale this value."
@@ -132,10 +137,26 @@
       "max_memory_gb": {
         "type": "integer",
         "minimum": 8,
-        "maximum": 512,
+        "maximum": 1024,
         "default": 256,
         "title": "Maximum retry memory (GB)",
         "description": "Retry cap; must be at least initial memory."
+      },
+      "walltime_hours": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 336,
+        "default": 24,
+        "title": "Initial walltime (hours)",
+        "description": "Initial task timeout; eligible retries scale this value."
+      },
+      "max_walltime_hours": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 336,
+        "default": 168,
+        "title": "Maximum retry walltime (hours)",
+        "description": "Retry timeout cap; must be at least the initial walltime."
       },
       "max_retries": {
         "type": "integer",
@@ -152,6 +173,7 @@
     "ui:order": [
       "transcripts",
       "pmi",
+      "pmi_original_path",
       "cell_boundaries",
       "nucleus_boundaries",
       "user_config",
@@ -169,6 +191,8 @@
       "cpus",
       "memory_gb",
       "max_memory_gb",
+      "walltime_hours",
+      "max_walltime_hours",
       "max_retries"
     ]
   }

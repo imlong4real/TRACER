@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:tracer:cirro:nextflow-schema:0.1.1-cirro.1",
+  "$id": "urn:tracer:cirro:nextflow-schema:0.1.1-cirro.2",
   "title": "TRACER Seg for Cirro",
   "description": "Refine Xenium transcript-to-cell assignments with an explicit PMI/cPMI reference.",
   "type": "object",
@@ -22,6 +22,11 @@
       "file": "**/*pmi*.csv*",
       "title": "PMI / cPMI reference",
       "description": "Required long-format CSV(.gz) containing gene_i, gene_j, and PMI or NPMI. The selected path and SHA-256 are recorded."
+    },
+    "pmi_original_path": {
+      "type": "string",
+      "title": "Original PMI path (optional)",
+      "description": "Original immutable source path recorded in provenance in addition to Cirro's staged reference path."
     },
     "cell_boundaries": {
       "type": "string",
@@ -60,7 +65,7 @@
       "enum": ["xenium", "atera"],
       "default": "xenium",
       "title": "Platform preset",
-      "description": "TRACER preset: xenium for standard panels or atera for Xenium 5K."
+      "description": "TRACER preset: xenium for Xenium/Xenium5K or atera for Atera acquisitions."
     },
     "qv_min": {
       "type": "number",
@@ -121,7 +126,7 @@
     "cpus": {
       "type": "integer",
       "minimum": 1,
-      "maximum": 64,
+      "maximum": 128,
       "default": 16,
       "title": "CPUs",
       "description": "CPU request and numerical-library thread limit."
@@ -129,7 +134,7 @@
     "memory_gb": {
       "type": "integer",
       "minimum": 8,
-      "maximum": 512,
+      "maximum": 1024,
       "default": 64,
       "title": "Initial memory (GB)",
       "description": "Initial memory request; retry attempts scale this value."
@@ -137,10 +142,26 @@
     "max_memory_gb": {
       "type": "integer",
       "minimum": 8,
-      "maximum": 512,
+      "maximum": 1024,
       "default": 256,
       "title": "Maximum retry memory (GB)",
       "description": "Cap for retry scaling; must be at least initial memory."
+    },
+    "walltime_hours": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 336,
+      "default": 24,
+      "title": "Initial walltime (hours)",
+      "description": "Initial task timeout; retry attempts scale this value."
+    },
+    "max_walltime_hours": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 336,
+      "default": 168,
+      "title": "Maximum retry walltime (hours)",
+      "description": "Cap for retry walltime scaling; must be at least the initial walltime."
     },
     "max_retries": {
       "type": "integer",

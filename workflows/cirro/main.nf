@@ -65,6 +65,7 @@ process TRACER_SEG {
     path nucleus_boundaries
     path runner
     path fastparquet_shim
+    path pmi_filter
     val sample_name
     val platform
     val qv_min
@@ -78,6 +79,7 @@ process TRACER_SEG {
     val seed
     val transcripts_source_b64
     val pmi_source_b64
+    val pmi_original_path_b64
     val user_config_source_b64
     val cell_boundaries_source_b64
     val nucleus_boundaries_source_b64
@@ -117,10 +119,12 @@ process TRACER_SEG {
       --score-mode '${score_mode}' \
       --transcripts-source-b64 '${transcripts_source_b64}' \
       --pmi-source-b64 '${pmi_source_b64}' \
+      --pmi-original-path-b64 '${pmi_original_path_b64}' \
       --user-config-source-b64 '${user_config_source_b64}' \
       --cell-boundaries-source-b64 '${cell_boundaries_source_b64}' \
       --nucleus-boundaries-source-b64 '${nucleus_boundaries_source_b64}' \
       --fastparquet-shim '${fastparquet_shim}' \
+      --pmi-filter '${pmi_filter}' \
       --container-image '${params.tracer_oci_image}' \
       --execution-container '${params.tracer_container}' \
       --tracer-source-commit '${params.tracer_source_commit}' \
@@ -173,6 +177,9 @@ workflow {
     if ((params.memory_gb as int) < 8 || (params.max_memory_gb as int) < (params.memory_gb as int)) {
         error "--memory_gb must be at least 8 and --max_memory_gb must be >= --memory_gb"
     }
+    if ((params.walltime_hours as int) < 1 || (params.max_walltime_hours as int) < (params.walltime_hours as int)) {
+        error "--walltime_hours must be at least 1 and --max_walltime_hours must be >= --walltime_hours"
+    }
     if (params.g_z_um && !(params.g_z_um.toString() ==~ /(auto|[0-9]+(?:\.[0-9]+)?)/)) {
         error "--g_z_um must be 'auto' or a positive number"
     }
@@ -195,6 +202,11 @@ workflow {
         error "Cannot locate workflows/cirro/bin/fastparquet.py"
     }
     fastparquet_shim_ch = Channel.value(fastparquet_shim_path)
+    pmi_filter_path = file("${runner_path.parent}/filter_pmi_to_genes.py")
+    if (!pmi_filter_path.exists()) {
+        error "Cannot locate workflows/cirro/bin/filter_pmi_to_genes.py"
+    }
+    pmi_filter_ch = Channel.value(pmi_filter_path)
 
     TRACER_SEG(
         transcripts_ch,
@@ -204,6 +216,7 @@ workflow {
         nucleus_boundaries_ch,
         runner_ch,
         fastparquet_shim_ch,
+        pmi_filter_ch,
         params.sample_name,
         params.platform,
         params.qv_min == null ? '' : params.qv_min.toString(),
@@ -217,6 +230,7 @@ workflow {
         params.seed as int,
         sourceB64(resolved_transcripts),
         sourceB64(params.pmi),
+        sourceB64(params.pmi_original_path),
         sourceB64(params.user_config),
         sourceB64(resolved_cell_boundaries),
         sourceB64(resolved_nucleus_boundaries),

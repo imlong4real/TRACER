@@ -1,8 +1,8 @@
 # TRACER Seg for Cirro
 
-Minimal Cirro/Nextflow adapter for TRACER Seg on Xenium and Xenium 5K
-(`atera`) transcript data. The TRACER core source is not copied or modified by
-this adapter.
+Minimal Cirro/Nextflow adapter for TRACER Seg on Xenium, Xenium 5K, and Atera
+transcript data. The TRACER core source is not copied or modified by this
+adapter.
 
 ## Reproducibility pins
 
@@ -32,6 +32,13 @@ The PMI/cPMI reference must be long-format CSV or CSV.GZ with `gene_i`,
 SHA-256, and size are recorded in both `config_receipt.json` and
 `provenance/run_manifest.json`.
 
+The adapter streams the selected reference once and retains only rows whose
+two genes occur in the effective transcript input. It does not estimate,
+retune, threshold, or otherwise alter the panel. The original reference
+source/SHA, input and panel gene counts, exact overlap gene set/hash, and
+effective gene-pair edge count/hash are saved in
+`provenance/pmi_overlap_receipt.json` for every run.
+
 The complete parameter contract is in `nextflow_schema.json`. The Cirro form
 keeps the output directory platform-managed; locally it is set with
 `--outdir`.
@@ -47,16 +54,21 @@ Cirro publishes `tracer_results/` into the destination dataset:
 - `config_receipt.json`, `run_summary.md`, and `runtime_memory.json`
 - `logs/` for preprocessing and TRACER stdout/stderr
 - `provenance/resolved_tracer_config.json`
-- `provenance/run_manifest.json`, canonical output fingerprints, software
+- `provenance/run_manifest.json`, streaming file fingerprints, software
   versions, and SHA-256 checksums
+- `provenance/pmi_overlap_receipt.json` with the original and effective cPMI
+  identities, platform overlap, and surviving edge count
+- `provenance/adapter_resource_usage.json` plus core `runtime_memory.json`
 - `pipeline_info/` Nextflow trace, report, timeline, and DAG
 
 ## Retry behavior
 
 Exit statuses associated with transient transfer/termination or out-of-memory
-conditions (`104`, `137`, `143`) are retried up to `--max_retries`. Memory is
-multiplied by the attempt number and capped at `--max_memory_gb`. Other
-failures terminate immediately so invalid inputs are not repeatedly billed.
+conditions (`104`, `137`, `143`) are retried up to `--max_retries`. Memory and
+walltime are multiplied by the attempt number and capped by
+`--max_memory_gb` and `--max_walltime_hours`. The production form supports up
+to 128 CPUs, 1,024 GB RAM, and 336 hours. Other failures terminate immediately
+so invalid inputs are not repeatedly billed.
 
 The pinned image does not include the `procps` package. A minimal read-only
 `bin/ps` compatibility shim exposes PID/parent-PID data from `/proc`, which is

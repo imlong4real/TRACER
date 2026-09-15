@@ -11,10 +11,12 @@ import hashlib
 import json
 import os
 import platform
+import resource
 import shutil
 import socket
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -292,73 +294,85 @@ def resolved_config(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
-def canonical_frame_hash(path: Path, sort_columns: list[str]) -> tuple[str, int]:
-    import pandas as pd
+def parquet_rows(path: Path) -> int:
+    import pyarrow.parquet as pq
 
-    if path.name.endswith(".parquet"):
-        frame = pd.read_parquet(path)
-    else:
-        frame = pd.read_csv(path, sep="\t")
-    ordered_columns = sorted(frame.columns)
-    sort_by = [column for column in sort_columns if column in frame.columns]
-    if sort_by:
-        frame = frame.sort_values(sort_by, kind="mergesort", na_position="last")
-    payload = frame[ordered_columns].to_csv(
-        index=False,
-        lineterminator="\n",
-        na_rep="<NA>",
-        float_format="%.17g",
-    ).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest(), len(frame)
+    return int(pq.ParquetFile(path).metadata.num_rows)
 
 
-def canonical_h5ad_hash(path: Path) -> tuple[str, list[int]]:
-    import anndata as ad
-    import numpy as np
-    import scipy.sparse as sp
+def gzip_data_rows(path: Path) -> int:
+    with gzip.open(path, "rb") as handle:
+        lines = sum(1 for _ in handle)
+    return max(0, lines - 1)
 
-    adata = ad.read_h5ad(path)
-    obs_order = np.argsort(adata.obs_names.astype(str), kind="mergesort")
-    var_order = np.argsort(adata.var_names.astype(str), kind="mergesort")
-    matrix = adata.X[obs_order, :][:, var_order]
-    matrix = sp.csr_matrix(matrix)
 
-    digest = hashlib.sha256()
-    digest.update(json.dumps(list(matrix.shape)).encode("ascii"))
-    for values in (matrix.indptr, matrix.indices, matrix.data):
-        contiguous = np.ascontiguousarray(values)
-        digest.update(str(contiguous.dtype).encode("ascii"))
-        digest.update(contiguous.tobytes())
-    digest.update("\n".join(adata.obs_names[obs_order].astype(str)).encode("utf-8"))
-    digest.update("\n".join(adata.var_names[var_order].astype(str)).encode("utf-8"))
+def h5ad_shape(path: Path) -> list[int] | None:
+    import h5py
 
-    obs = adata.obs.iloc[obs_order].copy()
-    obs.index = adata.obs_names[obs_order].astype(str)
-    digest.update(
-        obs.sort_index(axis=1).to_csv(
-            lineterminator="\n", na_rep="<NA>", float_format="%.17g"
-        ).encode("utf-8")
-    )
-    return digest.hexdigest(), [int(matrix.shape[0]), int(matrix.shape[1])]
+    with h5py.File(path, "r") as handle:
+        if "X" in handle and hasattr(handle["X"], "shape") and len(handle["X"].shape) == 2:
+            return [int(value) for value in handle["X"].shape]
+        if "X" in handle and "shape" in handle["X"].attrs:
+            return [int(value) for value in handle["X"].attrs["shape"]]
+        if "obs" in handle and "var" in handle:
+            obs = handle["obs"].attrs.get("_index")
+            var = handle["var"].attrs.get("_index")
+            if isinstance(obs, bytes):
+                obs = obs.decode("utf-8")
+            if isinstance(var, bytes):
+                var = var.decode("utf-8")
+            if obs and var and obs in handle["obs"] and var in handle["var"]:
+                return [len(handle["obs"][obs]), len(handle["var"][var])]
+    return None
+
+
+def file_fingerprint(path: Path) -> dict[str, Any]:
+    return {
+        "sha256": sha256_file(path),
+        "size_bytes": path.stat().st_size,
+    }
 
 
 def output_fingerprints(outdir: Path) -> dict[str, Any]:
-    transcripts_hash, transcript_rows = canonical_frame_hash(
-        outdir / "outputs" / "transcripts_tracer_refined.parquet",
-        ["transcript_id", "feature_name", "x", "y", "z"],
-    )
-    scores_hash, score_rows = canonical_frame_hash(
-        outdir / "outputs" / "cell_scores.tsv.gz", ["cell_id"]
-    )
-    matrix_hash, matrix_shape = canonical_h5ad_hash(
-        outdir / "outputs" / "cell_by_gene_tracer.h5ad"
-    )
+    transcripts = outdir / "outputs" / "transcripts_tracer_refined.parquet"
+    scores = outdir / "outputs" / "cell_scores.tsv.gz"
+    matrix = outdir / "outputs" / "cell_by_gene_tracer.h5ad"
+    transcripts_fingerprint = file_fingerprint(transcripts)
+    transcripts_fingerprint["rows"] = parquet_rows(transcripts)
+    scores_fingerprint = file_fingerprint(scores)
+    scores_fingerprint["rows"] = gzip_data_rows(scores)
+    matrix_fingerprint = file_fingerprint(matrix)
+    matrix_fingerprint["shape"] = h5ad_shape(matrix)
     return {
-        "algorithm": "sha256-canonical-v1",
-        "refined_transcripts": {"sha256": transcripts_hash, "rows": transcript_rows},
-        "cell_scores": {"sha256": scores_hash, "rows": score_rows},
-        "cell_by_gene": {"sha256": matrix_hash, "shape": matrix_shape},
+        "algorithm": "sha256-file-v1",
+        "note": "Streaming file hashes avoid materializing whole-tissue outputs in memory.",
+        "refined_transcripts": transcripts_fingerprint,
+        "cell_scores": scores_fingerprint,
+        "cell_by_gene": matrix_fingerprint,
     }
+
+
+def child_peak_rss_gb() -> float:
+    value = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+    return float(value) / (1024 ** 2)
+
+
+def write_adapter_resources(
+    path: Path, *, started_at_utc: str, started_perf: float, args: argparse.Namespace
+) -> None:
+    write_json(
+        path,
+        {
+            "started_at_utc": started_at_utc,
+            "completed_at_utc": utc_now(),
+            "wall_seconds": time.perf_counter() - started_perf,
+            "child_peak_rss_gb": child_peak_rss_gb(),
+            "requested_cpus": args.task_cpus,
+            "requested_memory": decode_source(args.task_memory_b64),
+            "task_attempt": args.task_attempt,
+            "measurement_note": "ru_maxrss for adapter child processes; use Nextflow trace for task-level peak RSS",
+        },
+    )
 
 
 def write_checksums(outdir: Path) -> None:
@@ -390,9 +404,11 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--cell-boundaries", type=Path)
     result.add_argument("--nucleus-boundaries", type=Path)
     result.add_argument("--fastparquet-shim", required=True, type=Path)
+    result.add_argument("--pmi-filter", required=True, type=Path)
     for name in (
         "transcripts-source-b64",
         "pmi-source-b64",
+        "pmi-original-path-b64",
         "user-config-source-b64",
         "cell-boundaries-source-b64",
         "nucleus-boundaries-source-b64",
@@ -412,6 +428,8 @@ def parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = parser().parse_args()
+    started_at_utc = utc_now()
+    started_perf = time.perf_counter()
     outdir = args.outdir.resolve()
     workdir = Path("adapter_work").resolve()
     outdir.mkdir(parents=True, exist_ok=False)
@@ -434,9 +452,10 @@ def main() -> int:
         "cell_boundaries": decode_source(args.cell_boundaries_source_b64),
         "nucleus_boundaries": decode_source(args.nucleus_boundaries_source_b64),
     }
+    pmi_original_path = decode_source(args.pmi_original_path_b64)
     manifest = {
         "status": "started",
-        "started_at_utc": utc_now(),
+        "started_at_utc": started_at_utc,
         "sample_name": args.sample_name,
         "tracer": {
             "version": args.tracer_version,
@@ -471,6 +490,8 @@ def main() -> int:
             for name, path in input_paths.items()
         },
     }
+    manifest["inputs"]["pmi"]["original_filesystem_path"] = pmi_original_path
+    manifest["inputs"]["transcripts"]["rows"] = parquet_rows(args.transcripts)
     write_json(outdir / "provenance" / "run_manifest.json", manifest)
 
     resolved = resolved_config(args)
@@ -523,7 +544,31 @@ def main() -> int:
             "effective_staged_path": str(standardized),
             "sha256": sha256_file(standardized),
             "size_bytes": standardized.stat().st_size,
+            "rows": parquet_rows(standardized),
         }
+
+        effective_pmi = workdir / "effective_platform_pmi.csv.gz"
+        pmi_overlap_receipt = outdir / "provenance" / "pmi_overlap_receipt.json"
+        filter_command = [
+            sys.executable,
+            str(args.pmi_filter.resolve()),
+            "--pmi",
+            str(args.pmi.resolve()),
+            "--gene-counts",
+            str(outdir / "preprocessing" / "qc" / "gene_counts.tsv"),
+            "--out",
+            str(effective_pmi),
+            "--receipt",
+            str(pmi_overlap_receipt),
+            "--source",
+            input_sources["pmi"] or "",
+            "--source-sha256",
+            manifest["inputs"]["pmi"]["sha256"],
+        ]
+        run_logged(filter_command, outdir / "logs" / "pmi_overlap_filter.log")
+        pmi_overlap = json.loads(pmi_overlap_receipt.read_text(encoding="utf-8"))
+        manifest["pmi_overlap"] = pmi_overlap
+        manifest["inputs"]["effective_pmi"] = pmi_overlap["effective_pmi"]
         write_json(outdir / "provenance" / "run_manifest.json", manifest)
 
         tracer_command = [
@@ -532,7 +577,7 @@ def main() -> int:
             "--transcripts",
             str(standardized),
             "--npmi",
-            str(args.pmi.resolve()),
+            str(effective_pmi),
             "--outdir",
             str(outdir),
             "--sample-name",
@@ -575,7 +620,9 @@ def main() -> int:
             "workflow_revision": args.workflow_revision,
             "resolved_config": "provenance/resolved_tracer_config.json",
         }
-        receipt["inputs"]["effective_pmi"] = manifest["inputs"]["pmi"]
+        receipt["inputs"]["original_pmi"] = manifest["inputs"]["pmi"]
+        receipt["inputs"]["effective_pmi"] = manifest["inputs"]["effective_pmi"]
+        receipt["inputs"]["pmi_overlap"] = pmi_overlap
         receipt["inputs"]["effective_transcripts"] = manifest["inputs"]["transcripts"]
         receipt["inputs"]["cell_boundaries"] = manifest["inputs"]["cell_boundaries"]
         receipt["inputs"]["nucleus_boundaries"] = manifest["inputs"]["nucleus_boundaries"]
@@ -599,12 +646,24 @@ def main() -> int:
 
         fingerprints = output_fingerprints(outdir)
         write_json(outdir / "provenance" / "output_fingerprints.json", fingerprints)
+        write_adapter_resources(
+            outdir / "provenance" / "adapter_resource_usage.json",
+            started_at_utc=started_at_utc,
+            started_perf=started_perf,
+            args=args,
+        )
         manifest["status"] = "complete"
         manifest["completed_at_utc"] = utc_now()
         manifest["output_fingerprints"] = fingerprints
         write_json(outdir / "provenance" / "run_manifest.json", manifest)
         write_checksums(outdir)
     except BaseException as exc:
+        write_adapter_resources(
+            outdir / "provenance" / "adapter_resource_usage.json",
+            started_at_utc=started_at_utc,
+            started_perf=started_perf,
+            args=args,
+        )
         manifest["status"] = "failed"
         manifest["completed_at_utc"] = utc_now()
         manifest["error"] = f"{type(exc).__name__}: {exc}"
