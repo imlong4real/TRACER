@@ -1,7 +1,7 @@
 {
   "form": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "$id": "urn:tracer:cirro:form:0.1.1-cirro.2",
+    "$id": "urn:tracer:cirro:form:0.1.1-cirro.3",
     "title": "TRACER Seg (Xenium)",
     "description": "Pinned TRACER Seg refinement with explicit PMI/cPMI input and complete run provenance.",
     "type": "object",
@@ -121,7 +121,7 @@
       "cpus": {
         "type": "integer",
         "minimum": 1,
-        "maximum": 128,
+        "maximum": 192,
         "default": 16,
         "title": "CPUs",
         "description": "CPU request and numerical-library thread limit."
@@ -129,7 +129,7 @@
       "memory_gb": {
         "type": "integer",
         "minimum": 8,
-        "maximum": 1024,
+        "maximum": 4096,
         "default": 64,
         "title": "Initial memory (GB)",
         "description": "Initial request; eligible retries scale this value."
@@ -137,7 +137,7 @@
       "max_memory_gb": {
         "type": "integer",
         "minimum": 8,
-        "maximum": 1024,
+        "maximum": 4096,
         "default": 256,
         "title": "Maximum retry memory (GB)",
         "description": "Retry cap; must be at least initial memory."

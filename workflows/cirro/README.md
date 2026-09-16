@@ -67,7 +67,7 @@ Exit statuses associated with transient transfer/termination or out-of-memory
 conditions (`104`, `137`, `143`) are retried up to `--max_retries`. Memory and
 walltime are multiplied by the attempt number and capped by
 `--max_memory_gb` and `--max_walltime_hours`. The production form supports up
-to 128 CPUs, 1,024 GB RAM, and 336 hours. Other failures terminate immediately
+to 192 CPUs, 4,096 GB RAM, and 336 hours. Other failures terminate immediately
 so invalid inputs are not repeatedly billed.
 
 The pinned image does not include the `procps` package. A minimal read-only
