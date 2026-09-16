@@ -23,10 +23,25 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Derive image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/imlong4real/tracer
+          # Tag every build with its (slash-sanitized) branch name,
+          # e.g. tracer:insitucnv-tracer-degradation
+          tags: |
+            type=ref,event=branch
+          # latest=auto -> the :latest tag is applied ONLY on the default
+          # branch (main), so branch builds never clobber :latest.
+          flavor: |
+            latest=auto
+
       - name: Build and push image
         uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile
           push: true
-          tags: ghcr.io/imlong4real/tracer:latest
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
