@@ -24,6 +24,19 @@
 #   COUNT_SCOPE=nuclear|whole_cell, SUBSAMPLE=50000, QV_MIN=20, MIN_OCC=1,
 #   MIN_DET_CELLS=25, TOP_K_PER_GENE=200, PANEL_GENES=/path/genes.txt,
 #   MAX_ROW_GROUPS=10, DRY_RUN=1, OUT=/path/panel.csv.gz.
+#
+# Staging mode (STAGE_ONLY=1) writes no panel. It streams the eligible
+# transcripts of the subsampled cells to a small parquet for the canonical
+# builder, scripts/build_panels.py, whose loader cannot ingest the 33.7 GB
+# whole-slide table. This is the first step of the grid3 + cPMI path:
+#
+#   qsub -v STAGE_ONLY=1                       .../build_whole_tissue_cpmi.sge
+#   qsub -v STAGE_ONLY=1,COUNT_SCOPE=whole_cell .../build_whole_tissue_cpmi.sge
+# write:
+#   data/staged_nuclear_50k.parquet
+#   data/staged_whole_cell_50k.parquet
+#
+# Staging overrides: STAGE_OUT=/path/staged.parquet.
 
 set -euo pipefail
 
@@ -58,6 +71,7 @@ TOP_K_PER_GENE=${TOP_K_PER_GENE:-}
 PANEL_GENES=${PANEL_GENES:-}
 MAX_ROW_GROUPS=${MAX_ROW_GROUPS:-0}
 DRY_RUN=${DRY_RUN:-0}
+STAGE_ONLY=${STAGE_ONLY:-0}
 SEED=${SEED:-1}
 
 if [[ -z "${OUT:-}" ]]; then
@@ -73,6 +87,22 @@ fi
 mkdir -p "$(dirname "$OUT")"
 OUT_DIR=$(readlink -f "$(dirname "$OUT")")
 OUT=$OUT_DIR/$(basename "$OUT")
+
+if [[ "$STAGE_ONLY" == "1" ]]; then
+    if [[ -z "${STAGE_OUT:-}" ]]; then
+        if [[ "$SUBSAMPLE" == "0" ]]; then
+            STAGE_LABEL=all
+        elif [[ "$SUBSAMPLE" == "50000" ]]; then
+            STAGE_LABEL=50k
+        else
+            STAGE_LABEL=$SUBSAMPLE
+        fi
+        STAGE_OUT=$BENCH/data/staged_${COUNT_SCOPE}_${STAGE_LABEL}.parquet
+    fi
+    mkdir -p "$(dirname "$STAGE_OUT")"
+    STAGE_DIR=$(readlink -f "$(dirname "$STAGE_OUT")")
+    STAGE_OUT=$STAGE_DIR/$(basename "$STAGE_OUT")
+fi
 if [[ -n "$PANEL_GENES" ]]; then
     PANEL_GENES=$(readlink -f "$PANEL_GENES")
 fi
@@ -97,7 +127,12 @@ fi
 
 echo "Transcripts         : $TRANSCRIPTS"
 echo "Count scope         : $COUNT_SCOPE"
-echo "Out                 : $OUT"
+if [[ "$STAGE_ONLY" == "1" ]]; then
+    echo "Mode                : STAGE_ONLY (no panel; feeds build_panels.py)"
+    echo "Staged parquet      : $STAGE_OUT"
+else
+    echo "Out                 : $OUT"
+fi
 echo "ROI seed check      : $ROI"
 echo "qv_min=$QV_MIN min_occ=$MIN_OCC subsample=$SUBSAMPLE min_det_cells=$MIN_DET_CELLS seed=$SEED"
 echo "n_depth_bins=$N_DEPTH_BINS min_cooccur=$MIN_COOCCUR min_expected_neg=$MIN_EXPECTED_NEG max_observed_neg=$MAX_OBSERVED_NEG neg_recovery_top_m=$NEG_RECOVERY_TOP_M top_k_per_gene=${TOP_K_PER_GENE:-none}"
@@ -130,6 +165,9 @@ fi
 if [[ "$DRY_RUN" == "1" ]]; then
     CPMI_ARGS+=(--dry-run)
 fi
+if [[ "$STAGE_ONLY" == "1" ]]; then
+    CPMI_ARGS+=(--stage-only --stage-out "$STAGE_OUT")
+fi
 
 apptainer exec \
     --bind /mnt/storage:/mnt/storage \
@@ -139,6 +177,13 @@ apptainer exec \
 
 if [[ "$DRY_RUN" == "1" ]]; then
     echo "DRY_RUN=1: skipping ROI seed-support check because no panel was written."
+    exit 0
+fi
+
+if [[ "$STAGE_ONLY" == "1" ]]; then
+    echo "STAGE_ONLY=1: skipping ROI seed-support check because no panel was written."
+    echo "Next: scripts/build_panels.py --transcripts $STAGE_OUT \\"
+    echo "        --nucleus-only --panel-preset nuclear --emit-cpmi"
     exit 0
 fi
 
