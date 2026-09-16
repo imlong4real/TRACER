@@ -37,6 +37,17 @@
 #   data/staged_whole_cell_50k.parquet
 #
 # Staging overrides: STAGE_OUT=/path/staged.parquet.
+#
+# RUNTIME=conda|container selects the interpreter. Staging imports only
+# pyarrow/pandas/numpy -- never `tracer` (the --stage-only branch returns
+# before load_cpmi_builder()) -- so it defaults to `conda` and needs no
+# container at all. The panel path defaults to `container` because it calls
+# tracer.conflict_reference. Override with RUNTIME=...
+#
+# Under RUNTIME=conda the env is entered with `conda activate`, matching
+# make_full_ovary_celltyping.sge: BENCH_ENV names it, CONDA_BASE locates the
+# conda install, and BENCH_PYTHON=/path/to/bin/python is a last-resort escape
+# hatch for when conda itself is unavailable.
 
 set -euo pipefail
 
@@ -45,12 +56,32 @@ REPO=$(readlink -f "$REPO")
 SIF=${SIF:-$REPO/tracer_latest.sif}
 BENCH=$REPO/tutorials/insitucnv_tracer_benchmark
 
-if [[ ! -f "$SIF" ]]; then
-    echo "Missing TRACER container: $SIF" >&2
-    echo "Set SIF=/path/to/tracer_latest.sif or place tracer_latest.sif under \$REPO." >&2
-    exit 1
+# Staging is container-independent; the panel build is not. See the RUNTIME
+# note in the header.
+if [[ "${STAGE_ONLY:-0}" == "1" ]]; then
+    RUNTIME=${RUNTIME:-conda}
+else
+    RUNTIME=${RUNTIME:-container}
 fi
-SIF=$(readlink -f "$SIF")
+BENCH_ENV=${BENCH_ENV:-insitucnv_tracer_benchmark}
+BENCH_PYTHON=${BENCH_PYTHON:-}
+CONDA_BASE=${CONDA_BASE:-/mnt/storage/dept/medonc/beroukhim/youyun/util/miniforge3}
+
+case "$RUNTIME" in
+    container)
+        if [[ ! -f "$SIF" ]]; then
+            echo "Missing TRACER container: $SIF" >&2
+            echo "Set SIF=/path/to/tracer_latest.sif or place tracer_latest.sif under \$REPO." >&2
+            exit 1
+        fi
+        SIF=$(readlink -f "$SIF")
+        ;;
+    conda) ;;
+    *)
+        echo "RUNTIME must be conda or container, got: $RUNTIME" >&2
+        exit 1
+        ;;
+esac
 
 TRANSCRIPTS=${TRANSCRIPTS:-$BENCH/data/xenium_ovary/raw/Xenium_Prime_Human_Ovary_FF_transcripts.parquet}
 TRANSCRIPTS=$(readlink -f "$TRANSCRIPTS")
@@ -118,15 +149,59 @@ export NUMEXPR_NUM_THREADS=1
 
 APPTAINER_CONDA_BASE=${APPTAINER_CONDA_BASE:-/mnt/storage/dept/medonc/beroukhim/youyun/util/miniforge3}
 APPTAINER_CONDA_ENV=${APPTAINER_CONDA_ENV:-segmentation}
-source "$APPTAINER_CONDA_BASE/etc/profile.d/conda.sh"
-conda activate "$APPTAINER_CONDA_ENV"
-if ! command -v apptainer >/dev/null 2>&1; then
-    echo "apptainer not found after conda activate $APPTAINER_CONDA_ENV" >&2
-    exit 127
+if [[ "$RUNTIME" == "container" ]]; then
+    source "$APPTAINER_CONDA_BASE/etc/profile.d/conda.sh"
+    conda activate "$APPTAINER_CONDA_ENV"
+    if ! command -v apptainer >/dev/null 2>&1; then
+        echo "apptainer not found after conda activate $APPTAINER_CONDA_ENV" >&2
+        exit 127
+    fi
+else
+    # Enter the env the way conda intends, so the env's own activation hooks
+    # and library paths apply; an explicit interpreter path is the fallback,
+    # not the default. Mirrors make_full_ovary_celltyping.sge.
+    if [[ -n "$BENCH_PYTHON" ]]; then
+        PYTHON="$BENCH_PYTHON"
+    elif command -v conda >/dev/null 2>&1; then
+        set +u
+        source "$(conda info --base)/etc/profile.d/conda.sh"
+        conda activate "$BENCH_ENV"
+        set -u
+        PYTHON=python
+    elif [[ -n "$CONDA_BASE" && -f "$CONDA_BASE/etc/profile.d/conda.sh" ]]; then
+        set +u
+        source "$CONDA_BASE/etc/profile.d/conda.sh"
+        conda activate "$BENCH_ENV"
+        set -u
+        PYTHON=python
+    else
+        echo "Could not find conda in PATH or at CONDA_BASE=$CONDA_BASE." >&2
+        echo "Submit with CONDA_BASE=/path/to/conda/base or BENCH_PYTHON=/path/to/env/bin/python." >&2
+        exit 1
+    fi
 fi
+
+# Single place that decides how python is invoked. Args are the script path
+# followed by its own flags.
+run_py() {
+    if [[ "$RUNTIME" == "conda" ]]; then
+        "$PYTHON" "$@"
+    else
+        apptainer exec \
+            --bind /mnt/storage:/mnt/storage \
+            --pwd "$REPO" \
+            "$SIF" \
+            python "$@"
+    fi
+}
 
 echo "Transcripts         : $TRANSCRIPTS"
 echo "Count scope         : $COUNT_SCOPE"
+if [[ "$RUNTIME" == "conda" ]]; then
+    echo "Runtime             : conda env '${CONDA_DEFAULT_ENV:-$BENCH_ENV}' ($(command -v $PYTHON))"
+else
+    echo "Runtime             : container ($SIF)"
+fi
 if [[ "$STAGE_ONLY" == "1" ]]; then
     echo "Mode                : STAGE_ONLY (no panel; feeds build_panels.py)"
     echo "Staged parquet      : $STAGE_OUT"
@@ -139,7 +214,7 @@ echo "n_depth_bins=$N_DEPTH_BINS min_cooccur=$MIN_COOCCUR min_expected_neg=$MIN_
 echo "panel_genes=${PANEL_GENES:-none} max_row_groups=$MAX_ROW_GROUPS dry_run=$DRY_RUN"
 
 CPMI_ARGS=(
-    python tutorials/insitucnv_tracer_benchmark/scripts/build_whole_tissue_cpmi.py
+    tutorials/insitucnv_tracer_benchmark/scripts/build_whole_tissue_cpmi.py
     --transcripts "$TRANSCRIPTS"
     --out "$OUT"
     --count-scope "$COUNT_SCOPE"
@@ -169,11 +244,7 @@ if [[ "$STAGE_ONLY" == "1" ]]; then
     CPMI_ARGS+=(--stage-only --stage-out "$STAGE_OUT")
 fi
 
-apptainer exec \
-    --bind /mnt/storage:/mnt/storage \
-    --pwd "$REPO" \
-    "$SIF" \
-    "${CPMI_ARGS[@]}"
+run_py "${CPMI_ARGS[@]}"
 
 if [[ "$DRY_RUN" == "1" ]]; then
     echo "DRY_RUN=1: skipping ROI seed-support check because no panel was written."
@@ -189,11 +260,7 @@ fi
 
 # Acceptance gate: per-seed positive panel support on the ROI. For CPMI panels,
 # the TRACER-compatible PMI column stores cPMI.
-apptainer exec \
-    --bind /mnt/storage:/mnt/storage \
-    --pwd "$REPO" \
-    "$SIF" \
-    python tutorials/insitucnv_tracer_benchmark/scripts/check_panel_seed_support.py \
+run_py tutorials/insitucnv_tracer_benchmark/scripts/check_panel_seed_support.py \
         --panel "$OUT" \
         --transcripts "$ROI" \
         --metric-col PMI \
