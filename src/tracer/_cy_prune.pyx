@@ -8,122 +8,58 @@ from cython.parallel cimport prange
 cimport openmp
 
 
-def prune_cells(list g_lists, cnp.ndarray[cnp.float32_t, ndim=2] W, double threshold):
+# Test knob (per-pass controllable from Python). When 0, a candidate whose
+# real-signal PMI array vs the entity is EMPTY (n_signal==0 → no |PMI|>rst edge
+# to any entity gene) is VETOED instead of defer-admitted. Default 1 = legacy.
+cdef int _ADMIT_INDEPENDENT = 1
+
+def set_admit_independent(int v):
+    global _ADMIT_INDEPENDENT
+    _ADMIT_INDEPENDENT = v
+
+def get_admit_independent():
+    return _ADMIT_INDEPENDENT
+
+
+# --- diagnostic counters for the per-cell early-exit paths -----------------
+# The prune loop drops cells via several `continue`s; the primary-seed
+# coherence-floor rejection is the destructive one (skips Phase 1b AND 1c,
+# so the cell leaves NO main and NO partial, and Phase1-Rerank has nothing
+# to recover from). Counted here so "how often does this fire?" is
+# answerable without an A/B against a disabled floor. Cheap: the loop is
+# not nogil, and these are plain C increments.
+cdef long _CNT_CELLS = 0
+cdef long _CNT_SEED_EMPTY = 0
+cdef long _CNT_FALLBACK = 0
+cdef long _CNT_THIN_NUCLEUS = 0
+
+
+def reset_prune_counters():
+    global _CNT_CELLS, _CNT_SEED_EMPTY, _CNT_FALLBACK, _CNT_THIN_NUCLEUS
+    _CNT_CELLS = 0
+    _CNT_SEED_EMPTY = 0
+    _CNT_FALLBACK = 0
+    _CNT_THIN_NUCLEUS = 0
+
+
+def get_prune_counters():
+    """Per-cell early-exit tallies since the last ``reset_prune_counters()``.
+
+    cells         : cells visited with >=1 tx
+    seed_empty    : greedy prune returned an empty seed -> cell dropped
+    thin_nucleus  : cells with < min_nuclear_genes unique NUCLEAR genes.
+                    A property of the DATA, so it is scope-invariant.
+    fallback      : cells that ACTUALLY fell back — i.e. thin_nucleus AND
+                    a nuclear seed was requested. Always 0 under
+                    prune_scope="cell", where the whole-cell seed is the
+                    primary path and nothing falls back.
     """
-    Bulk prune helper callable from Python.
-
-    Parameters
-    ----------
-    g_lists : list
-        List of 1D integer numpy arrays (gene indices) or None entries.
-    W : ndarray[float32, 2D]
-        Full NPMI matrix.
-    threshold : float
-        NPMI threshold.
-
-    Returns
-    -------
-    list
-        List of removed gene index lists (python lists) or []/None.
-    """
-    cdef Py_ssize_t n
-    cdef list out
-    cdef Py_ssize_t idx
-    cdef object arr
-
-    n = len(g_lists)
-    out = [None] * n
-    for idx in range(n):
-        g = g_lists[idx]
-        if g is None:
-            out[idx] = None
-            continue
-        arr = np.asarray(g, dtype=np.int32)
-        if arr.size <= 1:
-            out[idx] = []
-            continue
-        out[idx] = prune_single(arr, W, threshold)
-
-    return out
-
-
-def prune_single(cnp.ndarray[cnp.int32_t, ndim=1] g_local, cnp.ndarray[cnp.float32_t, ndim=2] W, double threshold):
-    """Prune a single gene list. Returns removed gene indices as Python list."""
-    cdef int k
-    cdef int i, j
-    cdef int gi, gj
-    cdef int active_count
-    cdef int maxc, argmax
-    cdef float val
-
-    cdef object active
-    cdef object bad
-    cdef object bad_counts
-
-    cdef cnp.int32_t[:] gids
-    cdef cnp.float32_t[:, :] Wv
-    cdef cnp.uint8_t[:, :] bad_mv
-    cdef cnp.uint8_t[:] active_mv
-    cdef cnp.int32_t[:] badc_mv
-
-    k = g_local.shape[0]
-    # create local numpy arrays for masks/counts (fast with memoryviews)
-    active = np.ones(k, dtype=np.uint8)
-    bad = np.zeros((k, k), dtype=np.uint8)
-    bad_counts = np.zeros(k, dtype=np.int32)
-
-    gids = g_local
-    Wv = W
-    bad_mv = bad
-    active_mv = active
-    badc_mv = bad_counts
-
-    # compute bad matrix and counts
-    for i in range(k):
-        gi = int(gids[i])
-        for j in range(k):
-            if i == j:
-                continue
-            gj = int(gids[j])
-            val = Wv[gi, gj]
-            # NaN check
-            if val != val:
-                continue
-            if val < threshold:
-                bad_mv[i, j] = 1
-                badc_mv[i] += 1
-
-    active_count = k
-    while active_count > 1:
-        # find active index with max bad_counts
-        maxc = -1
-        argmax = -1
-        for i in range(k):
-            if active_mv[i]:
-                if badc_mv[i] > maxc:
-                    maxc = badc_mv[i]
-                    argmax = i
-
-        if maxc <= 0:
-            break
-
-        # remove argmax
-        active_mv[argmax] = 0
-        active_count -= 1
-
-        # decrement neighbors' counts
-        for j in range(k):
-            if active_mv[j] and bad_mv[argmax, j]:
-                badc_mv[j] -= 1
-        badc_mv[argmax] = 0
-
-    # collect removed genes (those inactive)
-    cdef list removed = []
-    for i in range(k):
-        if not bool(active_mv[i]):
-            removed.append(int(gids[i]))
-
-    return removed
+    return {
+        "cells": _CNT_CELLS,
+        "seed_empty": _CNT_SEED_EMPTY,
+        "thin_nucleus": _CNT_THIN_NUCLEUS,
+        "fallback": _CNT_FALLBACK,
+    }
 
 
 cdef inline bint _wget(
@@ -176,36 +112,6 @@ cdef inline bint _wget(
             out[0] = v
             return True
         return False
-
-
-cdef inline double _mean_internal_pmi(
-    cnp.int32_t[:] genes,
-    int n_genes,
-    cnp.float32_t[:, :] W,
-    const int[::1] W_indptr,
-    const int[::1] W_indices,
-    const float[::1] W_data,
-    int use_sparse,
-) nogil:
-    """Mean PMI over off-diagonal pairs within a gene set. Returns
-    +inf when the set has <2 genes (caller treats as "trivially
-    coherent": no pairs means no internal incoherence). Unobserved
-    pairs are skipped (see :func:`_wget`)."""
-    cdef int i, j
-    cdef double total = 0.0
-    cdef int count = 0
-    cdef float v
-    if n_genes < 2:
-        return 1e30
-    for i in range(n_genes):
-        for j in range(i + 1, n_genes):
-            if _wget(W, W_indptr, W_indices, W_data, use_sparse,
-                     genes[i], genes[j], &v):
-                total += v
-                count += 1
-    if count == 0:
-        return 0.0
-    return total / count
 
 
 cdef inline int _mean_pmi_test(
@@ -324,6 +230,135 @@ cdef cnp.ndarray _greedy_prune_to_retained(
     return kept
 
 
+def greedy_prune_retained(
+    cnp.ndarray[cnp.int32_t, ndim=1] g_local,
+    cnp.ndarray[cnp.int32_t, ndim=1] tx_counts,
+    W_dense=None,
+    W_indptr=None,
+    W_indices=None,
+    W_data=None,
+    double threshold=0.05,
+):
+    """Public tx-weighted greedy bad-edge prune — returns RETAINED genes.
+
+    Native replacement for the former ``density_cascade.greedy_prune``
+    Python loop. Where that loop counted each conflicting gene once, this
+    scores gene ``i`` by ``sum_j bad[i, j] * tx_counts[j]`` and protects a
+    gene whose own tx count outweighs its conflict score — the same
+    tx-weighted policy the nuclear-seed prune uses. Passing an all-ones
+    ``tx_counts`` reproduces the legacy unweighted behavior bit-for-bit
+    (the self-protection safeguard then fires only at score 0, which the
+    legacy loop never removed either).
+
+    Provide EITHER ``W_dense`` (a float32 ``(G, G)`` ndarray, unobserved
+    pairs = NaN) OR the symmetric, column-sorted CSR triple
+    (``W_indptr``, ``W_indices``, ``W_data``, unobserved pairs absent).
+    Absent/NaN pairs are SKIPPED (never marked bad), matching the seeded
+    kernels' ``_wget`` contract on both backends.
+
+    Parameters
+    ----------
+    g_local : int32 ndarray
+        Distinct gene indices in the component.
+    tx_counts : int32 ndarray
+        Per-gene transcript counts aligned to ``g_local``. All-ones for
+        unweighted parity with the legacy loop.
+    threshold : float
+        Bad-edge PMI cutoff — a pair with PMI < threshold is a conflict.
+
+    Returns
+    -------
+    int32 ndarray of retained gene indices.
+    """
+    cdef cnp.ndarray[cnp.float32_t, ndim=2] _W
+    cdef cnp.ndarray[cnp.int32_t, ndim=1] _ip
+    cdef cnp.ndarray[cnp.int32_t, ndim=1] _ix
+    cdef cnp.ndarray[cnp.float32_t, ndim=1] _dt
+    cdef int use_sparse
+    if W_dense is not None:
+        use_sparse = 0
+        _W = np.ascontiguousarray(W_dense, dtype=np.float32)
+        _ip = np.zeros(1, dtype=np.int32)
+        _ix = np.zeros(1, dtype=np.int32)
+        _dt = np.zeros(1, dtype=np.float32)
+    else:
+        if W_indptr is None or W_indices is None or W_data is None:
+            raise ValueError(
+                "greedy_prune_retained: pass either W_dense or all of "
+                "W_indptr / W_indices / W_data"
+            )
+        use_sparse = 1
+        _W = np.zeros((1, 1), dtype=np.float32)
+        _ip = np.ascontiguousarray(W_indptr, dtype=np.int32)
+        _ix = np.ascontiguousarray(W_indices, dtype=np.int32)
+        _dt = np.ascontiguousarray(W_data, dtype=np.float32)
+    return np.asarray(_greedy_prune_to_retained(
+        np.ascontiguousarray(g_local, dtype=np.int32),
+        np.ascontiguousarray(tx_counts, dtype=np.int32),
+        _W, _ip, _ix, _dt, use_sparse, threshold,
+    ))
+
+
+def prune_cells_retained(list g_lists, list tx_counts_lists, W, double threshold):
+    """Batched tx-weighted whole-cell prune — the tx-weighted replacement for
+    ``prune_cells``. Returns a list of REMOVED gene-index lists (Python lists),
+    one per input cell (parity with ``prune_cells``): ``removed = g \\ retained``,
+    where ``retained`` comes from the tx-weighted ``_greedy_prune_to_retained``.
+
+    ``W`` is a dense float32 ``(G, G)`` ndarray (unobserved = NaN) OR a
+    symmetric, column-sorted scipy CSR (unobserved = absent) — dispatched by
+    type, so both the dense small-panel and sparse whole-transcriptome paths
+    work. ``tx_counts_lists[i]`` aligns to ``g_lists[i]``; pass all-ones (or
+    ``None``) for unweighted parity with ``prune_cells``. ``None``/empty
+    entries mirror ``prune_cells`` (``None`` -> ``None``, size<=1 -> ``[]``).
+    """
+    cdef cnp.ndarray[cnp.float32_t, ndim=2] _W
+    cdef cnp.ndarray[cnp.int32_t, ndim=1] _ip
+    cdef cnp.ndarray[cnp.int32_t, ndim=1] _ix
+    cdef cnp.ndarray[cnp.float32_t, ndim=1] _dt
+    cdef int use_sparse
+    if isinstance(W, np.ndarray):
+        use_sparse = 0
+        _W = np.ascontiguousarray(W, dtype=np.float32)
+        _ip = np.zeros(1, dtype=np.int32)
+        _ix = np.zeros(1, dtype=np.int32)
+        _dt = np.zeros(1, dtype=np.float32)
+    else:
+        use_sparse = 1
+        Wc = W.tocsr()
+        if not Wc.has_sorted_indices:
+            Wc = Wc.sorted_indices()
+        _W = np.zeros((1, 1), dtype=np.float32)
+        _ip = np.ascontiguousarray(Wc.indptr, dtype=np.int32)
+        _ix = np.ascontiguousarray(Wc.indices, dtype=np.int32)
+        _dt = np.ascontiguousarray(Wc.data, dtype=np.float32)
+
+    cdef Py_ssize_t n = len(g_lists)
+    cdef list out = [None] * n
+    cdef Py_ssize_t idx
+    cdef cnp.ndarray[cnp.int32_t, ndim=1] garr
+    cdef cnp.ndarray[cnp.int32_t, ndim=1] tcarr
+    cdef cnp.ndarray retained
+    for idx in range(n):
+        g = g_lists[idx]
+        if g is None:
+            out[idx] = None
+            continue
+        garr = np.ascontiguousarray(g, dtype=np.int32)
+        if garr.shape[0] <= 1:
+            out[idx] = []
+            continue
+        tc = None if tx_counts_lists is None else tx_counts_lists[idx]
+        if tc is None:
+            tcarr = np.ones(garr.shape[0], dtype=np.int32)
+        else:
+            tcarr = np.ascontiguousarray(tc, dtype=np.int32)
+        retained = _greedy_prune_to_retained(
+            garr, tcarr, _W, _ip, _ix, _dt, use_sparse, threshold)
+        out[idx] = np.setdiff1d(garr, retained, assume_unique=True).tolist()
+    return out
+
+
 cdef cnp.ndarray _prune_cells_nuclear_seed_core(
     list cell_tx_idx_lists,
     cnp.int32_t[:] tx_gene_mv,
@@ -337,7 +372,6 @@ cdef cnp.ndarray _prune_cells_nuclear_seed_core(
     double threshold,
     int min_nuclear_genes,
     int skip_phase_1c,
-    double seed_coherence_floor,
     int nuclear_only_admit,
     int tx_weighted,
     int veto_mode,
@@ -346,6 +380,13 @@ cdef cnp.ndarray _prune_cells_nuclear_seed_core(
     double aggregator_percentile,
     double real_signal_threshold,
     double neg_npmi_threshold,
+    int fallback_whole_cell_admit = 0,   # 1 ⇒ fallback (<min_nuclear_genes) cells
+                                          #     admit whole-cell tx in 1b/1c (the
+                                          #     whole-cell seed already used cyto genes)
+    int nuclear_seed_only = 1,           # 1 ⇒ Phase-1a seed from NUCLEAR tx (legacy);
+                                          #     0 ⇒ seed from the WHOLE CELL, so a thin
+                                          #     or incoherent nucleus cannot veto a cell
+                                          #     whose cytoplasm is coherent
 ):
     """Shared orchestration for the dense and sparse nuclear-seed prune.
 
@@ -357,6 +398,7 @@ cdef cnp.ndarray _prune_cells_nuclear_seed_core(
     public :func:`prune_cells_nuclear_seed` /
     :func:`prune_cells_nuclear_seed_sparse` wrappers.
     """
+    global _CNT_CELLS, _CNT_SEED_EMPTY, _CNT_FALLBACK, _CNT_THIN_NUCLEUS
     cdef int n_cells = len(cell_tx_idx_lists)
     cdef cnp.ndarray[cnp.int8_t, ndim=1] out = np.full(n_tx, 2, dtype=np.int8)
     cdef cnp.int8_t[:] out_mv = out
@@ -365,6 +407,7 @@ cdef cnp.ndarray _prune_cells_nuclear_seed_core(
     cdef cnp.ndarray[cnp.int32_t, ndim=1] tx_inds_arr
     cdef cnp.int32_t[:] tx_inds_mv
     cdef int n_cell_tx, ti, tx_row, g, n_unique_nuc, fitted, n_unique_all
+    cdef int is_fallback   # per-cell: took the whole-cell fallback seed path
 
     # Reusable scratch buffers
     cdef cnp.ndarray[cnp.int32_t, ndim=1] uniq_nuc
@@ -401,6 +444,7 @@ cdef cnp.ndarray _prune_cells_nuclear_seed_core(
         n_cell_tx = tx_inds_arr.shape[0]
         if n_cell_tx == 0:
             continue
+        _CNT_CELLS += 1
 
         # Collect unique nuclear gene indices for this cell.
         # (Python-level numpy ops here are fine: per-cell, not per-tx.)
@@ -414,10 +458,21 @@ cdef cnp.ndarray _prune_cells_nuclear_seed_core(
         uniq_nuc = np.unique(np.asarray(nuc_genes, dtype=np.int32))
         n_unique_nuc = uniq_nuc.shape[0]
 
-        if n_unique_nuc < min_nuclear_genes:
-            # Fallback: prune on whole-cell gene set (matches the Python
-            # reference impl). Phase 1b/1c still run on the resulting
-            # seed.
+        if (not nuclear_seed_only) or n_unique_nuc < min_nuclear_genes:
+            # Whole-cell seed. Two ways to get here:
+            #   (a) nuclear_seed_only == 0 — the caller asked for a CELL
+            #       seed, so Phase 1a uses every tx in the cell. No thin-
+            #       nucleus case exists, so this is not a "fallback".
+            #   (b) the legacy fallback: fewer than min_nuclear_genes
+            #       unique nuclear genes, so a nuclear seed is impossible.
+            # is_fallback stays keyed on (b) alone — it only controls the
+            # 1b/1c nuclear_only_admit exemption for thin nuclei.
+            is_fallback = 1 if n_unique_nuc < min_nuclear_genes else 0
+            if is_fallback:
+                _CNT_THIN_NUCLEUS += 1
+                if nuclear_seed_only:
+                    # only a real FALLBACK when a nuclear seed was wanted
+                    _CNT_FALLBACK += 1
             all_genes = []
             for ti in range(n_cell_tx):
                 tx_row = tx_inds_mv[ti]
@@ -440,6 +495,7 @@ cdef cnp.ndarray _prune_cells_nuclear_seed_core(
                 W_indptr, W_indices, W_data, use_sparse, threshold)
         else:
             # ---- Phase 1a: nuclear seed (tx-weighted) ----
+            is_fallback = 0
             # Per-gene nuclear tx counts for the tx-weighted greedy.
             nuc_arr = np.asarray(nuc_genes, dtype=np.int32)
             tx_counts_nuc = np.zeros(n_unique_nuc, dtype=np.int32)
@@ -454,14 +510,7 @@ cdef cnp.ndarray _prune_cells_nuclear_seed_core(
         seed_len = seed.shape[0]
         if seed_len == 0:
             # No seed found; all tx → unassigned (code 2 already default)
-            continue
-
-        # Coherence floor on primary seed: reject seeds whose internal
-        # mean PMI is below the floor (avoids accepting a clique that
-        # is merely "non-conflicting" but biologically degenerate).
-        if _mean_internal_pmi(
-                seed_mv, seed_len, W_mv,
-                W_indptr, W_indices, W_data, use_sparse) < seed_coherence_floor:
+            _CNT_SEED_EMPTY += 1
             continue
 
         # ---- Phase 1b: per-tx admit by mean PMI to seed ----
@@ -478,8 +527,13 @@ cdef cnp.ndarray _prune_cells_nuclear_seed_core(
                 # No gene index — leave as unassigned (already default 2)
                 rejected_rows.append(tx_row)
                 continue
-            if nuclear_only_admit and not tx_nuc_mv[tx_row]:
+            if (nuclear_only_admit and not tx_nuc_mv[tx_row]
+                    and not (is_fallback and fallback_whole_cell_admit)):
                 # Cytoplasmic tx skipped — stays unassigned for Rescue.
+                # EXCEPT for fallback cells when fallback_whole_cell_admit:
+                # the seed was built from whole-cell genes anyway, and the
+                # thin nucleus can't veto its dominant local program with a
+                # noisy nuclear/cyto boundary.
                 continue
             # Check if g is in seed (linear scan; seed_len typically tiny)
             fitted = 0
@@ -546,10 +600,6 @@ cdef cnp.ndarray _prune_cells_nuclear_seed_core(
         # clique" sub-seeds from forming spurious partials. Rest-pile
         # tx stay unassigned (code 2, already default) for downstream
         # Rescue to route based on neighbour gene composition.
-        if _mean_internal_pmi(
-                sub_seed_mv, sub_seed_len, W_mv,
-                W_indptr, W_indices, W_data, use_sparse) < seed_coherence_floor:
-            continue
 
         # Re-test rejected tx against sub-seed. When nuclear_only_admit
         # is set, cytoplasmic rejected tx are not eligible for partial
@@ -558,7 +608,8 @@ cdef cnp.ndarray _prune_cells_nuclear_seed_core(
             g = tx_gene_mv[tx_row]
             if g < 0:
                 continue
-            if nuclear_only_admit and not tx_nuc_mv[tx_row]:
+            if (nuclear_only_admit and not tx_nuc_mv[tx_row]
+                    and not (is_fallback and fallback_whole_cell_admit)):
                 continue
             fitted = 0
             for j in range(sub_seed_len):
@@ -597,7 +648,6 @@ def prune_cells_nuclear_seed(
     double threshold,
     int min_nuclear_genes,
     int skip_phase_1c,
-    double seed_coherence_floor=-1e30,
     int nuclear_only_admit=0,
     int tx_weighted=1,
     int veto_mode=1,
@@ -606,6 +656,8 @@ def prune_cells_nuclear_seed(
     double aggregator_percentile=25.0,
     double real_signal_threshold=0.0,
     double neg_npmi_threshold=-0.2,
+    int fallback_whole_cell_admit=0,
+    int nuclear_seed_only=1,
 ):
     """Batch nuclear-seed prune over many cells — DENSE PMI backend.
 
@@ -629,12 +681,6 @@ def prune_cells_nuclear_seed(
         Skip Phase 1a / 1c if a cell has fewer than this many unique nuclear genes.
     skip_phase_1c : int
         If non-zero, skip Phase 1c (rejected tx → unassigned directly).
-    seed_coherence_floor : float
-        Minimum mean internal PMI required for a seed (1a) or sub-seed
-        (1c) to be accepted. Seeds below this floor are rejected:
-        for the primary seed, all that cell's tx → unassigned; for the
-        sub-seed, all rest-pile tx → unassigned (no partial formed).
-        Default -1e30 disables the check (back-compat).
     nuclear_only_admit : int
         If non-zero, restrict 1b admission and 1c re-test to NUCLEAR
         tx only — cytoplasmic tx leave Phase 1 as unassigned (code 2)
@@ -659,9 +705,11 @@ def prune_cells_nuclear_seed(
         _ip, _ix, _dt, 0,
         tx_gene_idx.shape[0],
         threshold, min_nuclear_genes, skip_phase_1c,
-        seed_coherence_floor, nuclear_only_admit, tx_weighted,
+        nuclear_only_admit, tx_weighted,
         veto_mode, min_admit_threshold, mean_admit_threshold,
         aggregator_percentile, real_signal_threshold, neg_npmi_threshold,
+        fallback_whole_cell_admit,
+        nuclear_seed_only,
     )
 
 
@@ -675,7 +723,6 @@ def prune_cells_nuclear_seed_sparse(
     double threshold,
     int min_nuclear_genes,
     int skip_phase_1c,
-    double seed_coherence_floor=-1e30,
     int nuclear_only_admit=0,
     int tx_weighted=1,
     int veto_mode=1,
@@ -684,6 +731,8 @@ def prune_cells_nuclear_seed_sparse(
     double aggregator_percentile=25.0,
     double real_signal_threshold=0.0,
     double neg_npmi_threshold=-0.2,
+    int fallback_whole_cell_admit=0,
+    int nuclear_seed_only=1,
 ):
     """Batch nuclear-seed prune over many cells — SPARSE CSR PMI backend.
 
@@ -707,9 +756,11 @@ def prune_cells_nuclear_seed_sparse(
         W_indptr, W_indices, W_data, 1,
         tx_gene_idx.shape[0],
         threshold, min_nuclear_genes, skip_phase_1c,
-        seed_coherence_floor, nuclear_only_admit, tx_weighted,
+        nuclear_only_admit, tx_weighted,
         veto_mode, min_admit_threshold, mean_admit_threshold,
         aggregator_percentile, real_signal_threshold, neg_npmi_threshold,
+        fallback_whole_cell_admit,
+        nuclear_seed_only,
     )
 
 
@@ -1135,6 +1186,7 @@ cdef inline double _compute_gene_fit(
     int e_off_lo, int e_off_hi,
     cnp.int32_t[:] ent_g_mv,
     cnp.float32_t[:, :] W_mv,
+    int w_row=-1,                  # W-row override; <0 ⇒ use g_idx (dense default)
 ) noexcept nogil:
     """Mean PMI of orphan gene `g_idx` against entity's seed gene set,
     excluding the self-pair if present. NaN entries are skipped.
@@ -1148,11 +1200,12 @@ cdef inline double _compute_gene_fit(
     cdef int n_finite = 0
     cdef int ig, eg
     cdef double v
+    cdef int _row = g_idx if w_row < 0 else w_row
     for ig in range(e_off_lo, e_off_hi):
         eg = ent_g_mv[ig]
         if eg == g_idx:
             continue
-        v = W_mv[g_idx, eg]
+        v = W_mv[_row, eg]
         if v == v:  # not NaN
             pmi_sum += v
             n_finite += 1
@@ -1200,6 +1253,7 @@ cdef inline int _admission_test(
     double neg_npmi_threshold,
     int small_entity_guard_n,
     int legacy_mean_test,          # 1 = `>=` (Phase 1b legacy), 0 = `>` (Rescue legacy)
+    int w_row=-1,                  # W-row override; <0 ⇒ use gene_idx (dense/prune default)
 ) nogil:
     """Unified admission gate for a candidate gene against a seed/entity
     gene set. Returns 1 = admit, 0 = veto.
@@ -1237,6 +1291,12 @@ cdef inline int _admission_test(
     cdef float v, av, min_signal_f, min_v_f
     cdef int rs_active = 1 if real_signal_threshold > 0.0 else 0
     cdef double rs_thr = real_signal_threshold
+    # W row to read: `gene_idx` conflates the tx's own gene (self-pair
+    # exclusion below) with the W row. Gene-blocked Rescue passes a
+    # (1, G) single-gene row and needs the row decoupled from the
+    # exclusion gene; `w_row >= 0` overrides. Dense/prune callers omit
+    # it (w_row=-1) and read row `gene_idx` exactly as before.
+    cdef int _row = gene_idx if w_row < 0 else w_row
 
     if seed_len <= 0:
         # Empty seed: legacy `_mean_pmi_test` returned 0 (no admit);
@@ -1251,7 +1311,7 @@ cdef inline int _admission_test(
             if eg == gene_idx:
                 continue
             if not _wget(W, W_indptr, W_indices, W_data, use_sparse,
-                         gene_idx, eg, &v):
+                         _row, eg, &v):
                 continue
             if v < neg_npmi_threshold:
                 return 0
@@ -1267,7 +1327,7 @@ cdef inline int _admission_test(
                 if eg == gene_idx:
                     continue
                 if not _wget(W, W_indptr, W_indices, W_data, use_sparse,
-                             gene_idx, eg, &v):
+                             _row, eg, &v):
                     continue
                 av = v if v >= 0.0 else -v
                 if av <= rs_thr:
@@ -1275,7 +1335,7 @@ cdef inline int _admission_test(
                 pmi_buf[n_signal] = v
                 n_signal += 1
             if n_signal == 0:
-                return 1  # no real signal → defer (admit)
+                return _ADMIT_INDEPENDENT  # empty real-signal → admit iff flag
             _insertion_sort_floats(pmi_buf, n_signal)
             p_aggregate = _percentile_sorted(pmi_buf, n_signal, aggregator_percentile)
             if legacy_mean_test:
@@ -1290,7 +1350,7 @@ cdef inline int _admission_test(
                 if eg == gene_idx:
                     continue
                 if not _wget(W, W_indptr, W_indices, W_data, use_sparse,
-                             gene_idx, eg, &v):
+                             _row, eg, &v):
                     continue
                 pmi_sum += v
                 n_finite += 1
@@ -1316,7 +1376,7 @@ cdef inline int _admission_test(
             if eg == gene_idx:
                 continue
             if not _wget(W, W_indptr, W_indices, W_data, use_sparse,
-                         gene_idx, eg, &v):
+                         _row, eg, &v):
                 continue
             av = v if v >= 0.0 else -v
             if av <= rs_thr:
@@ -1326,7 +1386,7 @@ cdef inline int _admission_test(
                 min_signal_f = v
             n_signal += 1
         if n_signal == 0:
-            return 1  # defer
+            return _ADMIT_INDEPENDENT  # empty real-signal → admit iff flag
         if min_signal_f > min_admit_threshold:
             return 1  # unanimous-positive fast-pass
         _insertion_sort_floats(pmi_buf, n_signal)
@@ -1344,7 +1404,7 @@ cdef inline int _admission_test(
             if eg == gene_idx:
                 continue
             if not _wget(W, W_indptr, W_indices, W_data, use_sparse,
-                         gene_idx, eg, &v):
+                         _row, eg, &v):
                 continue
             pmi_sum += v
             n_finite += 1
@@ -1374,6 +1434,7 @@ cdef void _rescue_one_tx(
     int has_z,
     double z_bound,
     int veto_mode,
+    int offpanel_first_entity,       # 1 ⇒ g_idx<0 tx take nearest-bin entity (no PMI)
     int rs_active,
     double rs_thr,
     double agg_p,
@@ -1389,6 +1450,7 @@ cdef void _rescue_one_tx(
     cnp.int32_t[:] ent_size_mv,      # n_tx per entity (caller pre-computed)
     cnp.float32_t[:, :] una_c_mv,
     cnp.int64_t[:] una_g_mv,
+    cnp.int64_t[:] una_w_mv,        # per-tx W-row index (== una_g_mv for dense)
     cnp.int64_t[:, :] nb_bins_mv,
     cnp.float32_t[:, :] ass_c_mv,
     cnp.int32_t[:] ass_ent_mv,
@@ -1415,7 +1477,7 @@ cdef void _rescue_one_tx(
     """
     cdef int j, k, b, off_lo, off_hi, ass_li, ent
     cdef int e_off_lo, e_off_hi, n_ent_genes, ig, eg
-    cdef int g_idx, vetoed, any_vetoed, found_neg, n_finite, used_fallback
+    cdef int g_idx, w_row, vetoed, any_vetoed, found_neg, n_finite, used_fallback
     cdef int g_in_E
     cdef int n_signal
     cdef float v_f, av_f, min_signal_f
@@ -1430,7 +1492,39 @@ cdef void _rescue_one_tx(
     cdef double ent_min_d_sq
 
     g_idx = <int> una_g_mv[i]
+    w_row = <int> una_w_mv[i]
     if g_idx < 0:
+        # Off-panel gene (no PMI row). When enabled, assign to the FIRST
+        # assigned entity encountered in the 9-bin neighborhood — self bin
+        # first (nb col 0), z-bounded, proximity only, no PMI/veto. Mirrors
+        # the reference Python pass. Else: no candidate (legacy).
+        if offpanel_first_entity:
+            for j in range(9):
+                b = <int> nb_bins_mv[i, j]
+                if b < 0 or b >= max_bin_key_plus_one:
+                    continue
+                off_lo = <int> bin_off_mv[b]
+                off_hi = <int> bin_off_mv[b + 1]
+                for k in range(off_lo, off_hi):
+                    ass_li = <int> bin_data_mv[k]
+                    if has_z:
+                        dz = ass_c_mv[ass_li, 2] - una_c_mv[i, 2]
+                        if dz < 0: dz = -dz
+                        if dz > z_bound:
+                            continue
+                    ent = ass_ent_mv[ass_li]
+                    if ent < 0 or ent >= n_ent:
+                        continue
+                    dx = ass_c_mv[ass_li, 0] - una_c_mv[i, 0]
+                    dy = ass_c_mv[ass_li, 1] - una_c_mv[i, 1]
+                    d = dx * dx + dy * dy
+                    if has_z:
+                        dz = ass_c_mv[ass_li, 2] - una_c_mv[i, 2]
+                        d += dz * dz
+                    best_ent_mv[i] = ent
+                    best_dist_mv[i] = <cnp.float32_t> (d ** 0.5)
+                    reason_mv[i] = 0
+                    return
         reason_mv[i] = 1
         return
 
@@ -1501,7 +1595,7 @@ cdef void _rescue_one_tx(
                                 eg = ent_g_mv[ig]
                                 if eg == g_idx:
                                     continue
-                                pmi_val = W_mv[g_idx, eg]
+                                pmi_val = W_mv[w_row, eg]
                                 if pmi_val == pmi_val:
                                     pmi_sum += pmi_val
                                     n_finite += 1
@@ -1532,6 +1626,7 @@ cdef void _rescue_one_tx(
                             neg_npmi_threshold,
                             small_entity_guard_n,
                             0,  # legacy_mean_test = 0 (Rescue: `>`)
+                            w_row,
                         ) else 1
 
                 cache_mv[tid, ent] = 1 if vetoed else 2
@@ -1598,7 +1693,7 @@ cdef void _rescue_one_tx(
                     tb = -1e9
                 else:
                     tb = _compute_gene_fit(
-                        g_idx, e_off_lo, e_off_hi, ent_g_mv, W_mv,
+                        g_idx, e_off_lo, e_off_hi, ent_g_mv, W_mv, w_row,
                     )
             else:                       # distance (negated so higher = nearer)
                 tb = -min_dist_mv[tid, ent]
@@ -1651,6 +1746,8 @@ def rescue_per_tx_batch(
     int witness_small_component_cap_divisor = 2,
     int witness_tiebreak = 1,                             # 0=distance, 1=gene_fit
     cnp.ndarray[cnp.int32_t, ndim=1] ent_size = None,     # entity tx counts; required when rank_policy=1
+    cnp.ndarray[cnp.int64_t, ndim=1] una_w_row = None,    # per-tx W row; None ⇒ una_g_idx (dense)
+    int offpanel_first_entity = 0,                        # 1 ⇒ off-panel (g<0) tx take nearest-bin entity
 ):
     """Per-unassigned-tx Rescue batch.
 
@@ -1693,6 +1790,10 @@ def rescue_per_tx_batch(
 
     cdef cnp.float32_t[:, :] una_c_mv = una_coords
     cdef cnp.int64_t[:]     una_g_mv = una_g_idx
+    # W-row per tx: gene-blocked Rescue passes an explicit row array
+    # (all tx in a block share one (1, G) densified gene row); dense
+    # callers omit it and read row == gene index.
+    cdef cnp.int64_t[:]     una_w_mv = (una_g_idx if una_w_row is None else una_w_row)
     cdef cnp.int64_t[:, :]  nb_bins_mv = nb_bins
     cdef cnp.float32_t[:, :] ass_c_mv = assigned_coords
     cdef cnp.int32_t[:]     ass_ent_mv = assigned_ent_id
@@ -1807,13 +1908,14 @@ def rescue_per_tx_batch(
                 max_touched,
                 n_ent, max_bin_key_plus_one,
                 has_z, z_bound, veto_mode,
+                offpanel_first_entity,
                 rs_active, rs_thr, agg_p,
                 mean_threshold, small_entity_guard_n,
                 neg_npmi_threshold, min_admit_threshold,
                 rank_policy, witness_min_admit, witness_cap,
                 witness_small_component_cap_divisor, witness_tiebreak,
                 ent_size_mv,
-                una_c_mv, una_g_mv, nb_bins_mv,
+                una_c_mv, una_g_mv, una_w_mv, nb_bins_mv,
                 ass_c_mv, ass_ent_mv, bin_off_mv, bin_data_mv,
                 ent_off_mv, ent_g_mv, W_mv,
                 _dummy_ip_mv, _dummy_ix_mv, _dummy_dt_mv,

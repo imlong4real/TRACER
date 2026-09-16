@@ -121,8 +121,14 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--min-tx-per-cell-for-scores", type=int, default=5,
                    help="Min transcripts/cell for cell-level purity/conflict scoring.")
-    p.add_argument("--tau", type=float, default=0.05,
-                   help="NPMI threshold for purity/conflict relu (default 0.05).")
+    p.add_argument("--tau", type=float, default=None,
+                   help="Purity/conflict coherence threshold. Default: auto by "
+                        "metric (0.2 for a PMI panel = PMI_THR; 0.05 for a bounded "
+                        "NPMI panel). Pass a float to override.")
+    p.add_argument("--score-mode", choices=["count", "magnitude"], default="count",
+                   help="Per-cell scoring: 'count' (default; bounded, PMI-safe, "
+                        "matches the pipeline coherence) or 'magnitude' "
+                        "(strength-weighted ReLU; opt in deliberately).")
     p.add_argument("--overwrite", action="store_true",
                    help="If outdir exists, overwrite contents.")
     return p
@@ -251,17 +257,22 @@ def load_npmi_panel(path: Path, log: logging.Logger) -> pd.DataFrame:
         raise SystemExit(
             f"NPMI panel missing gene_i/gene_j; columns: {list(df.columns)}"
         )
-    # Pipeline expects long-format with both directions per pair.
-    if (df.duplicated(["gene_i", "gene_j"]).any()):
-        log.warning("NPMI panel has duplicate pairs — keeping first occurrence.")
-        df = df.drop_duplicates(["gene_i", "gene_j"], keep="first")
-    # Emit symmetric form (i, j) and (j, i) so downstream lookups work.
-    rev = df.copy()
-    rev["gene_i"], rev["gene_j"] = df["gene_j"].values, df["gene_i"].values
-    panel = pd.concat([df, rev], ignore_index=True)
-    # Drop self-pairs if present (i == j).
-    panel = panel.loc[panel["gene_i"] != panel["gene_j"]].reset_index(drop=True)
-    log.info("NPMI panel: %d rows after symmetric expansion; PMI: %s, NPMI: %s",
+    # Feed ONE row per undirected pair. The pipeline symmetrizes W itself
+    # (build_sparse_pmi_matrix_from_long folds edges into the upper triangle
+    # and _symmetric_csr_arrays mirrors them). Emitting (j, i) here as well
+    # would be *summed* by the COO->CSR builder and DOUBLE every PMI value —
+    # halving every calibrated threshold. Collapse on the undirected key so a
+    # one-directional OR an already-symmetric panel both yield single values.
+    ui = np.minimum(df["gene_i"].astype(str), df["gene_j"].astype(str))
+    uj = np.maximum(df["gene_i"].astype(str), df["gene_j"].astype(str))
+    df = df.assign(_ukey=ui + "\x00" + uj)
+    n_before = len(df)
+    df = df.loc[ui != uj].drop_duplicates("_ukey", keep="first")
+    panel = df.drop(columns="_ukey").reset_index(drop=True)
+    if len(panel) != n_before:
+        log.info("NPMI panel: collapsed %d -> %d one-directional pairs "
+                 "(self/duplicate/reverse rows dropped)", n_before, len(panel))
+    log.info("NPMI panel: %d one-directional rows; PMI: %s, NPMI: %s",
              len(panel),
              "yes" if "PMI" in panel.columns else "no",
              "yes" if "NPMI" in panel.columns else "no")
@@ -324,15 +335,45 @@ UNASSIGNED_TOKENS = frozenset({
 def build_outputs(
     df_post: pd.DataFrame, *,
     npmi_panel: pd.DataFrame, log: logging.Logger,
-    label_col: str = "stitched", min_tx: int = 5, tau: float = 0.05,
+    label_col: str = "tracer_id", min_tx: int = 5, tau: float | None = None,
+    score_mode: str = "count",
 ) -> tuple[pd.DataFrame, "anndata.AnnData"]:
-    """Compute per-cell purity/conflict + build cell-by-gene AnnData."""
+    """Compute per-cell purity/conflict + build cell-by-gene AnnData.
+
+    ``score_mode`` selects the per-cell scoring:
+      - ``"count"`` (default): coherence = fraction of gene pairs above/below
+        ±tau; bounded, PMI-safe, and identical to the segmentation's
+        ``stitching.coherence(mode="count")``.
+      - ``"magnitude"``: the ReLU strength-weighted scores. On PMI its absolute
+        purity is unbounded and its relative form is single-pair-driven in
+        sparse cells (~⅓ of the signal from one pair at ~6 genes); it agrees
+        with count ~94% elsewhere. Opt in deliberately.
+
+    ``tau`` is the coherence threshold / ReLU dead-zone (a pair counts when
+    ``w > tau`` / ``w < -tau``). When ``None`` it tracks the panel metric scale:
+    a PMI panel uses 0.2 (the PMI enrichment cutoff, = pipeline ``PMI_THR``); a
+    bounded NPMI panel uses 0.05.
+    """
     import anndata as ad
     import scipy.sparse as sp
     from tracer.metrics import (
-        build_cell_gene_matrix, build_npmi_matrix,
-        compute_cell_purity_relu, compute_cell_conflict_relu,
+        build_cell_gene_matrix, build_pmi_matrix, compute_cell_coherence,
     )
+
+    # Metric-conditional dead-zone: track the metric scale of the panel the
+    # scoring matrix is built on. PMI panels use the PMI enrichment cutoff
+    # (0.2, = pipeline PMI_THR); bounded NPMI panels keep the ±1-scale 0.05.
+    if tau is None:
+        _mcol = "PMI" if "PMI" in npmi_panel.columns else "NPMI"
+        tau = 0.2 if _mcol == "PMI" else 0.05
+        log.info("Coherence threshold=%.3f (auto, %s-scale panel)", tau, _mcol)
+
+    # Auto-detect the assignment column: prefer the reconciled `tracer_id`, then
+    # legacy `stitched`/`cell_id` (older outputs or synthetic frames) so scoring
+    # works across output formats instead of KeyError-ing on a fixed default.
+    if label_col not in df_post.columns:
+        label_col = next((c for c in ("tracer_id", "stitched", "cell_id")
+                          if c in df_post.columns), label_col)
 
     if "_etype" in df_post.columns:
         keep_mask = df_post["_etype"].astype(str).isin({"cell", "partial", "component"})
@@ -345,25 +386,42 @@ def build_outputs(
         work, min_transcripts=min_tx, genes_npm=npmi_panel,
         cell_col="cell_id", exclude_ids=set(UNASSIGNED_TOKENS),
     )
-    npmi_mat, _gix = build_npmi_matrix(npmi_panel)
-    _, _, _, pur_df = compute_cell_purity_relu(
-        M=M, col_idx=col_idx, npmi_mat=npmi_mat, tau=tau, cell_ids=cell_ids,
-    )
-    _, _, _, conf_df = compute_cell_conflict_relu(
-        M=M, col_idx=col_idx, npmi_mat=npmi_mat, tau=tau, cell_ids=cell_ids,
-    )
-    scores = (
-        pur_df.rename(columns={"cell_purity_relu": "purity_score"})
-              [["cell_id", "purity_score", "signal_strength",
-                "relative_purity", "relative_conflict"]]
-        .merge(
-            conf_df.rename(columns={"cell_conflict_relu": "conflict_score"})
-                   [["cell_id", "conflict_score"]],
-            on="cell_id", how="outer",
+    # build_pmi_matrix is metric-agnostic (reads PMI or NPMI, assigns +
+    # self-symmetrizes), so the bootstrap PMI panel goes straight in.
+    npmi_mat, _gix = build_pmi_matrix(npmi_panel)
+    if score_mode == "count":
+        # SAME metric the segmentation uses (stitching.coherence(mode="count")):
+        # purity/conflict are fractions of gene pairs above/below ±tau,
+        # coherence = purity - conflict. Bounded and PMI-safe.
+        _, _, _, scores = compute_cell_coherence(
+            M=M, col_idx=col_idx, npmi_mat=npmi_mat, threshold=tau, cell_ids=cell_ids,
         )
-    )
-    log.info("Per-cell scores: %d cells with purity, %d cells total in cell-by-gene",
-             int(scores["purity_score"].notna().sum()), len(cell_ids))
+    elif score_mode == "magnitude":
+        # Opt-in strength-weighted ReLU scoring (see docstring caveats).
+        from tracer.metrics import compute_cell_purity_relu, compute_cell_conflict_relu
+        _, _, _, pur = compute_cell_purity_relu(
+            M=M, col_idx=col_idx, npmi_mat=npmi_mat, tau=tau, cell_ids=cell_ids,
+        )
+        _, _, _, conf = compute_cell_conflict_relu(
+            M=M, col_idx=col_idx, npmi_mat=npmi_mat, tau=tau, cell_ids=cell_ids,
+        )
+        scores = (
+            pur.rename(columns={"cell_purity_relu": "purity_score"})
+               [["cell_id", "purity_score", "signal_strength",
+                 "relative_purity", "relative_conflict"]]
+            .merge(conf.rename(columns={"cell_conflict_relu": "conflict_score"})
+                       [["cell_id", "conflict_score"]], on="cell_id", how="outer")
+        )
+        # bounded net-polarity analogue of the count coherence column
+        scores["coherence"] = scores["relative_purity"] - scores["relative_conflict"]
+        scores = scores[["cell_id", "purity_score", "conflict_score", "coherence",
+                         "relative_purity", "relative_conflict", "signal_strength"]]
+    else:
+        raise SystemExit(
+            f"--score-mode must be 'count' or 'magnitude', got {score_mode!r}"
+        )
+    log.info("Per-cell scores (%s): %d with purity, %d total in cell-by-gene",
+             score_mode, int(scores["purity_score"].notna().sum()), len(cell_ids))
 
     # Cell-by-gene AnnData (counts layer + score obs).
     cg = (
@@ -524,8 +582,9 @@ def main() -> int:
     with timer.time("build_outputs"):
         scores, adata = build_outputs(
             df_post, npmi_panel=panel, log=log,
-            label_col="stitched",
+            label_col="tracer_id",
             min_tx=args.min_tx_per_cell_for_scores, tau=args.tau,
+            score_mode=args.score_mode,
         )
     with timer.time("write_outputs"):
         write_outputs(

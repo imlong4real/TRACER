@@ -13,11 +13,10 @@ from ._utils import relu_symmetric
 from .pruning import (
     build_dense_pmi_matrix_small_panel,
     build_sparse_pmi_matrix,
-    prune_genes_by_npmi_greedy,
-    prune_transcripts,
+    prune_genes_by_pmi_greedy,
     prune_transcripts_fast,
-    pairwise_npmi_stats,
-    diagnostic_npmi_report,
+    pairwise_pmi_stats,
+    diagnostic_pmi_report,
 )
 from .graph import (
     build_graph,
@@ -34,6 +33,7 @@ from .spatial import (
     reassign_unassigned_by_gene_compat,
     reassign_unassigned_to_nearest_tx_no_neg,
     reassign_unassigned_grid_pool,
+    guarded_rescue,
     pre_stage2_rescue,
     demote_small_entities,
 )
@@ -54,8 +54,7 @@ from .cc_scoring import (
     calculate_thresholds,
     add_edge_prob_stats,
     build_gene_threshold_maps_from_ranked_df,
-    prune_graph,
-    build_npmi_matrix_from_long,
+    build_pmi_matrix_from_long,
     compute_purity_conflict_per_cc,
     compute_purity_conflict_per_cc_relu,
     purity_conflict_from_cc,

@@ -16,19 +16,30 @@
 # Validated on PDAC+lung full-tissue: cell C mean 0.80→0.93, p10 0.57→0.82.
 pmi_threshold = 0.2
 
-# Minimum mean-PMI within a Phase-1c sub-seed for it to be accepted.
-# Rejects degenerate small seeds (e.g. a 4-gene cluster carried by a
-# single noisy-PMI edge).
-seed_coherence_floor = 0.10
-
 # Tx-weighted greedy prune: score[i] = sum_j(bad[i,j] * n_tx[j]) with
 # the safeguard "skip if n_tx[i] > score[i]". Prevents a single
 # multi-tx gene from being killed by a peer module.
 tx_weighted_prune = true
 
-# Restrict Phase-1b/1c admission to nuclear tx; cytoplasmic tx are
-# left for Rescue. Cuts Phase-1 cost ~50% on segmented data.
-nuclear_only_admit = true
+# Restrict Phase-1b/1c admission to nuclear tx (cytoplasm deferred to Rescue).
+# Prune scope — ONE knob for the whole Prune stage (Phase-1a SEED source AND
+# Phase-1b/1c admission), so the two halves cannot drift apart.
+#   "cell"    = whole-cell seed + whole-cell admission  (default)
+#   "nuclear" = nuclear seed + nuclear admission        (legacy)
+# The previously-shipped state was a SPLIT-BRAIN (nuclear seed + whole-cell
+# admit): a thin or incoherent nuclear seed gated a whole-cell admission and
+# a seed_coherence_floor failure dropped the WHOLE cell before any cytoplasmic
+# tx was examined (the whole-cell fallback only patches the <3-nuclear-genes
+# COUNT case). "cell" measured strictly better or neutral everywhere tried —
+# VHD HC01 +495 cells / -710 partials; PDAC +39 cells, coherence 0.818->0.833,
+# negative-coherence cells 0.12%->0; ovarian 5k +6 cells — with the gain
+# scaling inversely with nuclear sampling depth. Prefer "nuclear" when the
+# input segmentation is doublet-heavy or low-confidence (over-merged polygons),
+# where anchoring identity on one nucleus is the safer prior.
+# The former per-half booleans (nuclear_only_admit / nuclear_seed_only) are
+# REMOVED: leaving either one settable re-created the split-brain state. A
+# config still naming them fails loudly (the loader rejects unknown keys).
+prune_scope = "cell"
 
 # Phase 1b admission gate. "hybrid" (default) = real-signal +
 # unanimous-min + percentile-aggregator gate (mirrors Rescue) — catches
@@ -39,8 +50,18 @@ veto_mode = "hybrid"
 mean_admit_threshold = 0.2
 min_admit_threshold = 0.0
 aggregator_percentile = 25.0
-real_signal_threshold = 0.05
+real_signal_threshold = 0.2
 neg_npmi_threshold = -0.2
+
+# When false, Phase-1b/1c veto candidates whose real-signal PMI array vs the
+# (sub)seed is empty (independent of the seed) instead of defer-admitting.
+# Splits collapsed-seed doublets (main = one program; 1c carves the other as a
+# partial). 2026-08-17: default flipped true->false. It over-demotes standard
+# panels ONLY under nuclear_only_admit=true (PDAC ROI -8%); paired with the new
+# nuclear_only_admit=false default that penalty vanishes (PDAC nuc=F: admit=T
+# 1783c vs admit=F 1769c, ~neutral) while dense/high-plex panels (Xenium 5k)
+# gain the doublet split.
+admit_independent = false
 
 # Phase-1-time Mahalanobis-gated remerge. Sibling of
 # stitch.mahalanobis_d_rescue, applied between Phase1-QC and Rescue.
@@ -163,7 +184,7 @@ aggregator_percentile = 25.0
 # Real-players gate (cross-cutting, but Rescue-overridable). Pairs
 # with |PMI| ≤ this contribute neither to mean nor to count gates.
 # Default 0.05 matches the cross-cutting REAL_SIGNAL_THRESHOLD.
-real_signal_threshold = 0.05
+real_signal_threshold = 0.2
 
 # Rank policy — how a non-vetoed candidate is chosen among the entities
 # in the 9-bin × z-bound neighborhood of an orphan tx.
@@ -201,6 +222,14 @@ early_exit_admit_ratio = 0.0
 # (no Xenium prior anchored Phase-1). Each pass is bounded by zero-
 # admit exit anyway. Set 0 to disable the Post-Group stage entirely.
 post_group_passes = 3
+
+# When false, a candidate whose real-signal PMI array vs the target entity
+# is EMPTY (no |PMI| > real_signal_threshold edge to any entity gene) is
+# vetoed instead of defer-admitted. True = legacy (admit orthogonal genes).
+# Per-stage strictness: set rescue.admit_independent=false to make the early
+# rescues require real support, and keep final_rescue.admit_independent=true
+# for a permissive mop-up.
+admit_independent = true
 
 
 # ---------------------------------------------------------------------
@@ -392,3 +421,30 @@ min_occurrences_per_context = 2
 min_expected_cooccur_for_evidence = 10.0
 min_expected_cooccur_for_bootstrap = 10.0            # flavor-C: explicit (= evidence threshold)
 set_neg_one = true                                   # k=0 + E_full≥thr → neg_one sentinel
+
+# ---------------------------------------------------------------------
+# Depth-corrected (cPMI) reference panel — `build_depth_corrected_reference`,
+# the estimator behind `build_panels.py`. Distinct from [bootstrap], which
+# configures the resampling `compute_pmi_bootstrap` path.
+#
+# THIS BLOCK IS THE **WITH-scRNA-REFERENCE** RECIPE (`xgt1_cpmi_balanced_rep`).
+# For nuclear / in-situ input with NO matched reference, load the override:
+#     load_config(panel_preset="nuclear")      -> configs/panels/nuclear.toml
+# `promote` and `strategy` INVERT between the two recipes.
+#
+# `promote` is the field that matters most: the pipeline resolves a panel's
+# edge weight as `"PMI" if "PMI" in columns` and cannot be told which
+# estimator that column holds, so whatever is promoted is what TRACER uses.
+# ---------------------------------------------------------------------
+[panel]
+strategy = "rep"            # cell-type balanced, WITH replacement
+arms = ["xgt1"]             # count > (e-1)*lib/1e4; active on scRNA, no-op on nuclei
+promote = "cPMI"            # depth-corrected estimator into the PMI column
+depth_metric = "n_genes"    # xgt1 already conditions on library size
+min_det_cells = 25
+n_depth_bins = 25
+seed = 0
+# min_abs_value  — leave unset. Truncation is NOT behaviour-neutral: absent
+#                  edges are permissive, so a thinner panel ADMITS MORE.
+# top_k_per_gene — per-gene rank cut; a memory lever for whole-transcriptome
+#                  panels (VisiumHD), not a quality setting.

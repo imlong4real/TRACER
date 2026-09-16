@@ -73,17 +73,61 @@ class Phase1Config:
     # 2026-05-13: pmi_threshold raised 0.05 → 0.2 to match the new
     # bootstrap-PMI calibration (PMI=0.2 = 1.22× chance in natural-log).
     pmi_threshold: float = 0.2
-    seed_coherence_floor: float = 0.10
     tx_weighted_prune: bool = True
-    nuclear_only_admit: bool = True
+    # ------------------------------------------------------------------
+    # Prune scope — ONE knob for the whole Prune stage (seed + admission).
+    # ------------------------------------------------------------------
+    # Seed source (1a) and admission (1b/1c) used to be two independent
+    # booleans spanning four states, only two of which are coherent:
+    #
+    #   "nuclear" = nuclear seed + nuclear admit  (legacy)
+    #   "cell"    = whole-cell seed + whole-cell admit  (default)
+    #
+    # The other two are incoherent; in particular nuclear-seed + cell-admit
+    # was the shipped SPLIT-BRAIN state where a thin/incoherent nuclear seed
+    # gated a whole-cell admission. ``prune_scope`` makes those unreachable
+    # through the supported API.
+    #
+    # Default "cell": measured strictly better or neutral on every dataset
+    # tried (VHD HC01 +495 cells / -710 partials; PDAC +39 cells, coherence
+    # 0.818->0.833, negative-coherence cells 0.12%->0; ovarian 5k +6 cells).
+    # The gain scales inversely with nuclear sampling depth. Choose
+    # "nuclear" when the segmentation is doublet-heavy or low-confidence
+    # (over-merged polygons), where anchoring identity on a single nucleus
+    # is the safer prior.
+    prune_scope: Literal["nuclear", "cell"] = "cell"
+
+    # NOTE: the former per-half booleans ``nuclear_only_admit`` /
+    # ``nuclear_seed_only`` were REMOVED (2026-08-23). Keeping them as
+    # deprecated overrides re-opened the very hole ``prune_scope`` closes:
+    # setting just one of them reproduces the split-brain state. The TOML
+    # loader rejects unknown keys, and _RETIRED_KEYS gives these three a
+    # migration hint naming the replacement (value-aware: nuclear_only_admit
+    # true/false map to different prune_scope values).
 
     # 1b admission gate (mirrors RescueConfig's veto knobs)
     veto_mode: Literal["min", "mean", "hybrid"] = "hybrid"
     mean_admit_threshold: float = 0.2
     min_admit_threshold: float = 0.0
     aggregator_percentile: float = 25.0
-    real_signal_threshold: float = 0.05
+    real_signal_threshold: float = 0.2
     neg_npmi_threshold: float = -0.2
+
+    # When False, Phase-1b/1c veto a candidate whose real-signal PMI array vs
+    # the (sub)seed is EMPTY (independent/orthogonal of the seed) instead of
+    # defer-admitting it. For a collapsed 1-gene seed (doublet nucleus) the lone
+    # seed gene is orthogonal to most genes, so the default (True) defer-admits
+    # both anti-correlated programs into the main → negative doublet blob. Set
+    # False to admit only seed-correlated genes → main = one clean program, the
+    # second program falls to the rest-pile and 1c carves it as a partial
+    # (splits the doublet). Trades Prune-stage coverage (recovered by Rescue)
+    # for far fewer Mid-QC demotions. Wired via the _cy_prune module toggle set
+    # around the Prune stage in the pipeline. 2026-08-17: default flipped
+    # True->False. The −8% over-demotion on standard panels (PDAC ROI) only
+    # appears under nuclear_only_admit=True; paired with the new
+    # nuclear_only_admit=False default that penalty vanishes (see defaults.toml),
+    # while dense / high-plex panels (Xenium 5k) gain the doublet split.
+    admit_independent: bool = False
 
     # ------------------------------------------------------------------
     # Phase-1-time Mahalanobis-gated remerge (opt-in).
@@ -101,15 +145,24 @@ class Phase1Config:
     maha_remerge_d: float | None = 1.0
     maha_remerge_delta_c_floor: float = -0.2
 
+    def resolve_scope(self) -> tuple[bool, bool]:
+        """Return ``(seed_nuclear, admit_nuclear)`` for the Prune stage.
+
+        Both halves come from ``prune_scope`` alone, which is what makes
+        the incoherent mixed states unrepresentable.
+        """
+        nuclear = self.prune_scope == "nuclear"
+        return nuclear, nuclear
+
     def __post_init__(self) -> None:
+        if self.prune_scope not in ("nuclear", "cell"):
+            raise ValueError(
+                f"phase1.prune_scope must be 'nuclear' or 'cell'; "
+                f"got {self.prune_scope!r}"
+            )
         if not (-1.0 <= self.pmi_threshold <= 1.0):
             raise ValueError(
                 f"phase1.pmi_threshold out of range: {self.pmi_threshold}"
-            )
-        if not (0.0 <= self.seed_coherence_floor <= 1.0):
-            raise ValueError(
-                f"phase1.seed_coherence_floor out of range: "
-                f"{self.seed_coherence_floor}"
             )
         if self.veto_mode not in ("min", "mean", "hybrid"):
             raise ValueError(
@@ -257,8 +310,8 @@ class RescueConfig:
     aggregator_percentile: float = 25.0
     # Real-players gate (cross-cutting, but Rescue-overridable). Pairs
     # with |PMI| ≤ this contribute neither to mean nor to count gates.
-    # Default 0.05 matches the cross-cutting REAL_SIGNAL_THRESHOLD.
-    real_signal_threshold: float = 0.05
+    # Unified to τ (= pmi_threshold 0.2) 2026-08-16 with the rst=τ default flip.
+    real_signal_threshold: float = 0.2
 
     # ------------------------------------------------------------------
     # Rank policy — how a non-vetoed candidate is chosen among the
@@ -292,6 +345,37 @@ class RescueConfig:
     # witness count: "distance" (nearest-tx) or "gene_fit" (highest
     # mean PMI of the orphan gene against the candidate's seed gene set).
     witness_tiebreak: Literal["distance", "gene_fit"] = "gene_fit"
+
+    # Default ON, and it CHANGES OUTPUT relative to the legacy behavior --
+    # this is deliberately not bit-exact. Set False to restore the legacy
+    # partition exactly.
+    #
+    # Assigns unassigned tx whose gene is ABSENT from the PMI panel (e.g.
+    # housekeeping ACTB, which self-eliminates from a PMI panel) to the first
+    # assigned entity in their Moore neighborhood -- proximity only, no PMI.
+    # Without it these zero-signal tx (57% of the residual nuclear-unassigned
+    # pool on the PDAC panel; ACTB alone ~32%) can never be rescued and are
+    # discarded at Finalize. Consumed by every rescue loop. Control/blank
+    # probes are guarded out (``spatial.NONGENE_FEATURE_PREFIXES``), so it is
+    # safe on unfiltered input. Rationale for defaulting ON: recovering
+    # nucleus-interior housekeeping reads is a straightforward, panel-agnostic
+    # win, and leaving them unrescued discards real signal.
+    offpanel_first_entity: bool = True
+
+    # When False, a candidate whose real-signal PMI array against the target
+    # entity is EMPTY (no |PMI| > real_signal_threshold edge to ANY of the
+    # entity's genes) is VETOED instead of defer-admitted. Default True =
+    # legacy (defer-admit such orthogonal genes). Distinct from
+    # ``offpanel_first_entity`` (off-panel, no gene index at all) and from the
+    # percentile branch (which already vetoes strongly ANTI-correlated genes):
+    # this gates ORTHOGONAL / unrelated ON-panel genes only. On a 5k-plex panel
+    # at real_signal_threshold=0.2 the defer fires often, so setting the early
+    # rescues strict (rescue.admit_independent=False) while keeping the final
+    # mop-up permissive (final_rescue.admit_independent=True) trims ~70
+    # genes/cell of coherence-neutral filler (coverage 97->94%) with cell
+    # coherence unchanged. Wired via the _cy_prune module toggle set per rescue
+    # stage in the pipeline.
+    admit_independent: bool = True
 
     # ------------------------------------------------------------------
     # Convergence-aware early exit. After each Rescue pass, compare the
@@ -722,6 +806,103 @@ class BootstrapConfig:
 
 
 @dataclass(frozen=True)
+class PanelConfig:
+    """Recipe for a depth-corrected (cPMI) reference panel.
+
+    Configures `tracer.conflict_reference.build_depth_corrected_reference`,
+    the estimator behind `scripts/build_panels.py`. Distinct from `BootstrapConfig`,
+    which configures the resampling `compute_pmi_bootstrap` path.
+
+    WHY `promote` MATTERS MOST: the pipeline resolves a panel's edge weight as
+    ``"PMI" if "PMI" in columns`` (pipeline.py:1640, 2037) and cannot be told
+    which estimator that column holds. Whatever lands in `PMI` is what TRACER
+    consumes.
+
+    TWO RECIPES, and they INVERT on `promote` and `strategy`:
+
+    WITH an scRNA reference -- these defaults (`xgt1_cpmi_balanced_rep`).
+        Cell-type balanced with replacement; xgt1 presence; cPMI promoted;
+        depth binned on n_genes, because the xgt1 rule
+        ``count > (e-1)*lib/1e4`` already conditions on library size, which
+        makes total_counts the wrong covariate.
+
+    WITHOUT one (nuclear / in-situ) -- `load_config(panel_preset="nuclear")`
+        (`nucgrid_pmi`). Label-free grid3 balancing and NAIVE PMI. This is
+        INTERIM, not an endorsement: naive PMI on nuclei is depth-confounded
+        (67% of pairs positive, median +0.46; the marginal-product null
+        under-predicts E by ~59% when libraries vary 200x). cPMI is better
+        PER CELL there (size-matched entropy 0.2845 vs 0.3576) but the
+        nuclear reference is evidence-starved -- O median 13 vs 86 for scRNA
+        -- so against PMI_THR=0.2 read as an effect size it admits too little
+        (retention 54-78% vs 91%). Fix with more nuclei, not a lower
+        threshold, then switch `promote` to cPMI.
+        grid3 is nuclear-ONLY: on scRNA it loses to cell-type labels
+        (0.2976 vs 0.2361).
+    """
+
+    #: Reference draw. rep/capped need a cell-type column; grid3/grid4 are
+    #: label-free; vanilla is unbalanced.
+    strategy: Literal["rep", "capped", "vanilla", "grid3", "grid4"] = "rep"
+    #: Presence arms to build. xgt1 = log1p(CP10k) with min_count=1, i.e.
+    #: count > (e-1)*lib/1e4. NOTE xgt1 is a NO-OP on nuclear input
+    #: ((e-1)*lib/1e4 maxes at 0.036 there); it is active on scRNA (28.7% of
+    #: lung cells, 39% of PDAC).
+    arms: tuple[str, ...] = ("xgt1",)
+    #: Which estimator is copied into the `PMI` column the pipeline reads.
+    promote: Literal["cPMI", "PMI"] = "cPMI"
+    #: Covariate the cPMI null is binned on. Inert for the naive-PMI column,
+    #: which never reads E.
+    depth_metric: Literal["total_counts", "n_genes"] = "n_genes"
+    min_det_cells: int = 25
+    n_depth_bins: int = 25
+    seed: int = 0
+    #: Conjunctive magnitude cut (drop only if BOTH |PMI| and |cPMI| <= tau).
+    #: OFF by default and it should stay that way -- truncation is NOT
+    #: behaviour-neutral. Absent edges are PERMISSIVE in the pipeline
+    #: (skipped, not vetoed), so a thinner panel ADMITS MORE: a 12.2%
+    #: conjunctive cut on lung moved cells 49,155 -> 49,809 and whole-cell
+    #: RCTD entropy 0.227 -> 0.252.
+    min_abs_value: float | None = None
+    #: Per-gene rank cut: keep each gene's K strongest partners by |cPMI|
+    #: (one ranking per gene; an edge survives if in the top-K of either
+    #: endpoint). A memory lever for whole-transcriptome panels.
+    top_k_per_gene: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.promote not in ("cPMI", "PMI"):
+            raise ValueError(
+                f"panel.promote must be 'cPMI' or 'PMI'; got {self.promote!r}"
+            )
+        if self.strategy not in ("rep", "capped", "vanilla", "grid3", "grid4"):
+            raise ValueError(f"panel.strategy invalid: {self.strategy!r}")
+        if self.depth_metric not in ("total_counts", "n_genes"):
+            raise ValueError(f"panel.depth_metric invalid: {self.depth_metric!r}")
+        if self.min_det_cells < 1:
+            raise ValueError("panel.min_det_cells must be >= 1")
+        if self.n_depth_bins < 1:
+            raise ValueError("panel.n_depth_bins must be >= 1")
+        if self.top_k_per_gene is not None and self.top_k_per_gene < 1:
+            raise ValueError("panel.top_k_per_gene must be >= 1 or None")
+        import warnings
+        if "xgt1" in tuple(self.arms) and self.depth_metric == "total_counts":
+            warnings.warn(
+                "panel.depth_metric='total_counts' with an xgt1 arm: the xgt1 "
+                "presence rule already conditions on library size, so the "
+                "depth-conditioned null double-counts it. Use n_genes.",
+                UserWarning, stacklevel=2,
+            )
+        if self.min_abs_value is not None:
+            warnings.warn(
+                f"panel.min_abs_value={self.min_abs_value} truncates the panel. "
+                "This is NOT behaviour-neutral: absent edges are permissive in "
+                "the pipeline (skipped, not vetoed), so a thinner panel admits "
+                "MORE. Measured on lung: a 12.2% cut moved whole-cell entropy "
+                "0.227 -> 0.252.",
+                UserWarning, stacklevel=2,
+            )
+
+
+@dataclass(frozen=True)
 class PipelineConfig:
     """Top-level pipeline config. `final_rescue` defaults to a copy of
     `rescue` with `small_entity_guard_n = 0`; override by passing an
@@ -747,6 +928,7 @@ class PipelineConfig:
         )
     )
     bootstrap: BootstrapConfig = field(default_factory=BootstrapConfig)
+    panel: PanelConfig = field(default_factory=PanelConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -769,6 +951,7 @@ _SECTION_TO_CLS: dict[str, type] = {
     "demote": DemoteConfig,
     "final_rescue": RescueConfig,
     "bootstrap": BootstrapConfig,
+    "panel": PanelConfig,
 }
 
 
@@ -833,6 +1016,13 @@ def _to_dataclass(merged: dict[str, Any]) -> PipelineConfig:
         valid_fields = {f.name for f in fields(cls)}
         unknown = set(body) - valid_fields
         if unknown:
+            hints = [h for h in (_retired_key_hint(section, k, body[k])
+                                 for k in sorted(unknown)) if h]
+            if hints:
+                raise ValueError(
+                    f"[{section}] uses key(s) removed in a breaking change: "
+                    + "; ".join(hints)
+                )
             raise ValueError(
                 f"[{section}] contains unknown keys: {sorted(unknown)} "
                 f"(valid: {sorted(valid_fields)})"
@@ -841,15 +1031,52 @@ def _to_dataclass(merged: dict[str, Any]) -> PipelineConfig:
     return PipelineConfig(**kwargs)
 
 
+# Keys removed in a breaking change, with the migration to write instead.
+# A stale config should not just fail -- it should say what replaced the key.
+# Values are callables of the offending value so the hint can be specific
+# (e.g. nuclear_only_admit=true maps to a different scope than false).
+_RETIRED_KEYS: dict[tuple[str, str], Any] = {
+    ("phase1", "nuclear_only_admit"): lambda v: (
+        'replaced by phase1.prune_scope = '
+        + ('"nuclear"' if v else '"cell"')
+        + ' -- one enum now sets BOTH the Phase-1a seed source and 1b/1c '
+          'admission, so the two halves cannot disagree'
+    ),
+    ("phase1", "nuclear_seed_only"): lambda v: (
+        'replaced by phase1.prune_scope = '
+        + ('"nuclear"' if v else '"cell"')
+    ),
+    ("phase1", "seed_coherence_floor"): lambda v: (
+        'removed -- it was never wired (the pipeline used a module constant) '
+        'and fired 0-1 times per ROI. Coherence is gated at Mid-QC instead; '
+        'delete this key'
+    ),
+}
+
+
+def _retired_key_hint(section: str, key: str, value: Any) -> str | None:
+    """Migration guidance for a removed key, or None if it is just unknown."""
+    fn = _RETIRED_KEYS.get((section, key))
+    if fn is None:
+        return None
+    try:
+        return f"{key}: {fn(value)}"
+    except Exception:  # never let a hint break the real error
+        return None
+
+
 def load_config(
     path: str | Path | None = None,
     *,
     platform: str | None = None,
+    panel_preset: str | None = None,
 ) -> PipelineConfig:
     """Load a pipeline config.
 
-    Layering: ``configs/defaults.toml``  ← (optional) ``configs/platforms/<platform>.toml``
-    ← (optional) ``path``. Each layer patches keys.
+    Layering: ``configs/defaults.toml`` ← (optional)
+    ``configs/platforms/<platform>.toml`` ← (optional)
+    ``configs/panels/<panel_preset>.toml`` ← (optional) ``path``.
+    Each layer patches keys.
 
     Parameters
     ----------
@@ -859,6 +1086,13 @@ def load_config(
         Optional platform-preset name (file under ``configs/platforms/``,
         without the ``.toml`` suffix). E.g. ``"xenium_3d"`` or
         ``"vhd_unsegmented"``.
+    panel_preset
+        Optional PANEL-recipe preset (file under ``configs/panels/``). This
+        axis is ORTHOGONAL to ``platform``: it selects the reference-panel
+        recipe, not the assay. ``None`` keeps the with-scRNA-reference recipe
+        in ``defaults.toml``; ``"nuclear"`` switches to the label-free,
+        naive-PMI recipe for in-situ input with no matched reference. The two
+        invert on ``panel.promote`` and ``panel.strategy``.
 
     Returns
     -------
@@ -879,6 +1113,16 @@ def load_config(
             )
         merged = _deep_merge(merged, _load_toml(plat_path))
 
+    if panel_preset is not None:
+        panel_path = _DEFAULT_CONFIGS_DIR / "panels" / f"{panel_preset}.toml"
+        if not panel_path.exists():
+            available = sorted(
+                p.stem for p in (_DEFAULT_CONFIGS_DIR / "panels").glob("*.toml")
+            ) if (_DEFAULT_CONFIGS_DIR / "panels").exists() else []
+            raise FileNotFoundError(
+                f"Unknown panel_preset {panel_preset!r}; available: {available}"
+            )
+        merged = _deep_merge(merged, _load_toml(panel_path))
     if path is not None:
         merged = _deep_merge(merged, _load_toml(Path(path)))
 

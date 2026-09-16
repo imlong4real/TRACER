@@ -68,7 +68,7 @@ import pandas as pd
 from tracer.config import load_config
 from tracer.pipeline import run_noseg_pipeline
 from tracer.cc_scoring import (
-    build_npmi_matrix_from_long,
+    build_pmi_matrix_from_long,
     compute_purity_conflict_per_cc_relu,
 )
 
@@ -327,7 +327,7 @@ def explode_to_transcripts(
 # =====================================================================
 # 2. NPMI panel
 # =====================================================================
-def load_npmi_panel(npmi_path: str | Path) -> pd.DataFrame:
+def load_pmi_panel(npmi_path: str | Path) -> pd.DataFrame:
     """Load the long-format NPMI panel (gene_i, gene_j, NPMI[, ...])."""
     df = pd.read_csv(npmi_path)
     needed = {"gene_i", "gene_j"}
@@ -342,7 +342,7 @@ def load_npmi_panel(npmi_path: str | Path) -> pd.DataFrame:
     return df
 
 
-def npmi_gene_set(panel: pd.DataFrame) -> set[str]:
+def pmi_gene_set(panel: pd.DataFrame) -> set[str]:
     return set(panel["gene_i"]).union(panel["gene_j"])
 
 
@@ -405,7 +405,7 @@ def aggregate_profiles(
     n_genes = np.diff(counts.indptr)  # nonzeros per row == unique genes
 
     # ---- NPMI purity / conflict on the profile presence matrix --------
-    npmi_genes, gene_to_idx, npmi_mat, col_idx = build_npmi_matrix_from_long(panel)
+    npmi_genes, gene_to_idx, npmi_mat, col_idx = build_pmi_matrix_from_long(panel)
     # Presence matrix M aligned to the NPMI gene ordering.
     M = np.zeros((len(profile_ids), len(npmi_genes)), dtype=np.int8)
     present = counts.tocoo()
@@ -624,7 +624,7 @@ def _write_run_summary(path: Path, *, args, gene_overlap: float, n_input_bins: i
         "(Group/cascade -> Post-Group Rescue -> Stitch -> Demote -> Final Rescue)",
         "- `tracer.config.load_config(platform='noseg')`",
         "- `tracer.cc_scoring.compute_purity_conflict_per_cc_relu` + "
-        "`build_npmi_matrix_from_long`",
+        "`build_pmi_matrix_from_long`",
         "",
         "## Caveats / assumptions",
         "- Each square-bin barcode is the spatial primitive; bin micron coords are",
@@ -651,7 +651,7 @@ import threading as _threading
 _STAGE_FUNCS = {
     "init_prune": "prune_transcripts_fast",
     "group_cascade": "cascade_as_residual_handler",
-    "post_group_rescue": "pre_stage2_rescue",
+    "post_group_rescue": "guarded_rescue",
     "stitch": "apply_stitching_to_transcripts_memory_efficient",
     "demote": "demote_small_entities",
     "final_rescue": "reassign_unassigned_grid_pool",
@@ -865,8 +865,17 @@ def _run_one(df, panel, cfg, *, tile_tag: str | None):
     if "bin_id" not in df_final.columns:
         df_final = df_final.merge(df[["transcript_id", "bin_id"]],
                                   on="transcript_id", how="left")
-    keep = _is_real_label(df_final["stitched"])
-    out = df_final.loc[keep, ["bin_id", "x", "y", "feature_name", "stitched"]].copy()
+    # run_noseg_pipeline now canonicalizes its output to `tracer_id`
+    # (pipeline._canonicalize_output drops `stitched`), so reading "stitched"
+    # here raised KeyError for every tile. Same auto-detect rule that
+    # commit 6ec0e90 applied to scripts/run_tracer.py build_outputs; the
+    # column is re-emitted as `stitched` so downstream consumers
+    # (aggregate_profiles(label_col="stitched"), ...) are unchanged.
+    _lab = "tracer_id" if "tracer_id" in df_final.columns else "stitched"
+    keep = _is_real_label(df_final[_lab])
+    out = df_final.loc[keep, ["bin_id", "x", "y", "feature_name", _lab]].copy()
+    if _lab != "stitched":
+        out = out.rename(columns={_lab: "stitched"})
     out["stitched"] = out["stitched"].astype(str)
     if tile_tag is not None:
         out["stitched"] = tile_tag + "::" + out["stitched"]
@@ -913,8 +922,8 @@ def run(args) -> None:
 
     # --- load panel + bins -------------------------------------------
     t = time.perf_counter()
-    panel = load_npmi_panel(args.npmi)
-    panel_genes = npmi_gene_set(panel)
+    panel = load_pmi_panel(args.npmi)
+    panel_genes = pmi_gene_set(panel)
     bins = load_visiumhd_bins(
         args.visiumhd_matrix, args.spatial_dir,
         expected_bin_size_um=args.bin_size_um,

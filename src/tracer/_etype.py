@@ -267,3 +267,130 @@ def homogenize_etype_for_entity(
     homogenize_etype_for_entities(
         df, (entity_label,), entity_col=entity_col, etype_col=etype_col,
     )
+
+
+def set_entity_etype(
+    df: pd.DataFrame,
+    entity_label: str,
+    etype: str,
+    *,
+    entity_col: str = "tracer_id",
+    etype_col: str = "_etype",
+) -> None:
+    """In-place: set ``_etype`` to ``etype`` for EVERY tx of ``entity_label``.
+
+    The all-tx counterpart to a per-row etype write: whenever an entity's
+    type changes (promotion, demotion, relabel), every one of its tx must
+    carry the new etype so the entity never goes mixed. No-op when the etype
+    column is absent or no row matches.
+    """
+    if etype_col not in df.columns:
+        return
+    mask = (df[entity_col].astype(str) == str(entity_label)).to_numpy()
+    if mask.any():
+        df.loc[mask, etype_col] = etype
+
+
+def swap_entity_etypes(
+    df: pd.DataFrame,
+    label_a: str,
+    label_b: str,
+    *,
+    entity_col: str = "tracer_id",
+    etype_col: str = "_etype",
+) -> None:
+    """In-place: swap the ``_etype`` of two entities — every tx of ``label_a``
+    takes ``label_b``'s etype and vice versa (all-tx, so neither side is left
+    mixed). Each side's etype is its dominant (most common) value, ties broken
+    by priority. No-op if either entity is absent or the etype column missing.
+    """
+    if etype_col not in df.columns:
+        return
+    ent = df[entity_col].astype(str)
+    a = (ent == str(label_a)).to_numpy()
+    b = (ent == str(label_b)).to_numpy()
+    if not a.any() or not b.any():
+        return
+    et = df[etype_col].astype(str).to_numpy()
+
+    def _dom(vals):
+        c = pd.Series(vals).value_counts()
+        top = c[c == c.max()].index
+        return min(top, key=lambda e: _ETYPE_PRIORITY.get(e, 99))
+
+    dom_a, dom_b = _dom(et[a]), _dom(et[b])
+    df.loc[a, etype_col] = dom_b
+    df.loc[b, etype_col] = dom_a
+
+
+# Label sentinels that are never a real entity (mirror of spatial.UNASSIGNED_LABELS
+# kept local so this module has no upward import). A member carrying one of these
+# labels can never define a target entity's type.
+_ETYPE_SENTINELS: frozenset = frozenset(
+    {"-1", "DROP", "UNASSIGNED", "nan", "__GUARD_SKIP__",
+     "group_rejected", "demote_rejected", "None", ""}
+)
+
+
+def _dominant_etype(values) -> str:
+    """Most-common etype among ``values``; ties broken by ``_ETYPE_PRIORITY``
+    (cell < partial < component < drop < unknown)."""
+    c = pd.Series(values).value_counts()
+    top = c[c == c.max()].index
+    return min(top, key=lambda e: _ETYPE_PRIORITY.get(e, 99))
+
+
+def propagate_etype_to_moved(
+    df: pd.DataFrame,
+    moved_positions,
+    target_labels,
+    *,
+    entity_col: str = "tracer_id",
+    etype_col: str = "_etype",
+) -> None:
+    """Set ``_etype`` for rows just relabeled into a target entity (by a rescue
+    move) so the target stays HOMOGENEOUS.
+
+    The target's etype is the dominant non-``unknown``, non-sentinel etype among
+    its **pre-existing** members — rows NOT in ``moved_positions``. Moved rows
+    then adopt that etype. Because moved rows are excluded when deriving the
+    type, a stale/stray etype riding in on a moved row can neither define the
+    target nor survive the write, so a single contaminant can never flip (or
+    mix) a target's type.
+
+    Parameters
+    ----------
+    df : DataFrame mutated in place.
+    moved_positions : positional (iloc) row indices that were just relabeled.
+    target_labels : the target entity label for each moved row (same length /
+        order as ``moved_positions``).
+
+    Moved rows whose target has no pre-existing typed member are left unchanged
+    (no fabricated etype). No-op if the etype column is absent or nothing moved.
+    """
+    if etype_col not in df.columns:
+        return
+    moved_positions = np.asarray(moved_positions)
+    if moved_positions.size == 0:
+        return
+    target_labels = np.asarray(target_labels).astype(str)
+
+    n = len(df)
+    is_moved = np.zeros(n, dtype=bool)
+    is_moved[moved_positions] = True
+
+    lab = df[entity_col].astype(str).to_numpy()
+    et = df[etype_col].astype(str).to_numpy()
+    # Pre-existing, typed, non-sentinel members define each target's type.
+    elig = (~is_moved) & (et != "unknown") & (~np.isin(lab, list(_ETYPE_SENTINELS)))
+    if not elig.any():
+        return
+    dom = (
+        pd.DataFrame({"lab": lab[elig], "et": et[elig]})
+        .groupby("lab")["et"].agg(_dominant_etype).to_dict()
+    )
+    new = np.array([dom.get(t) for t in target_labels], dtype=object)
+    ok = np.array([v is not None for v in new])
+    if ok.any():
+        rows = moved_positions[ok]
+        df.iloc[rows, df.columns.get_loc(etype_col)] = new[ok].astype(str)

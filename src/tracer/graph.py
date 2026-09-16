@@ -135,6 +135,33 @@ def neighbor_bins(bin_key: int, *, topology: str = "8") -> list[int]:
     return packed.tolist()
 
 
+def neighbor_bins_batch(bin_keys: np.ndarray) -> np.ndarray:
+    """Vectorized 8-connected neighborhood for many bin keys at once.
+
+    Returns an ``(N, 9)`` int64 array: column 0 is the self bin, columns
+    1..8 are the 8 Moore neighbors in the SAME order as
+    ``neighbor_bins(key, topology="8")`` (i.e. ``_NEIGHBOR_OFFSETS_8``).
+    Bit-identical to calling ``neighbor_bins`` per key, but avoids the
+    Python-per-tx loop that dominates the Rescue grid setup once the
+    Cython kernel is fast.
+
+    Uses the same pack/unpack convention as :func:`bin_xy` /
+    :func:`unpack_bin`: keys are ``((bx+BIAS) << 32) | (by+BIAS)``. All
+    arithmetic runs on the biased components (non-negative, < 2**32), so
+    adding the ±1 offsets never underflows.
+    """
+    bk = np.asarray(bin_keys, dtype=np.int64)
+    ku = bk.view(np.uint64)
+    bx_b = (ku >> np.uint64(32)).astype(np.int64)            # biased bx ∈ [0, 2**32)
+    by_b = (ku & np.uint64(_BIN_LO_MASK)).astype(np.int64)   # biased by
+    # (9, 2): self first, then the 8 neighbors in neighbor_bins("8") order.
+    offs = np.array([(0, 0)] + list(_NEIGHBOR_OFFSETS_8), dtype=np.int64)
+    bx9 = bx_b[:, None] + offs[None, :, 0]                    # (N, 9)
+    by9 = by_b[:, None] + offs[None, :, 1]
+    keys_u = (bx9.astype(np.uint64) << np.uint64(32)) | by9.astype(np.uint64)
+    return keys_u.view(np.int64)
+
+
 # ---------- Phase 3: Create Connected Components on Unassigned Transcripts ----------
 def build_graph(
     df,

@@ -6,7 +6,7 @@ Mirrors test_stitch_mahalanobis_rescue, applied at the
     floor < ΔC < 0    AND    D ≤ threshold    →    merge (DSU union)
 
 Canonical cases:
-  EMT, ΔC ≈ -0.10, D ≈ 0       → MERGE with d=1.0; NO MERGE with d=None
+  EMT, ΔC ≈ -0.18, D ≈ 0       → MERGE with d=1.0; NO MERGE with d=None
   Engulfment proxy, ΔC ≈ -0.5  → NO MERGE (ΔC ≤ floor)
   Side-by-side, ΔC ≈ -0.1, D large → NO MERGE (D above threshold)
   Positive ΔC                  → NO MERGE (ΔC ≥ 0)
@@ -30,7 +30,7 @@ from tracer.phase1_rescue import phase1_maha_remerge
 # Helpers — partial-overlap gene panels giving tunable ΔC.
 # Two entities A and B share `overlap_frac` of their gene panels. The
 # PMI matrix is +0.6 within either program, `cross` between programs.
-#   overlap=0.70, cross=+0.00 → ΔC ≈ -0.06 (in EMT rescue zone)
+#   overlap=0.70, cross=-0.3  → ΔC ≈ -0.18 (in EMT rescue zone)
 #   overlap=0.50, cross=-0.40 → ΔC ≈ -0.4  (below default floor -0.2)
 #   overlap=0.95, cross=+0.30 → ΔC ≈ +0.05 (positive zone)
 # ---------------------------------------------------------------------
@@ -116,11 +116,11 @@ def test_config_floor_must_be_nonpositive():
 # ---------------------------------------------------------------------
 
 def test_emt_concentric_rescue_fires():
-    """Two concentric clouds (D ≈ 0) with overlap=0.70 / cross=0.0 →
-    ΔC ≈ -0.06 (in (-0.2, 0)). With d=1.0 → merge; with d=None → split."""
+    """Two concentric clouds (D ≈ 0) with overlap=0.70 / cross=-0.3 →
+    ΔC ≈ -0.18 (in (-0.2, 0)). With d=1.0 → merge; with d=None → split."""
     rng = np.random.default_rng(0)
     aux, pool_A, pool_B = _build_aux_and_pools(
-        prog_size=10, overlap_frac=0.70, cross=0.0,
+        prog_size=10, overlap_frac=0.70, cross=-0.3,
     )
     a = _entity("a-1-1", 60, center=(0.0, 0.0, 0.0),
                 sigma=2.0, gene_pool=pool_A, rng=rng)
@@ -185,7 +185,7 @@ def test_side_by_side_high_d_no_rescue():
     """ΔC in band (-0.2, 0) but D > threshold → no merge."""
     rng = np.random.default_rng(2)
     aux, pool_A, pool_B = _build_aux_and_pools(
-        prog_size=10, overlap_frac=0.70, cross=0.0,
+        prog_size=10, overlap_frac=0.70, cross=-0.3,
     )
     # Place the two clouds far apart (D >> 1.0) but still within the
     # 8-Moore candidate bin band (bin=2.0µm; 6µm separation falls in a
@@ -261,7 +261,7 @@ def test_pipeline_default_ships_on():
 def test_sentinel_labels_skipped():
     rng = np.random.default_rng(4)
     aux, pool_A, _ = _build_aux_and_pools(
-        prog_size=10, overlap_frac=0.70, cross=0.0,
+        prog_size=10, overlap_frac=0.70, cross=-0.3,
     )
     a = _entity("a-1-1", 30, center=(0.0, 0.0, 0.0),
                 sigma=2.0, gene_pool=pool_A, rng=rng)
@@ -292,7 +292,7 @@ def test_maha_remerge_homogenizes_merged_etype():
     from tracer._etype import ETYPE_DTYPE
     rng = np.random.default_rng(0)
     aux, pool_A, pool_B = _build_aux_and_pools(
-        prog_size=10, overlap_frac=0.70, cross=0.0,
+        prog_size=10, overlap_frac=0.70, cross=-0.3,
     )
     a = _entity("a-1-1", 60, center=(0.0, 0.0, 0.0),
                 sigma=2.0, gene_pool=pool_A, rng=rng)

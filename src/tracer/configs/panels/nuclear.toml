@@ -1,0 +1,43 @@
+# Nuclear / in-situ panel preset — NO matched scRNA reference.
+#
+#   load_config(panel_preset="nuclear")
+#
+# Layered on top of the [panel] block in defaults.toml, which holds the
+# with-reference recipe. This file inverts the two fields that differ.
+# Recipe name: `nucgrid_pmi`.
+#
+# ---------------------------------------------------------------------
+# READ BEFORE CHANGING `promote`
+# ---------------------------------------------------------------------
+# `promote = "PMI"` here is INTERIM, not an endorsement of naive PMI.
+#
+# Naive PMI on nuclei is DEPTH-CONFOUNDED: 67% of pairs come out positive,
+# median +0.46, because the marginal-product null under-predicts E by ~59%
+# when libraries vary 200x. Its high retention is partly over-admission.
+#
+# cPMI is better PER CELL on the same data (size-matched entropy 0.2845 vs
+# 0.3576 at >=25 tx) — the estimator is right, the reference is too thin.
+# The nuclear reference is EVIDENCE-STARVED: median co-detection O is 13,
+# against 86 for an scRNA reference (median library ~10 tx/nucleus). Against
+# PMI_THR=0.2 read as an effect size (O/E >= 1.22) few pairs honestly clear
+# it, so cPMI admits little — retention 54-78% vs 91% for PMI, and only
+# 38-71% of its cells reach RCTD's UMI floor vs 77%.
+#
+# That is an evidence-DEPTH problem, not a tuning problem. Fix it by pooling
+# more nuclei (more sections), NOT by lowering the threshold. Once depth is
+# solved, switch `promote` to "cPMI" and this preset collapses to the default.
+# ---------------------------------------------------------------------
+[panel]
+# grid3 = label-free balancing on a MARGINAL n_genes x depth grid with a
+# replacement draw. The single largest nuclear improvement measured
+# (cPMI 0.4077 -> 0.2848, PMI 0.4610 -> 0.3576). Marginal edges make the
+# strata unequal (13.5x on nuclear); nested3/4 are qcut no-ops.
+# NUCLEAR-ONLY: on scRNA, grid3 LOSES to cell-type labels (0.2976 vs 0.2361).
+strategy = "grid3"
+
+# See the block above. Interim.
+promote = "PMI"
+
+# xgt1 is a NO-OP on nuclear input — (e-1)*lib/1e4 maxes at 0.036, never >= 1
+# — so it is equivalent to count1 here and is kept only for name continuity.
+arms = ["xgt1"]

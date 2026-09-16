@@ -1,6 +1,8 @@
 """Phase 3/5/6: spatial analysis — components, coherence enforcement, reassignment."""
 
+import functools
 import math
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -14,6 +16,26 @@ from . import _cy_prune, _cy_spatial
 from ._repro import _ensure_reproducibility_seed
 from ._utils import prepare_transcript_df
 from .graph import build_graph, to_networkx  # noqa: F401 — used internally/callers
+
+
+def _deprecated(reason: str):
+    """Decorator: emit a DeprecationWarning on call, then delegate unchanged.
+
+    Used to retire the legacy reassign_* rescue variants (superseded by
+    :func:`reassign_unassigned_grid_pool` + :func:`guarded_rescue`) without
+    breaking any external import in the same release.
+    """
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            warnings.warn(
+                f"{fn.__name__} is deprecated: {reason}",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            return fn(*args, **kwargs)
+        return wrapper
+    return deco
 
 
 # ---------------------------------------------------------------------------
@@ -62,6 +84,15 @@ _FIXED_UNASSIGNED_LABELS = frozenset({"-1", "DROP", "UNASSIGNED", "nan"})
 #     {"DROP", "-1", "UNASSIGNED", "nan"}
 # at five sites in this file.  Now centralized.
 UNASSIGNED_LABELS = _FIXED_UNASSIGNED_LABELS | STAGE_REJECTED_LABELS
+
+# Non-gene features (Xenium control/blank codewords). Panel-absent like real
+# off-panel genes, so `offpanel_first_entity` proximity-rescue must EXCLUDE
+# them — they are instrument noise, never cell content. Only consulted on the
+# off-panel branch; the PMI path is unaffected. Extend for other platforms.
+NONGENE_FEATURE_PREFIXES = (
+    "NegControl", "BLANK", "antisense", "UnassignedCodeword",
+    "DeprecatedCodeword", "Intergenic", "Control",
+)
 
 
 def is_unassigned_label(label) -> bool:
@@ -120,6 +151,13 @@ def finalize_unassigned(
     df.loc[mask, col] = unassigned_label
     if cell_id_col in df.columns:
         df.loc[mask, cell_id_col] = cell_id_unassigned_label
+    # Enforce the published invariant: a sentinel entity label carries
+    # _etype == "unknown". Dropped tx may arrive with a stale "cell"/"partial"
+    # etype (e.g. an input-unassigned tx defaulted to "cell" at Prune, or a
+    # demoted entity's leftover) — reset so entity-level aggregation over the
+    # published _etype column never counts a dropped tx as a real entity.
+    if "_etype" in df.columns:
+        df.loc[mask, "_etype"] = "unknown"
     return df
 
 
@@ -129,7 +167,7 @@ def annotate_unassigned_components(
     aux: dict,
     *,
     build_graph_fn,                 # pass build_graph here
-    prune_fn,                       # pass prune_genes_by_npmi_greedy here
+    prune_fn,                       # pass prune_genes_by_pmi_greedy here
     coord_cols=("x", "y", "z"),
     k=8,
     dist_threshold=1.5,
@@ -471,20 +509,25 @@ def annotate_unassigned_components_fast(
         pbar_groupby.update(1)
         pbar_groupby.set_description("grouping")
 
+    comp_gene_counts = {}
     for comp_id, group in df_candidate.groupby("_comp_id_local", sort=True):
-        g_local = np.sort(group["_gene_idx_local"].dropna().astype(int).unique())
+        a = group["_gene_idx_local"].dropna().astype(int).to_numpy()
+        g_local, c_local = np.unique(a, return_counts=True)   # g ascending
         if g_local.size > 0:
             comp_gene_map[comp_id] = np.asarray(g_local, dtype=np.int32)
+            comp_gene_counts[comp_id] = np.asarray(c_local, dtype=np.int32)
 
     if show_progress:
         pbar_groupby.update(1)
         pbar_groupby.close()
 
-    # Bulk-prune all components through the Cython kernel.
+    # Bulk-prune all components through the tx-weighted Cython kernel.
     if len(comp_gene_map) > 0:
         comp_keys = sorted(comp_gene_map.keys())
         g_arrays = [comp_gene_map[k] if comp_gene_map[k].size > 0 else None for k in comp_keys]
-        removed_lists = _cy_prune.prune_cells(g_arrays, W, float(npmi_threshold))
+        tc_arrays = [comp_gene_counts[k] if comp_gene_map[k].size > 0 else None for k in comp_keys]
+        removed_lists = _cy_prune.prune_cells_retained(
+            g_arrays, tc_arrays, W, float(npmi_threshold))
 
         # Pre-compute comp_id → row-positions ONCE (replaces the
         # O(N × n_comps) per-comp full-df mask in the loop below).
@@ -901,6 +944,33 @@ def enforce_spatial_coherence_per_label(
     return df_out
 
 
+def _fast_percentile(a: np.ndarray, q: float) -> float:
+    """Single-percentile of a small 1-D array, matching numpy's default
+    ``method="linear"`` bit-for-bit but without ``np.percentile``'s per-call
+    overhead (dtype validation, ``unique``, ``argpartition``, generic ``lerp``).
+
+    Hot path in the Rescue veto: called once per (candidate, entity) that
+    reaches the aggregate gate — ~1e6 calls/pass, where ``np.percentile``'s
+    fixed cost dominates. ``a`` is assumed finite (callers pre-filter to
+    signal pairs, dropping NaN/near-zero). Replicates numpy's ``_lerp``
+    precision branch (``t < 0.5`` vs ``t >= 0.5``) so boundary vetoes are
+    identical to the previous ``np.percentile`` result.
+    """
+    n = a.size
+    if n == 1:
+        return float(a[0])
+    s = np.sort(a)
+    vidx = (q / 100.0) * (n - 1)
+    lo = int(vidx)              # floor (vidx >= 0)
+    frac = vidx - lo
+    if frac == 0.0:
+        return float(s[lo])
+    diff = s[lo + 1] - s[lo]
+    if frac < 0.5:
+        return float(s[lo] + frac * diff)
+    return float(s[lo + 1] - (1.0 - frac) * diff)
+
+
 def _make_negative_set_lookup(W, neg_npmi_threshold: float):
     """Return a cached per-gene lookup ``g_idx → frozenset(j: W[g,j] ≤ τ)``.
 
@@ -950,6 +1020,7 @@ def _make_negative_set_lookup(W, neg_npmi_threshold: float):
 
 
 # ---------- Phase 6: Reassign unassigned transcripts to nearby partials/components ----------
+@_deprecated("unused legacy variant; use reassign_unassigned_grid_pool / guarded_rescue")
 def reassign_unassigned_to_nearby_entities(
     df_spatial: pd.DataFrame,
     entity_summary: pd.DataFrame | None = None,  # deprecated; ignored under new algo
@@ -1179,35 +1250,13 @@ def reassign_unassigned_to_nearby_entities(
                 df[out_col] = col_data.cat.add_categories(sorted(new_cats))
         df.iloc[sel_rows, col_pos] = new_labels[matched]
 
-        # Propagate _etype for Rescue-promoted tx so they don't carry
-        # stale "unknown" values into downstream stages. Look up the
-        # target entity's etype from existing tx already labeled with
-        # that entity.
+        # Propagate _etype so each target entity stays HOMOGENEOUS (target type
+        # from pre-existing members only). See _etype.propagate_etype_to_moved.
         if "_etype" in df.columns:
-            target_labels = pd.Series(new_labels[matched]).astype(str)
-            # Build label → etype from tx that already have non-unknown etype
-            etype_series = df["_etype"].astype(str)
-            label_series = df[out_col].astype(str)
-            known_mask = (etype_series != "unknown") & (~label_series.isin(
-                {"-1", "DROP", "UNASSIGNED", "nan"}
-            ))
-            if known_mask.any():
-                label_to_etype = (
-                    pd.DataFrame({
-                        "lab": label_series[known_mask].to_numpy(),
-                        "etype": etype_series[known_mask].to_numpy(),
-                    })
-                    .drop_duplicates("lab")
-                    .set_index("lab")["etype"]
-                )
-                new_etype = target_labels.map(label_to_etype)
-                # Apply only where we found a mapping
-                ok = new_etype.notna().to_numpy()
-                if ok.any():
-                    sel_with_etype = sel_rows[ok]
-                    df.loc[df.index[sel_with_etype], "_etype"] = (
-                        new_etype[ok].astype(str).to_numpy()
-                    )
+            from ._etype import propagate_etype_to_moved
+            propagate_etype_to_moved(
+                df, sel_rows, new_labels[matched], entity_col=out_col,
+            )
 
     if n_reassigned > 0:
         d_arr = matched_dist[matched]
@@ -1354,6 +1403,7 @@ def demote_small_entities(
     return df_out, n_demoted
 
 
+@_deprecated("unused legacy variant; use reassign_unassigned_grid_pool / guarded_rescue")
 def reassign_unassigned_by_gene_compat(
     df: pd.DataFrame,
     aux: dict,
@@ -1591,6 +1641,20 @@ def reassign_unassigned_grid_pool(
     witness_cap: int = 3,
     witness_small_component_cap_divisor: int = 2,
     witness_tiebreak: str = "gene_fit",
+    # Opt-in (default False = bit-exact legacy). When True, unassigned tx
+    # whose gene is ABSENT from the PMI panel (g_idx < 0 — e.g. housekeeping
+    # ACTB, which self-eliminates from a PMI panel) are assigned to the FIRST
+    # assigned entity encountered in their Moore neighborhood — proximity
+    # only, no PMI/veto. The PMI-gated rescue excludes them (they can never
+    # clear it), so without this they are discarded at Finalize.
+    # SAFETY: control/blank/deprecated probes whose name matches
+    # NONGENE_FEATURE_PREFIXES (Xenium NegControl*/Unassigned*/BLANK/
+    # antisense/DeprecatedCodeword/Intergenic/Control) are automatically
+    # excluded from this off-panel proximity rescue — they are also
+    # panel-absent but are never assigned into cells (see valid_u below).
+    # The only residual recommendation is that any control probe whose name
+    # does NOT match those prefixes should still be pre-filtered at ingest.
+    offpanel_first_entity: bool = False,
     pos_npmi_threshold=None,  # deprecated; ignored. Kept for back-compat.
 ) -> tuple[pd.DataFrame, int, dict]:
     """Grid-bin rescue: distance-priority with NPMI as a negative veto.
@@ -1666,7 +1730,7 @@ def reassign_unassigned_grid_pool(
         )
     _ensure_reproducibility_seed()
     from .stitching import build_entity_table
-    from .graph import bin_xy, neighbor_bins
+    from .graph import bin_xy, neighbor_bins, neighbor_bins_batch
 
     if unassigned_labels is None:
         unassigned_labels = set(UNASSIGNED_LABELS)
@@ -1756,14 +1820,27 @@ def reassign_unassigned_grid_pool(
     for local_i, bk in enumerate(bin_keys_a.tolist()):
         bin_to_local_idxs.setdefault(int(bk), []).append(local_i)
 
-    # Unassigned tx candidates.
+    # Unassigned tx candidates. When ``offpanel_first_entity`` is set, off-panel
+    # tx (gene absent from the PMI panel → g_idx < 0) are KEPT in the candidate
+    # set (only NaN-coord tx dropped) and routed through the Cython kernel's
+    # proximity branch (first assigned entity in the 9-bin neighborhood, no PMI).
+    # Otherwise they are excluded exactly as before (`g_idx >= 0`).
     una_idx = np.where(unassigned_mask)[0]
     una_coords = df_out.iloc[una_idx][list(coord_cols)].to_numpy(dtype=np.float32)
     una_genes = df_out.iloc[una_idx][gene_col].astype(str).to_numpy()
     una_g_idx = np.array(
         [gene_to_idx.get(g, -1) for g in una_genes], dtype=np.int64,
     )
-    valid_u = ~np.isnan(una_coords).any(axis=1) & (una_g_idx >= 0)
+    _coord_ok = ~np.isnan(una_coords).any(axis=1)
+    if offpanel_first_entity:
+        # Keep off-panel (g<0) tx for the kernel's proximity branch, EXCEPT
+        # non-gene control/blank probes (also panel-absent) — never rescue
+        # those. In-panel tx (g>=0) are always kept.
+        _is_ctrl = (pd.Series(una_genes).str.startswith(NONGENE_FEATURE_PREFIXES)
+                    .to_numpy())
+        valid_u = _coord_ok & ~_is_ctrl
+    else:
+        valid_u = _coord_ok & (una_g_idx >= 0)
     una_idx = una_idx[valid_u]
     una_coords = una_coords[valid_u]
     una_g_idx = una_g_idx[valid_u]
@@ -1791,12 +1868,14 @@ def reassign_unassigned_grid_pool(
     # the standard veto modes. Falls back to the legacy Python loop for
     # any unusual shape.
     use_cython_batch = (
-        not W_is_sparse
-        and len(coord_cols) >= 2
+        len(coord_cols) >= 2
         and veto_mode in ("min", "mean", "hybrid")
         # Cython batch supports both distance and witness rank policies
         # (witness branch landed 2026-05-15 in _cy_prune.pyx). No
-        # rank_policy gate here.
+        # rank_policy gate here. W may be dense (single full-matrix call)
+        # or sparse (gene-blocked: one densified (1, G) row per gene,
+        # reusing the same kernel — O(G) memory, no G×G materialization;
+        # see the call site below).
     )
 
     # For witness mode we need entity sizes (total assigned-tx count
@@ -1851,25 +1930,19 @@ def reassign_unassigned_grid_pool(
                 bin_data_arr[write_cursor[ri]] = li
                 write_cursor[ri] += 1
 
-            # Build the bin-key → remap-idx dict (Python-side; only used
-            # to populate nb_bins_arr below — Cython sees only int32 idx).
-            bin_key_to_remap = {int(bk): i for i, bk in enumerate(unique_bin_keys.tolist())}
-
-            # Neighbor-bin matrix [n_una, 9] (remap indices; -1 if a
-            # bin has no assigned-tx).
-            nb_bins_arr = np.full((len(una_idx), 9), -1, dtype=np.int64)
-            for i_una, bk_val_raw in enumerate(una_bin_keys.tolist()):
-                bk_val_int = int(bk_val_raw)
-                # Self bin
-                self_remap = bin_key_to_remap.get(bk_val_int, -1)
-                nb_bins_arr[i_una, 0] = self_remap
-                # 8 neighbor bins
-                nbs = neighbor_bins(bk_val_int, topology="8")
-                for nb_pos, nb_val in enumerate(nbs):
-                    if 1 + nb_pos >= 9:
-                        break
-                    nb_remap = bin_key_to_remap.get(int(nb_val), -1)
-                    nb_bins_arr[i_una, 1 + nb_pos] = nb_remap
+            # Neighbor-bin matrix [n_una, 9] (remap indices; -1 if a bin
+            # has no assigned-tx). Vectorized: compute all 9 neighbor keys
+            # at once (col 0 = self), then map each to its remap index via
+            # searchsorted on the sorted `unique_bin_keys`. Bit-identical
+            # to the former per-tx neighbor_bins + dict-lookup loop, which
+            # dominated grid setup once the Cython kernel got fast (~26% of
+            # a rescue pass).
+            nb_keys = neighbor_bins_batch(una_bin_keys)          # (n_una, 9)
+            _pos = np.searchsorted(unique_bin_keys, nb_keys)
+            _pos_c = np.clip(_pos, 0, unique_bin_keys.size - 1)
+            nb_bins_arr = np.where(
+                unique_bin_keys[_pos_c] == nb_keys, _pos_c, -1
+            ).astype(np.int64)
 
     # Run the Cython batch ONLY if all preconditions still hold after
     # the CSR construction above (which may have set use_cython_batch
@@ -1878,7 +1951,6 @@ def reassign_unassigned_grid_pool(
         # Cast inputs to expected dtypes.
         una_coords_c = una_coords.astype(np.float32)
         ass_coords_c = assigned_coords.astype(np.float32)
-        W_c = W if (hasattr(W, "dtype") and W.dtype == np.float32) else np.asarray(W, dtype=np.float32)
         z_bound_for_cy = float(z_bound_eff) if z_col_idx is not None else 0.0
 
         veto_mode_int = (
@@ -1896,13 +1968,13 @@ def reassign_unassigned_grid_pool(
         rank_policy_int = 1 if rank_policy == "witness" else 0
         witness_tiebreak_int = 1 if witness_tiebreak == "gene_fit" else 0
 
-        best_ent_arr, best_dist_arr, reason_arr, sef_arr = (
-            _cy_prune.rescue_per_tx_batch(
-                una_coords_c, una_g_idx, nb_bins_arr,
+        def _run_kernel(coords_blk, g_blk, nb_blk, W_mat, w_row_blk=None):
+            return _cy_prune.rescue_per_tx_batch(
+                coords_blk, g_blk, nb_blk,
                 ass_coords_c, ass_ent_id,
                 bin_offsets, bin_data_arr,
                 ent_gene_offsets, ent_gene_idx,
-                W_c,
+                W_mat,
                 z_bound_for_cy,
                 veto_mode_int,
                 float(mean_threshold),
@@ -1917,8 +1989,74 @@ def reassign_unassigned_grid_pool(
                 int(witness_small_component_cap_divisor),
                 witness_tiebreak_int,
                 ent_size_arr,
+                w_row_blk,
+                int(offpanel_first_entity),
             )
-        )
+
+        n_una_cy = len(una_idx)
+        if not W_is_sparse:
+            # Dense W: single full-matrix pass (legacy fast path).
+            W_c = (W if (hasattr(W, "dtype") and W.dtype == np.float32)
+                   else np.asarray(W, dtype=np.float32))
+            best_ent_arr, best_dist_arr, reason_arr, sef_arr = _run_kernel(
+                una_coords_c, una_g_idx, nb_bins_arr, W_c,
+            )
+            n_sef = int(sef_arr.sum())
+        else:
+            # Sparse W: gene-blocked. rescue_per_tx_batch reads only
+            # ``W[g_idx, :]`` (the tx's own gene row), so we densify ONE
+            # ``(1, G)`` row per distinct gene and reuse the identical
+            # kernel with ``una_g_idx ≡ 0`` — O(G) memory, no G×G
+            # materialization. Structurally-absent entries are NaN (the
+            # kernel skips them), matching ``build_dense_pmi_matrix_small_panel``
+            # bit-for-bit. Group order is irrelevant: each tx's result
+            # depends only on its gene row, its spatial neighborhood, and
+            # the (frozen) per-entity gene sets.
+            G_panel = int(W.shape[0])
+            best_ent_arr = np.full(n_una_cy, -1, dtype=np.int32)
+            best_dist_arr = np.full(n_una_cy, np.nan, dtype=np.float32)
+            reason_arr = np.zeros(n_una_cy, dtype=np.int32)
+            n_sef = 0
+            W_csr = W.tocsr()
+            _order = np.argsort(una_g_idx, kind="stable")
+            _uniq_g, _grp_start = np.unique(una_g_idx[_order], return_index=True)
+            _bounds = _grp_start.tolist() + [n_una_cy]
+            for _bi, _g in enumerate(_uniq_g.tolist()):
+                _blk = _order[_bounds[_bi]:_bounds[_bi + 1]]
+                if _g < 0:
+                    if offpanel_first_entity:
+                        # Off-panel block: the kernel's g<0 proximity branch
+                        # ignores W, so any (1, G) row works. w_row=0.
+                        _be, _bd, _br, _sef = _run_kernel(
+                            una_coords_c[_blk],
+                            una_g_idx[_blk],
+                            nb_bins_arr[_blk],
+                            np.zeros((1, G_panel), dtype=np.float32),
+                            w_row_blk=np.zeros(_blk.shape[0], dtype=np.int64),
+                        )
+                        best_ent_arr[_blk] = _be
+                        best_dist_arr[_blk] = _bd
+                        reason_arr[_blk] = _br
+                    else:
+                        reason_arr[_blk] = 1  # sentinel gene (unmapped): no_candidates
+                    continue
+                _row = np.full(G_panel, np.nan, dtype=np.float32)
+                _csr_row = W_csr.getrow(int(_g))
+                _row[_csr_row.indices] = _csr_row.data
+                # Pass the REAL gene idx as una_g_idx (drives the self-pair
+                # exclusion ``eg == g_idx``) but W-row 0 (the densified
+                # ``(1, G)`` row) — the kernel decouples the two via w_row.
+                _be, _bd, _br, _sef = _run_kernel(
+                    una_coords_c[_blk],
+                    una_g_idx[_blk],
+                    nb_bins_arr[_blk],
+                    _row.reshape(1, G_panel),
+                    w_row_blk=np.zeros(_blk.shape[0], dtype=np.int64),
+                )
+                best_ent_arr[_blk] = _be
+                best_dist_arr[_blk] = _bd
+                reason_arr[_blk] = _br
+                n_sef += int(_sef.sum())
 
         # Translate codes back into label strings + per-tx stats.
         for i in range(len(una_idx)):
@@ -1932,7 +2070,7 @@ def reassign_unassigned_grid_pool(
                     n_blocked_by_neg_veto += 1
                 else:
                     n_no_candidates += 1
-        n_small_entity_fallback = int(sef_arr.sum())
+        n_small_entity_fallback = n_sef
 
     n_coord_cols = len(coord_cols)
     # Legacy Python loop runs only when the Cython batch was NOT used
@@ -1945,6 +2083,13 @@ def reassign_unassigned_grid_pool(
 
     for i, (bk, g_idx) in una_iter_for_loop:
         bk = int(bk)
+        if g_idx < 0:
+            # Off-panel tx are handled only by the Cython batch's proximity
+            # branch; the legacy dense loop has no W row for them. Skip
+            # (no-candidate) rather than mis-index W. Reached only on the rare
+            # non-batch fallback path.
+            n_no_candidates += 1
+            continue
         # Collect assigned-tx local indices in bin + 8-neighbors, then
         # apply the z-bound to keep only spatially close candidates.
         local_idxs_raw: list[int] = []
@@ -2036,9 +2181,9 @@ def reassign_unassigned_grid_pool(
                                     # No real-signal pairs — defer to spatial.
                                     vetoed = False
                                 else:
-                                    p_aggregate = float(np.percentile(
+                                    p_aggregate = _fast_percentile(
                                         pmis[is_signal], aggregator_percentile
-                                    ))
+                                    )
                                     vetoed = p_aggregate <= mean_threshold
                     ent_decision_cache[ent] = vetoed
             else:
@@ -2076,9 +2221,9 @@ def reassign_unassigned_grid_pool(
                             if min_p > min_admit_threshold:
                                 vetoed = False   # unanimous-strong fast-pass
                             else:
-                                p_aggregate = float(np.percentile(
+                                p_aggregate = _fast_percentile(
                                     sig_pmis, aggregator_percentile
-                                ))
+                                )
                                 vetoed = p_aggregate <= mean_threshold
                     ent_decision_cache[ent] = vetoed
 
@@ -2174,34 +2319,15 @@ def reassign_unassigned_grid_pool(
                 df_out[out_col] = col_data.cat.add_categories(sorted(new_cats))
         df_out.iloc[sel_rows, col_pos] = new_labels[matched]
 
-        # Propagate _etype for the rescued tx — copy the target
-        # entity's etype from an already-assigned tx with that label.
-        # Without this, rescued tx keep stale 'unknown' etype values
-        # which would bias entity-level aggregation in downstream
-        # build_entity_table calls.
+        # Propagate _etype so each target entity stays HOMOGENEOUS. The target
+        # type is derived from its pre-existing members only (excludes the just-
+        # moved rows), so a stale etype riding in on a rescued tx can neither
+        # define nor mix the target. See _etype.propagate_etype_to_moved.
         if "_etype" in df_out.columns:
-            target_labels = pd.Series(new_labels[matched]).astype(str)
-            etype_series = df_out["_etype"].astype(str)
-            label_series = df_out[out_col].astype(str)
-            known_mask = (etype_series != "unknown") & (~label_series.isin(
-                {"-1", "DROP", "UNASSIGNED", "nan"}
-            ))
-            if known_mask.any():
-                label_to_etype = (
-                    pd.DataFrame({
-                        "lab": label_series[known_mask].to_numpy(),
-                        "etype": etype_series[known_mask].to_numpy(),
-                    })
-                    .drop_duplicates("lab")
-                    .set_index("lab")["etype"]
-                )
-                new_etype = target_labels.map(label_to_etype)
-                ok = new_etype.notna().to_numpy()
-                if ok.any():
-                    sel_with_etype = sel_rows[ok]
-                    df_out.loc[df_out.index[sel_with_etype], "_etype"] = (
-                        new_etype[ok].astype(str).to_numpy()
-                    )
+            from ._etype import propagate_etype_to_moved
+            propagate_etype_to_moved(
+                df_out, sel_rows, new_labels[matched], entity_col=out_col,
+            )
 
     n_reassigned = int(matched.sum())
     if n_reassigned > 0:
@@ -2211,10 +2337,14 @@ def reassign_unassigned_grid_pool(
     else:
         mean_d = float("nan")
         max_d = float("nan")
+    # Off-panel tx now flow through the kernel proximity branch, so they are
+    # already counted in `matched`; report how many were off-panel for stats.
+    n_offpanel = int(((una_g_idx < 0) & matched).sum()) if len(una_g_idx) else 0
 
     return df_out, n_reassigned, {
         "total_unassigned": n_unassigned,
         "total_reassigned": n_reassigned,
+        "offpanel_reassigned": n_offpanel,
         "n_blocked_by_neg_veto": n_blocked_by_neg_veto,
         "n_no_candidates": n_no_candidates,
         "n_small_entity_fallback": n_small_entity_fallback,
@@ -2225,7 +2355,7 @@ def reassign_unassigned_grid_pool(
     }
 
 
-def pre_stage2_rescue(
+def guarded_rescue(
     df: pd.DataFrame,
     aux: dict,
     *,
@@ -2251,11 +2381,17 @@ def pre_stage2_rescue(
     witness_cap: int = 3,
     witness_small_component_cap_divisor: int = 2,
     witness_tiebreak: str = "gene_fit",
+    # Opt-in: propagate off-panel (zero-PMI) proximity assignment into this
+    # standard rescue pass (Main + Post-Group). See
+    # ``reassign_unassigned_grid_pool.offpanel_first_entity``.
+    offpanel_first_entity: bool = False,
     pos_npmi_threshold=None,  # deprecated; ignored. Kept for back-compat.
 ) -> tuple[pd.DataFrame, int, int, dict]:
-    """Pre-Stage-2 rescue: tight-scale NPMI-categorical reassignment of
+    """Guarded rescue: tight-scale NPMI-categorical reassignment of
     Stage-1-pruned transcripts, guarded by a same-bin same-gene cluster
-    check that preserves potential novel UNASSIGNED_* components.
+    check that preserves potential novel UNASSIGNED_* components. Runs at
+    Rescue, Post-Group Rescue, and the NOSEG equivalent (formerly named
+    ``pre_stage2_rescue``).
 
     Algorithm
     ---------
@@ -2347,6 +2483,7 @@ def pre_stage2_rescue(
         witness_cap=witness_cap,
         witness_small_component_cap_divisor=witness_small_component_cap_divisor,
         witness_tiebreak=witness_tiebreak,
+        offpanel_first_entity=offpanel_first_entity,
     )
 
     # Restore: any tx still holding SHIELD_LABEL after rescue → reset to
@@ -2374,6 +2511,18 @@ def pre_stage2_rescue(
     return df_out, n_reassigned, n_skipped, stats
 
 
+@_deprecated("renamed to guarded_rescue")
+def pre_stage2_rescue(*args, **kwargs):
+    """Deprecated alias for :func:`guarded_rescue`.
+
+    The "pre_stage2" name predates the numbered-stage retirement — this
+    guard-wrapper runs at three points (Rescue, Post-Group Rescue, and via
+    the NOSEG path), none of which is "stage 2". Use ``guarded_rescue``.
+    """
+    return guarded_rescue(*args, **kwargs)
+
+
+@_deprecated("unused legacy variant; use reassign_unassigned_grid_pool / guarded_rescue")
 def reassign_unassigned_to_nearest_tx_no_neg(
     df: pd.DataFrame,
     aux: dict,
@@ -2595,6 +2744,7 @@ def reassign_unassigned_to_nearest_tx_no_neg(
     }
 
 
+@_deprecated("unused legacy variant; use reassign_unassigned_grid_pool / guarded_rescue")
 def reassign_unassigned_to_nearby_entities_fast(
     df_spatial: pd.DataFrame,
     entity_summary: pd.DataFrame = None,

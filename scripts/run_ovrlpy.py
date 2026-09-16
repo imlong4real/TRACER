@@ -58,7 +58,7 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--transcripts", required=True, type=Path,
                    help="Method-output transcripts parquet (post).")
     p.add_argument("--label-col", default=None,
-                   help="Label column (default: auto-detect 'stitched' then 'cell_id').")
+                   help="Label column (default: auto-detect 'tracer_id', then 'stitched', then 'cell_id').")
     p.add_argument("--transcripts-pre", type=Path, default=None,
                    help="Optional pre-method transcripts for paired pre/post analysis.")
     p.add_argument("--pre-label-col", default="cell_id")
@@ -186,7 +186,7 @@ def detect_label_col(df: pd.DataFrame, requested: str | None) -> str:
         if requested not in df.columns:
             raise SystemExit(f"--label-col {requested!r} not in transcripts.")
         return requested
-    for c in ("stitched", "cell_id"):
+    for c in ("tracer_id", "stitched", "cell_id"):
         if c in df.columns:
             return c
     raise SystemExit(

@@ -62,7 +62,7 @@ from run_rctd_tracer_overlap import (  # noqa: E402
     build_lineage_signature, poisson_em_deconvolution, rctd_metrics,
 )
 from tracer.metrics import (  # noqa: E402
-    build_npmi_matrix, build_cell_gene_matrix, compute_cell_conflict_relu,
+    build_pmi_matrix, build_cell_gene_matrix, compute_cell_coherence,
 )
 import ovrlpy_param_sweep_atera as ops  # noqa: E402  (run_ovrlpy, morans_i, auroc)
 
@@ -138,7 +138,7 @@ class Resources:
         npmi_long["gene_i"] = npmi_long["gene_i"].astype(str)
         npmi_long["gene_j"] = npmi_long["gene_j"].astype(str)
         self.npmi_long = npmi_long
-        self.npmi_mat, self.npmi_genes = build_npmi_matrix(npmi_long)
+        self.npmi_mat, self.npmi_genes = build_pmi_matrix(npmi_long)
         self.npmi_gene_set = set(map(str, self.npmi_genes))
         log.info("TRACER NPMI matrix: %d genes", len(self.npmi_genes))
 
@@ -215,9 +215,9 @@ def score_tracer(df: pl.DataFrame, res: Resources, *, tau: float,
         cell_col="cell_id")
     if len(cell_ids) == 0:
         return pd.DataFrame(columns=["cell_id", "tracer_relconflict"])
-    _conf, _is, _thr, cdf = compute_cell_conflict_relu(
-        M=M, col_idx=col_idx, npmi_mat=res.npmi_mat, tau=tau,
-        cell_ids=cell_ids, conflict_percentile=conflict_percentile)
+    _, _, _, cdf = compute_cell_coherence(
+        M=M, col_idx=col_idx, npmi_mat=res.npmi_mat, threshold=tau,
+        cell_ids=cell_ids)
     out = cdf[["cell_id", "relative_conflict"]].rename(
         columns={"relative_conflict": "tracer_relconflict"})
     out["cell_id"] = out["cell_id"].astype(str)

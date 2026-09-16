@@ -70,7 +70,7 @@ def _fingerprint(df_out, progression, gt) -> dict:
     """Compute the fingerprint dict to compare against the reference."""
     from tracer._etype import infer_etype_from_label
 
-    s = df_out["stitched"].astype(str)
+    s = df_out["tracer_id"].astype(str)
     if "_etype" in df_out.columns:
         etypes = df_out["_etype"].astype(str)
     else:
@@ -135,6 +135,71 @@ def test_regression_noseg(synthetic_inputs):
     assert_matches_reference("noseg", fp, tol)
 
 
+OFFPANEL_DROP = 3   # genes present in transcripts but absent from the panel
+
+
+@pytest.fixture(scope="module")
+def offpanel_inputs(synthetic_inputs):
+    """Same transcripts, but a panel that omits some of their genes.
+
+    This is the shape the off-panel rescue targets: housekeeping genes such
+    as ACTB self-eliminate from a PMI panel (ubiquitous co-detection carries
+    no information), so their transcripts exist in the data with no PMI edge
+    to anything. Every PMI-driven gate is a no-op on them, and before
+    ``RescueConfig.offpanel_first_entity`` they could never be rescued and
+    were discarded at Finalize.
+
+    The stock ``synthetic_inputs`` panel covers the full gene vocabulary, so
+    it cannot exercise that path at all -- which is exactly why the existing
+    references do not move when the behaviour changes.
+    """
+    df, panel, gt = synthetic_inputs
+    genes = sorted(set(df["feature_name"].astype(str)))
+    dropped = set(genes[:OFFPANEL_DROP])
+    slim = panel[~panel["gene_i"].isin(dropped) & ~panel["gene_j"].isin(dropped)]
+    return df, slim.reset_index(drop=True), gt, sorted(dropped)
+
+
+def test_regression_segmented_offpanel(offpanel_inputs):
+    """Guards the off-panel (zero-PMI) rescue and the entity accounting around
+    it. Transcripts of the dropped genes carry no PMI evidence whatsoever, so
+    their fate is decided purely by whether off-panel proximity assignment is
+    enabled -- making this fingerprint sensitive to a default the other
+    regression variants cannot see.
+
+    What this fixture currently pins (vs. the pre-``offpanel_first_entity``
+    behaviour), and why it is worth keeping:
+
+    * ``n_unassigned_tx`` 37 -> 16, ``coverage_pct`` 81.5 -> 92.0. The change
+      lands entirely in Post-Group Rescue; every earlier stage is identical.
+    * It is strictly additive to the existing partition: all 163 already-
+      assigned transcripts keep their exact label, and ARI restricted to that
+      identical subset is unchanged at 0.9185.
+    * But whole-fixture ``ari_vs_truth`` FALLS 0.9185 -> 0.7759, because all
+      21 newly-assigned transcripts belong to synthetic cell "3" -- a cell
+      neither branch manages to reconstruct (``n_cells`` is 7, not 8, on both
+      sides). With no "cell 3" entity in their Moore neighborhood to rejoin,
+      proximity assignment scatters them across cells 1/4/5/7, so 0 of 21 land
+      in their true cell.
+
+    That is the failure mode this snapshot exists to keep visible: when a cell
+    is dissolved upstream, off-panel proximity rescue converts a clean
+    "unassigned" signal into false-positive assignments in its neighbours --
+    which is the contamination TRACER exists to remove. The fixture is
+    deliberately harsh (3 of 12 genes dropped), so the ratio is not a
+    prediction for real panels; the behaviour it exposes is the point.
+    """
+    df, panel, gt, dropped = offpanel_inputs
+    panel_genes = set(panel["gene_i"]) | set(panel["gene_j"])
+    assert set(dropped) and not (set(dropped) & panel_genes)
+    assert df["feature_name"].isin(dropped).any()
+
+    df_out, prog = run_segmented_pipeline(df, panel)
+    fp = _fingerprint(df_out, prog, gt)
+    tol = {**TOLERANCES_COUNTS, **TOLERANCES_PARTITION}
+    assert_matches_reference("segmented_offpanel", fp, tol)
+
+
 def test_regression_segmented_section():
     """Regression on tissue-section-extracted slab. Different fingerprint
     than full-volume run because clipped cells lose tx."""
@@ -156,8 +221,8 @@ def test_regression_seg_vs_noseg(synthetic_inputs):
     seg_out, _ = run_segmented_pipeline(df, panel)
     noseg_out, _ = run_noseg_pipeline(df, panel)
 
-    seg_lbl = seg_out.set_index("transcript_id")["stitched"].astype(str)
-    noseg_lbl = noseg_out.set_index("transcript_id")["stitched"].astype(str)
+    seg_lbl = seg_out.set_index("transcript_id")["tracer_id"].astype(str)
+    noseg_lbl = noseg_out.set_index("transcript_id")["tracer_id"].astype(str)
     idx = seg_lbl.index.intersection(noseg_lbl.index)
     a = seg_lbl.loc[idx]
     b = noseg_lbl.loc[idx]
