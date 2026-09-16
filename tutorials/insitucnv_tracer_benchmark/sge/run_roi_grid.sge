@@ -1,0 +1,31 @@
+#!/bin/bash
+#$ -cwd
+#$ -j y
+#$ -l h_vmem=64G
+#$ -l h_rt=24:00:00
+#$ -o logs/insitucnv_tracer_roi_grid.log
+
+set -euo pipefail
+
+REPO=${REPO:-/mnt/storage/dept/medonc/beroukhim/youyun/BTC_GBM/code/TRACER}
+MANIFEST=${MANIFEST:-tutorials/insitucnv_tracer_benchmark/manifests/run_manifest.csv}
+TASK_ID=${SGE_TASK_ID:-1}
+
+cd "$REPO"
+
+python - <<'PY'
+import os
+import pandas as pd
+
+manifest = os.environ["MANIFEST"]
+task_id = int(os.environ["TASK_ID"])
+df = pd.read_csv(manifest)
+if task_id < 1 or task_id > len(df):
+    raise SystemExit(f"SGE_TASK_ID {task_id} outside manifest length {len(df)}")
+row = df.iloc[task_id - 1]
+print(row.to_json(indent=2))
+PY
+
+echo "This template intentionally prints the selected manifest row only."
+echo "Wire project-specific conda/module activation before running full TRACER/InSituCNV commands."
+

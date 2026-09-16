@@ -1,0 +1,3 @@
+run_id,roi_id,panel_size,detection_fraction,transcripts,panel,raw_outdir,tracer_outdir,insitucnv_raw_outdir,insitucnv_tracer_whole_outdir,insitucnv_tracer_all_outdir
+pilot_full_100,pilot_roi,full,1.0,output/runs/pilot_full_100/transcripts.parquet,output/panels/panel_full.txt,output/runs/pilot_full_100/raw,output/runs/pilot_full_100/tracer,output/runs/pilot_full_100/insitucnv_raw,output/runs/pilot_full_100/insitucnv_tracer_whole,output/runs/pilot_full_100/insitucnv_tracer_all
+

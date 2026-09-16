@@ -1,0 +1,26 @@
+name: insitucnv_tracer_benchmark
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.11
+  - pip
+  - anndata>=0.10,<0.12
+  - h5py
+  - numpy>=1.26
+  - pandas>=2.1
+  - pyarrow
+  - scanpy>=1.10
+  - scvelo>=0.3.3
+  - leidenalg
+  - python-igraph
+  - scikit-learn>=1.4
+  - scipy
+  - matplotlib>=3.8
+  - seaborn>=0.13
+  - tqdm
+  - pyyaml
+  - pip:
+      - infercnvpy>=0.6.0
+      - git+https://github.com/Moldia/InSituCNV.git
+

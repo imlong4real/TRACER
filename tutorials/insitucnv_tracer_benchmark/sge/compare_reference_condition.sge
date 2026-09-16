@@ -1,0 +1,46 @@
+#!/bin/bash
+#$ -S /bin/bash
+#$ -N insitucnv_ref_compare
+#$ -cwd
+#$ -j y
+#$ -o logs/$JOB_NAME.$JOB_ID.log
+#$ -l h_rt=1:00:00
+#$ -l mem_free=16G
+
+# Stage 4: compare raw vs TRACER CNV for the reference condition (run after BOTH
+# run_insitucnv_reference.sge arms finish). Conda env (matplotlib/pandas).
+#
+#   qsub tutorials/insitucnv_tracer_benchmark/sge/compare_reference_condition.sge
+
+set -euo pipefail
+
+REPO=${REPO:-/mnt/storage/dept/medonc/beroukhim/youyun/BTC_GBM/code/TRACER}
+BENCH=$REPO/tutorials/insitucnv_tracer_benchmark
+RUN=${RUN:-pilot_full_100}
+RUNDIR=$BENCH/output/runs/$RUN
+
+RAW_DIR=${RAW_DIR:-$RUNDIR/insitucnv_raw}
+TRACER_DIR=${TRACER_DIR:-$RUNDIR/insitucnv_tracer_whole}
+OUTDIR=${OUTDIR:-$RUNDIR/compare}
+
+for d in "$RAW_DIR" "$TRACER_DIR"; do
+    [[ -f "$d/chrom_cnv_by_compartment.csv" ]] || {
+        echo "Missing $d/chrom_cnv_by_compartment.csv (run both InSituCNV arms first)" >&2
+        exit 1; }
+done
+
+mkdir -p "$REPO/logs" "$OUTDIR"
+cd "$REPO"
+
+source /mnt/storage/dept/medonc/beroukhim/youyun/util/miniforge3/etc/profile.d/conda.sh
+conda activate insitucnv_tracer_benchmark
+
+export PYTHONUNBUFFERED=1
+export KMP_DUPLICATE_LIB_OK=TRUE
+
+python "$BENCH/scripts/compare_reference_condition.py" \
+    --raw-dir "$RAW_DIR" \
+    --tracer-dir "$TRACER_DIR" \
+    --outdir "$OUTDIR"
+
+echo "Comparison written to $OUTDIR"

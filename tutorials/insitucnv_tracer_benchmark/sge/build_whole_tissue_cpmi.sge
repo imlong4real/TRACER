@@ -1,0 +1,156 @@
+#!/bin/bash
+#$ -S /bin/bash
+#$ -N insitucnv_tracer_cpmi
+#$ -cwd
+#$ -j y
+#$ -o logs/$JOB_NAME.$JOB_ID.log
+#$ -pe smp 4
+#$ -l h_rt=72:00:00
+#$ -l mem_free=128G
+
+# Build a subsampled whole-tissue CPMI panel for TRACER.
+#
+# Default:
+#   qsub tutorials/insitucnv_tracer_benchmark/sge/build_whole_tissue_cpmi.sge
+# writes:
+#   data/whole_tissue_cpmi_nuclear_50k.csv.gz
+#
+# Whole-cell comparison:
+#   qsub -v COUNT_SCOPE=whole_cell tutorials/insitucnv_tracer_benchmark/sge/build_whole_tissue_cpmi.sge
+# writes:
+#   data/whole_tissue_cpmi_whole_cell_50k.csv.gz
+#
+# Common overrides:
+#   COUNT_SCOPE=nuclear|whole_cell, SUBSAMPLE=50000, QV_MIN=20, MIN_OCC=1,
+#   MIN_DET_CELLS=25, TOP_K_PER_GENE=200, PANEL_GENES=/path/genes.txt,
+#   MAX_ROW_GROUPS=10, DRY_RUN=1, OUT=/path/panel.csv.gz.
+
+set -euo pipefail
+
+REPO=${REPO:-/mnt/storage/dept/medonc/beroukhim/youyun/BTC_GBM/code/TRACER}
+REPO=$(readlink -f "$REPO")
+SIF=${SIF:-$REPO/tracer_latest.sif}
+BENCH=$REPO/tutorials/insitucnv_tracer_benchmark
+
+if [[ ! -f "$SIF" ]]; then
+    echo "Missing TRACER container: $SIF" >&2
+    echo "Set SIF=/path/to/tracer_latest.sif or place tracer_latest.sif under \$REPO." >&2
+    exit 1
+fi
+SIF=$(readlink -f "$SIF")
+
+TRANSCRIPTS=${TRANSCRIPTS:-$BENCH/data/xenium_ovary/raw/Xenium_Prime_Human_Ovary_FF_transcripts.parquet}
+TRANSCRIPTS=$(readlink -f "$TRANSCRIPTS")
+ROI=${ROI:-$BENCH/data/roi_transcripts.parquet}
+ROI=$(readlink -f "$ROI")
+
+COUNT_SCOPE=${COUNT_SCOPE:-nuclear}
+SUBSAMPLE=${SUBSAMPLE:-50000}
+QV_MIN=${QV_MIN:-20}
+MIN_OCC=${MIN_OCC:-1}
+MIN_DET_CELLS=${MIN_DET_CELLS:-25}
+N_DEPTH_BINS=${N_DEPTH_BINS:-25}
+MIN_COOCCUR=${MIN_COOCCUR:-2}
+MIN_EXPECTED_NEG=${MIN_EXPECTED_NEG:-5}
+MAX_OBSERVED_NEG=${MAX_OBSERVED_NEG:-1}
+NEG_RECOVERY_TOP_M=${NEG_RECOVERY_TOP_M:-2500}
+TOP_K_PER_GENE=${TOP_K_PER_GENE:-}
+PANEL_GENES=${PANEL_GENES:-}
+MAX_ROW_GROUPS=${MAX_ROW_GROUPS:-0}
+DRY_RUN=${DRY_RUN:-0}
+SEED=${SEED:-1}
+
+if [[ -z "${OUT:-}" ]]; then
+    if [[ "$SUBSAMPLE" == "0" ]]; then
+        SUBSAMPLE_LABEL=all
+    elif [[ "$SUBSAMPLE" == "50000" ]]; then
+        SUBSAMPLE_LABEL=50k
+    else
+        SUBSAMPLE_LABEL=$SUBSAMPLE
+    fi
+    OUT=$BENCH/data/whole_tissue_cpmi_${COUNT_SCOPE}_${SUBSAMPLE_LABEL}.csv.gz
+fi
+mkdir -p "$(dirname "$OUT")"
+OUT_DIR=$(readlink -f "$(dirname "$OUT")")
+OUT=$OUT_DIR/$(basename "$OUT")
+if [[ -n "$PANEL_GENES" ]]; then
+    PANEL_GENES=$(readlink -f "$PANEL_GENES")
+fi
+
+mkdir -p "$REPO/logs" "$(dirname "$OUT")"
+cd "$REPO"
+
+export PYTHONUNBUFFERED=1
+export OMP_NUM_THREADS=${NSLOTS:-1}
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+
+APPTAINER_CONDA_BASE=${APPTAINER_CONDA_BASE:-/mnt/storage/dept/medonc/beroukhim/youyun/util/miniforge3}
+APPTAINER_CONDA_ENV=${APPTAINER_CONDA_ENV:-segmentation}
+source "$APPTAINER_CONDA_BASE/etc/profile.d/conda.sh"
+conda activate "$APPTAINER_CONDA_ENV"
+if ! command -v apptainer >/dev/null 2>&1; then
+    echo "apptainer not found after conda activate $APPTAINER_CONDA_ENV" >&2
+    exit 127
+fi
+
+echo "Transcripts         : $TRANSCRIPTS"
+echo "Count scope         : $COUNT_SCOPE"
+echo "Out                 : $OUT"
+echo "ROI seed check      : $ROI"
+echo "qv_min=$QV_MIN min_occ=$MIN_OCC subsample=$SUBSAMPLE min_det_cells=$MIN_DET_CELLS seed=$SEED"
+echo "n_depth_bins=$N_DEPTH_BINS min_cooccur=$MIN_COOCCUR min_expected_neg=$MIN_EXPECTED_NEG max_observed_neg=$MAX_OBSERVED_NEG neg_recovery_top_m=$NEG_RECOVERY_TOP_M top_k_per_gene=${TOP_K_PER_GENE:-none}"
+echo "panel_genes=${PANEL_GENES:-none} max_row_groups=$MAX_ROW_GROUPS dry_run=$DRY_RUN"
+
+CPMI_ARGS=(
+    python tutorials/insitucnv_tracer_benchmark/scripts/build_whole_tissue_cpmi.py
+    --transcripts "$TRANSCRIPTS"
+    --out "$OUT"
+    --count-scope "$COUNT_SCOPE"
+    --qv-min "$QV_MIN"
+    --min-occurrences "$MIN_OCC"
+    --subsample-cells "$SUBSAMPLE"
+    --min-det-cells "$MIN_DET_CELLS"
+    --n-depth-bins "$N_DEPTH_BINS"
+    --min-cooccur "$MIN_COOCCUR"
+    --min-expected-neg "$MIN_EXPECTED_NEG"
+    --max-observed-neg "$MAX_OBSERVED_NEG"
+    --neg-recovery-top-m "$NEG_RECOVERY_TOP_M"
+    --max-row-groups "$MAX_ROW_GROUPS"
+    --seed "$SEED"
+)
+
+if [[ -n "$TOP_K_PER_GENE" && "$TOP_K_PER_GENE" != "0" ]]; then
+    CPMI_ARGS+=(--top-k-per-gene "$TOP_K_PER_GENE")
+fi
+if [[ -n "$PANEL_GENES" ]]; then
+    CPMI_ARGS+=(--panel-genes "$PANEL_GENES")
+fi
+if [[ "$DRY_RUN" == "1" ]]; then
+    CPMI_ARGS+=(--dry-run)
+fi
+
+apptainer exec \
+    --bind /mnt/storage:/mnt/storage \
+    --pwd "$REPO" \
+    "$SIF" \
+    "${CPMI_ARGS[@]}"
+
+if [[ "$DRY_RUN" == "1" ]]; then
+    echo "DRY_RUN=1: skipping ROI seed-support check because no panel was written."
+    exit 0
+fi
+
+# Acceptance gate: per-seed positive panel support on the ROI. For CPMI panels,
+# the TRACER-compatible PMI column stores cPMI.
+apptainer exec \
+    --bind /mnt/storage:/mnt/storage \
+    --pwd "$REPO" \
+    "$SIF" \
+    python tutorials/insitucnv_tracer_benchmark/scripts/check_panel_seed_support.py \
+        --panel "$OUT" \
+        --transcripts "$ROI" \
+        --metric-col PMI \
+        --qv-min "$QV_MIN" \
+        --out "$OUT.seed_support.json"

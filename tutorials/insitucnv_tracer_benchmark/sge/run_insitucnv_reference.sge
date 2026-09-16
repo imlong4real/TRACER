@@ -1,0 +1,96 @@
+#!/bin/bash
+#$ -S /bin/bash
+#$ -N insitucnv_ref_arm
+#$ -cwd
+#$ -j y
+#$ -o logs/$JOB_NAME.$JOB_ID.log
+#$ -pe smp 4
+#$ -l h_rt=12:00:00
+#$ -l mem_free=64G
+
+# Stage 3: run InSituCNV on ONE arm of the reference condition, then plot it.
+# Runs in the conda env (infercnvpy/insitucnv/scvelo are NOT in tracer_latest.sif;
+# see MEMORY "Container deps via main"). Create once:
+#   conda env create -f tutorials/insitucnv_tracer_benchmark/insitucnv_env.yml
+#
+# Chains, for ARM in {raw, tracer_whole}:
+#   annotate_entities.py  ->  run_insitucnv_arm.py  ->  plot_cnv_arm.py
+#
+#   qsub -v ARM=raw          tutorials/insitucnv_tracer_benchmark/sge/run_insitucnv_reference.sge
+#   qsub -v ARM=tracer_whole tutorials/insitucnv_tracer_benchmark/sge/run_insitucnv_reference.sge
+
+set -euo pipefail
+
+REPO=${REPO:-/mnt/storage/dept/medonc/beroukhim/youyun/BTC_GBM/code/TRACER}
+BENCH=$REPO/tutorials/insitucnv_tracer_benchmark
+ARM="${ARM:?Set ARM=raw or ARM=tracer_whole}"
+RUN=${RUN:-pilot_full_100}
+RUNDIR=$BENCH/output/runs/$RUN
+
+ROI=${ROI:-$BENCH/data/roi_transcripts.parquet}
+TRACER_REFINED=${TRACER_REFINED:-$RUNDIR/tracer/outputs/transcripts_tracer_refined.parquet}
+GENEPOS=${GENEPOS:-$BENCH/data/gene_positions_grch38.tsv}
+MARKERS=${MARKERS:-$BENCH/config/panels.yaml}
+MIN_TX=${MIN_TX:-20}
+MIN_GENES=${MIN_GENES:-10}
+
+# Arm-specific inputs. Raw uses the original ROI (cell_id segmentation); TRACER
+# uses the refined parquet whose final label column is "stitched" (also carries
+# _etype for the whole/partial split). run_insitucnv_arm resolves the entity col.
+case "$ARM" in
+    raw)
+        TX=$ROI;             ENTITY_COL=cell_id ;;
+    tracer_whole)
+        TX=$TRACER_REFINED;  ENTITY_COL=stitched ;;
+    *)
+        echo "ARM must be raw or tracer_whole, got: $ARM" >&2; exit 1 ;;
+esac
+
+ANNOT=$RUNDIR/annotations_${ARM}.csv
+INSITU_OUT=$RUNDIR/insitucnv_${ARM}
+
+for f in "$TX" "$GENEPOS" "$MARKERS"; do
+    [[ -f "$f" ]] || { echo "Missing input: $f" >&2; exit 1; }
+done
+
+mkdir -p "$REPO/logs" "$INSITU_OUT"
+cd "$REPO"
+
+source /mnt/storage/dept/medonc/beroukhim/youyun/util/miniforge3/etc/profile.d/conda.sh
+conda activate insitucnv_tracer_benchmark
+
+export PYTHONUNBUFFERED=1
+export OMP_NUM_THREADS=${NSLOTS:-1}
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+export KMP_DUPLICATE_LIB_OK=TRUE
+
+echo "ARM=$ARM  transcripts=$TX  entity_col=$ENTITY_COL"
+
+# 1) Marker-based entity annotation (lowercase labels: epithelial, t_cell, ...),
+#    which match run_insitucnv_arm's reference/tumor defaults.
+python "$BENCH/scripts/annotate_entities.py" \
+    --transcripts "$TX" \
+    --entity-col "$ENTITY_COL" \
+    --config "$MARKERS" \
+    --out "$ANNOT"
+
+# 2) InSituCNV (infercnvpy) for this arm.
+python "$BENCH/scripts/run_insitucnv_arm.py" \
+    --transcripts "$TX" \
+    --arm "$ARM" \
+    --outdir "$INSITU_OUT" \
+    --gene-positions "$GENEPOS" \
+    --annotations "$ANNOT" \
+    --min-transcripts "$MIN_TX" \
+    --min-genes "$MIN_GENES"
+
+# 3) Per-arm UMAP + dotplot-by-clone + per-clone chromosome CNV heatmap.
+python "$BENCH/scripts/plot_cnv_arm.py" \
+    --adata "$INSITU_OUT/adata_cnv.h5ad" \
+    --marker-config "$MARKERS" \
+    --label "$ARM" \
+    --outdir "$INSITU_OUT/plots"
+
+echo "Done arm=$ARM -> $INSITU_OUT"

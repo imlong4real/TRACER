@@ -1,0 +1,26 @@
+# WIP pilot grid. Expand after ROI smoke succeeds.
+seed: 1
+detection_fractions: [1.0, 0.5, 0.2, 0.1]
+panel_sizes: [full, 2000, 1000, 500]
+
+qc:
+  primary_min_transcripts: 20
+  primary_min_genes: 10
+  sensitivity_min_transcripts: 10
+  sensitivity_min_genes: 5
+
+insitucnv:
+  reference_classes:
+    - Monocytes
+    - B cells
+    - T cells
+    - Endothelial
+    - Fibroblasts
+    - Mesothelial
+  tumor_prefixes:
+    - Epithelial
+    - Tumor
+    - Malignant
+  window_size: 60
+  cluster_resolution: 0.4
+

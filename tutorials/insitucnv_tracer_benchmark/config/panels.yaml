@@ -1,0 +1,63 @@
+# Marker-preserving panel recipe for the ovarian Xenium Prime pilot.
+#
+# Panel construction keeps all marker genes first, then fills remaining slots
+# with chromosome-balanced genes that have genomic positions. Add or edit marker
+# sets once the ovarian full-data annotation labels are locked.
+
+marker_sets:
+  epithelial:
+    - EPCAM
+    - KRT8
+    - KRT18
+    - KRT19
+    - MSLN
+    - PAX8
+    - MUC16
+  t_cell:
+    - CD3D
+    - CD3E
+    - TRAC
+    - CD4
+    - CD8A
+    - CD8B
+  b_cell:
+    - MS4A1
+    - CD79A
+    - CD79B
+    - MZB1
+  myeloid:
+    - LST1
+    - TYROBP
+    - LYZ
+    - C1QA
+    - C1QB
+    - FCGR3A
+  fibroblast:
+    - COL1A1
+    - COL1A2
+    - DCN
+    - LUM
+  endothelial:
+    - PECAM1
+    - VWF
+    - KDR
+    - EMCN
+
+priority_genes:
+  - TP53
+  - BRCA1
+  - BRCA2
+  - CCNE1
+  - MYC
+  - ERBB2
+  - KRAS
+  - PIK3CA
+  - PTEN
+  - RB1
+
+panel_sizes:
+  - full
+  - 2000
+  - 1000
+  - 500
+

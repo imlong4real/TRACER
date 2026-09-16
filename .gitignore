@@ -9,6 +9,8 @@
 # macOS / editor junk
 .DS_Store
 **/.DS_Store
+._*
+**/._*
 
 # Python
 __pycache__/
@@ -33,7 +35,16 @@ datasets/
 outputs/
 output/
 cache/
-tutorials/
+tutorials/*
+!tutorials/insitucnv_tracer_benchmark/
+!tutorials/insitucnv_tracer_benchmark/**
+tutorials/insitucnv_tracer_benchmark/**/._*
+tutorials/insitucnv_tracer_benchmark/data/
+tutorials/insitucnv_tracer_benchmark/output/
+tutorials/insitucnv_tracer_benchmark/**/__pycache__/
+
+# Container images (apptainer/singularity) - multi-GB, never versioned
+*.sif
 
 # Large data files
 **/data/*.parquet

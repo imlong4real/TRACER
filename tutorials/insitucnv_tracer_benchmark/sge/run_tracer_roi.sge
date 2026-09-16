@@ -1,0 +1,86 @@
+#!/bin/bash
+#$ -S /bin/bash
+#$ -N insitucnv_tracer_roi
+#$ -cwd
+#$ -j y
+#$ -o logs/$JOB_NAME.$JOB_ID.log
+#$ -pe smp 4
+#$ -l h_rt=48:00:00
+#$ -l mem_free=128G
+
+# Stage 2: run TRACER on the ROI transcripts, using a whole-tissue gene-pair
+# panel from stage 1. For the current benchmark default, this is the nuclear
+# 50k CPMI panel. Runs INSIDE tracer_latest.sif (Apptainer).
+#
+#   qsub tutorials/insitucnv_tracer_benchmark/sge/run_tracer_roi.sge
+# Overridable: TRANSCRIPTS, PANEL (or legacy NPMI), OUTDIR, SAMPLE, PLATFORM, SEED.
+
+set -euo pipefail
+
+REPO=${REPO:-/mnt/storage/dept/medonc/beroukhim/youyun/BTC_GBM/code/TRACER}
+REPO=$(readlink -f "$REPO")
+SIF=${SIF:-$REPO/tracer_latest.sif}
+BENCH=$REPO/tutorials/insitucnv_tracer_benchmark
+CONTAINER_APP_DIR=${CONTAINER_APP_DIR:-/app}
+
+if [[ ! -f "$SIF" ]]; then
+    echo "Missing TRACER container: $SIF" >&2
+    echo "Set SIF=/path/to/tracer_latest.sif or place tracer_latest.sif under \$REPO." >&2
+    exit 1
+fi
+SIF=$(readlink -f "$SIF")
+
+TRANSCRIPTS=${TRANSCRIPTS:-$BENCH/data/roi_transcripts.parquet}
+PANEL=${PANEL:-${NPMI:-$BENCH/data/whole_tissue_cpmi_nuclear_50k.csv.gz}}
+OUTDIR=${OUTDIR:-$BENCH/output/runs/pilot_full_100/tracer}
+SAMPLE=${SAMPLE:-pilot_roi}
+PLATFORM=${PLATFORM:-xenium}
+SEED=${SEED:-1}
+
+TRANSCRIPTS=$(readlink -f "$TRANSCRIPTS")
+PANEL=$(readlink -f "$PANEL")
+mkdir -p "$OUTDIR"
+OUTDIR=$(readlink -f "$OUTDIR")
+
+if [[ ! -f "$PANEL" ]]; then
+    echo "Missing gene-pair panel: $PANEL  (run build_whole_tissue_cpmi.sge first)" >&2
+    exit 1
+fi
+
+mkdir -p "$REPO/logs" "$OUTDIR"
+cd "$REPO"
+
+export PYTHONUNBUFFERED=1
+export OMP_NUM_THREADS=${NSLOTS:-1}
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+
+APPTAINER_CONDA_BASE=${APPTAINER_CONDA_BASE:-/mnt/storage/dept/medonc/beroukhim/youyun/util/miniforge3}
+APPTAINER_CONDA_ENV=${APPTAINER_CONDA_ENV:-segmentation}
+source "$APPTAINER_CONDA_BASE/etc/profile.d/conda.sh"
+conda activate "$APPTAINER_CONDA_ENV"
+if ! command -v apptainer >/dev/null 2>&1; then
+    echo "apptainer not found after conda activate $APPTAINER_CONDA_ENV" >&2
+    exit 127
+fi
+
+echo "Transcripts : $TRANSCRIPTS"
+echo "Panel       : $PANEL"
+echo "Outdir      : $OUTDIR"
+echo "Container app dir: $CONTAINER_APP_DIR"
+
+apptainer exec \
+    --bind /mnt/storage:/mnt/storage \
+    --pwd "$CONTAINER_APP_DIR" \
+    "$SIF" \
+    python "$CONTAINER_APP_DIR/scripts/run_tracer.py" \
+        --transcripts "$TRANSCRIPTS" \
+        --npmi "$PANEL" \
+        --platform "$PLATFORM" \
+        --outdir "$OUTDIR" \
+        --sample-name "$SAMPLE" \
+        --seed "$SEED" \
+        --overwrite
+
+echo "TRACER refined transcripts: $OUTDIR/outputs/transcripts_tracer_refined.parquet"

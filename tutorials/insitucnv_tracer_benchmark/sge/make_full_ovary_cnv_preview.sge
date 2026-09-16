@@ -1,0 +1,99 @@
+#!/bin/bash
+#$ -cwd
+#$ -j y
+#$ -l mem_free=192G
+#$ -l h_rt=72:00:00
+#$ -o logs/insitucnv_tracer_full_ovary_cnv_preview.log
+
+set -euo pipefail
+
+REPO=${REPO:-/mnt/storage/dept/medonc/beroukhim/youyun/BTC_GBM/code/TRACER}
+BENCH_DIR="$REPO/tutorials/insitucnv_tracer_benchmark"
+OUTDIR=${OUTDIR:-$BENCH_DIR/output/full_ovary_cnv_preview}
+CELLTYPING_H5AD=${CELLTYPING_H5AD:-$BENCH_DIR/output/full_ovary_celltyping/adata_annotated.h5ad}
+GENE_POSITIONS=${GENE_POSITIONS:-$BENCH_DIR/data/gene_positions_grch38.tsv}
+MAX_CELLS=${MAX_CELLS:-}
+DRY_RUN=${DRY_RUN:-0}
+WRITE_H5AD=${WRITE_H5AD:-0}
+SMOOTHING_GRAPH=${SMOOTHING_GRAPH:-existing}
+SMOOTHING_NEIGHBORS=${SMOOTHING_NEIGHBORS:-200}
+EXPRESSION_NEIGHBORS=${EXPRESSION_NEIGHBORS:-15}
+NEIGHBOR_N_PCS=${NEIGHBOR_N_PCS:-50}
+CNV_RESOLUTION=${CNV_RESOLUTION:-0.4}
+EPI_CNV_RESOLUTION=${EPI_CNV_RESOLUTION:-0.2}
+MIN_EPI_CLONE_PCT=${MIN_EPI_CLONE_PCT:-0.1}
+BENCH_PYTHON=${BENCH_PYTHON:-}
+CONDA_BASE=${CONDA_BASE:-/mnt/storage/dept/medonc/beroukhim/youyun/util/miniforge3}
+
+mkdir -p "$REPO/logs" "$OUTDIR"
+cd "$REPO"
+
+if [[ -n "$BENCH_PYTHON" ]]; then
+    PYTHON="$BENCH_PYTHON"
+elif command -v conda >/dev/null 2>&1; then
+    set +u
+    source "$(conda info --base)/etc/profile.d/conda.sh"
+    conda activate insitucnv_tracer_benchmark
+    set -u
+    PYTHON=python
+elif [[ -n "$CONDA_BASE" && -f "$CONDA_BASE/etc/profile.d/conda.sh" ]]; then
+    set +u
+    source "$CONDA_BASE/etc/profile.d/conda.sh"
+    conda activate insitucnv_tracer_benchmark
+    set -u
+    PYTHON=python
+elif [[ -f "$HOME/miniforge3/etc/profile.d/conda.sh" ]]; then
+    set +u
+    source "$HOME/miniforge3/etc/profile.d/conda.sh"
+    conda activate insitucnv_tracer_benchmark
+    set -u
+    PYTHON=python
+elif [[ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]]; then
+    set +u
+    source "$HOME/miniconda3/etc/profile.d/conda.sh"
+    conda activate insitucnv_tracer_benchmark
+    set -u
+    PYTHON=python
+elif [[ -f "$HOME/anaconda3/etc/profile.d/conda.sh" ]]; then
+    set +u
+    source "$HOME/anaconda3/etc/profile.d/conda.sh"
+    conda activate insitucnv_tracer_benchmark
+    set -u
+    PYTHON=python
+else
+    echo "[error] Could not find conda in PATH or under ~/miniforge3, ~/miniconda3, or ~/anaconda3." >&2
+    echo "[error] Submit with CONDA_BASE=/path/to/conda/base or BENCH_PYTHON=/path/to/env/bin/python." >&2
+    exit 1
+fi
+
+"$PYTHON" - <<'PY'
+import sys
+if sys.version_info < (3, 10):
+    raise SystemExit(f"Python >=3.10 is required; found {sys.version}")
+PY
+
+args=(
+    "$BENCH_DIR/scripts/make_full_ovary_cnv_preview.py"
+    --celltyping-h5ad "$CELLTYPING_H5AD"
+    --outdir "$OUTDIR"
+    --gene-positions "$GENE_POSITIONS"
+    --smoothing-graph "$SMOOTHING_GRAPH"
+    --smoothing-neighbors "$SMOOTHING_NEIGHBORS"
+    --expression-neighbors "$EXPRESSION_NEIGHBORS"
+    --neighbor-n-pcs "$NEIGHBOR_N_PCS"
+    --cnv-resolution "$CNV_RESOLUTION"
+    --epi-cnv-resolution "$EPI_CNV_RESOLUTION"
+    --min-epi-clone-pct "$MIN_EPI_CLONE_PCT"
+)
+
+if [[ -n "$MAX_CELLS" ]]; then
+    args+=(--max-cells "$MAX_CELLS")
+fi
+if [[ "$DRY_RUN" == "1" ]]; then
+    args+=(--dry-run)
+fi
+if [[ "$WRITE_H5AD" == "1" ]]; then
+    args+=(--write-h5ad)
+fi
+
+"$PYTHON" "${args[@]}"

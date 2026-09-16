@@ -1,0 +1,72 @@
+#!/bin/bash
+#$ -cwd
+#$ -j y
+#$ -l h_vmem=16G
+#$ -l h_rt=24:00:00
+#$ -o logs/insitucnv_tracer_stage_xenium_ovary.log
+
+set -euo pipefail
+
+REPO=${REPO:-/mnt/storage/dept/medonc/beroukhim/youyun/BTC_GBM/code/TRACER}
+BENCH_DIR="$REPO/tutorials/insitucnv_tracer_benchmark"
+RAW_DIR="$BENCH_DIR/data/xenium_ovary/raw"
+MANIFEST="$RAW_DIR/download_manifest.tsv"
+
+mkdir -p "$RAW_DIR" "$REPO/logs"
+cd "$REPO"
+
+cat > "$MANIFEST" <<'EOF'
+filename	expected_bytes	url
+Xenium_Prime_Human_Ovary_FF_transcripts.parquet	33707205510	https://cf.10xgenomics.com/samples/xenium/3.0.0/Xenium_Prime_Human_Ovary_FF/Xenium_Prime_Human_Ovary_FF_transcripts.parquet
+Xenium_Prime_Human_Ovary_FF_cells.parquet	23990167	https://cf.10xgenomics.com/samples/xenium/3.0.0/Xenium_Prime_Human_Ovary_FF/Xenium_Prime_Human_Ovary_FF_cells.parquet
+Xenium_Prime_Human_Ovary_FF_cell_feature_matrix.h5	1139985018	https://cf.10xgenomics.com/samples/xenium/3.0.0/Xenium_Prime_Human_Ovary_FF/Xenium_Prime_Human_Ovary_FF_cell_feature_matrix.h5
+Xenium_Prime_Human_Ovary_FF_gene_panel.json	4478940	https://cf.10xgenomics.com/samples/xenium/3.0.0/Xenium_Prime_Human_Ovary_FF/Xenium_Prime_Human_Ovary_FF_gene_panel.json
+Xenium_Prime_Human_Ovary_FF_analysis_summary.html	19785095	https://cf.10xgenomics.com/samples/xenium/3.0.0/Xenium_Prime_Human_Ovary_FF/Xenium_Prime_Human_Ovary_FF_analysis_summary.html
+EOF
+
+download_one() {
+    local filename="$1"
+    local expected_bytes="$2"
+    local url="$3"
+    local target="$RAW_DIR/$filename"
+    local actual_bytes=0
+
+    if [[ -s "$target" ]]; then
+        actual_bytes=$(wc -c < "$target" | tr -d ' ')
+        if [[ "$actual_bytes" -eq "$expected_bytes" ]]; then
+            echo "[skip] $filename already present ($actual_bytes bytes)"
+            return 0
+        fi
+        echo "[resume] $filename present but incomplete ($actual_bytes / $expected_bytes bytes)"
+    else
+        echo "[download] $filename"
+    fi
+
+    curl -L -C - --retry 5 --retry-delay 20 --fail --output "$target" "$url"
+
+    actual_bytes=$(wc -c < "$target" | tr -d ' ')
+    if [[ "$actual_bytes" -ne "$expected_bytes" ]]; then
+        echo "[error] $filename size mismatch: got $actual_bytes expected $expected_bytes" >&2
+        exit 1
+    fi
+    echo "[done] $filename ($actual_bytes bytes)"
+}
+
+tail -n +2 "$MANIFEST" | while IFS=$'\t' read -r filename expected_bytes url; do
+    download_one "$filename" "$expected_bytes" "$url"
+done
+
+cat > "$RAW_DIR/README.txt" <<EOF
+Staged from official 10x Xenium Prime ovary direct file URLs.
+Dataset page: https://www.10xgenomics.com/datasets/xenium-prime-fresh-frozen-human-ovary
+
+This folder intentionally contains selected direct files only, not:
+- Xenium_Prime_Human_Ovary_FF_outs.zip
+- Xenium_Prime_Human_Ovary_FF_xe_outs.zip
+- H&E OME-TIFF files
+
+Next step: recreate/import full-data cell-class and CNV spatial maps, choose ROI
+coordinates, then run scripts/select_roi.py.
+EOF
+
+echo "[complete] staged Xenium ovary files in $RAW_DIR"

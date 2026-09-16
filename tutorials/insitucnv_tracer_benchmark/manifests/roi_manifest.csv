@@ -1,0 +1,3 @@
+roi_id,transcripts,cell_metadata,gene_positions,notes
+pilot_roi,data/roi_transcripts.parquet,data/roi_cell_metadata.csv,data/gene_positions_grch38.tsv,fill after argos ROI extraction
+

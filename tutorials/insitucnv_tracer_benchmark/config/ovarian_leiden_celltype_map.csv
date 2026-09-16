@@ -1,0 +1,20 @@
+leiden,cell_class,assignment_basis
+0,Epithelial,EPCAM; ITGB4; MSLN; FOLR1
+1,Epithelial,EPCAM; FOLR1; MUC1; DDR1
+2,Low expression,very low median counts/genes; weak mixed DEGs
+3,Epithelial,EPCAM; ITGB4; FOLR1; MSLN
+4,Fibroblasts,COL5A1; COL5A2; PDGFRA; THBS1
+5,Epithelial,EPCAM; FOLR1; PCNA; MYBL2
+6,T cells,CD3E; CD247; ZAP70; IL2RB
+7,Epithelial,EPCAM; MUC1; DDR1; KLK6
+8,Fibroblasts,TNXB; PDGFRA; THBS1; CDH11
+9,Fibroblasts,COL5A1; COL5A2; POSTN; THY1
+10,Monocytes,CD14; CSF1R; CD68; CD163
+11,Epithelial,EPCAM; FOLR1; MUC1; PROM1
+12,Monocytes,CSF1R; CD14; CD68; CD163
+13,Endothelial,PECAM1; CDH5; KDR; CLDN5
+14,Monocytes,CD14; CSF1R; CD163; CD68
+15,B cells,MZB1; XBP1; CD79A; CD38
+16,Epithelial,EPCAM; TAP1; TAP2; IFIT genes
+17,Epithelial,EPCAM; MUC1; PODXL; KLK10
+18,Mesothelial,ANXA8; CALB2; UPK3B; PODXL
