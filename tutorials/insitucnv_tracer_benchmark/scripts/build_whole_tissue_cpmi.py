@@ -172,6 +172,29 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Stream and build the count matrix, then exit before CPMI calculation.",
     )
+    p.add_argument(
+        "--stage-only",
+        action="store_true",
+        help="Do not build a panel. Stream the eligible transcripts of the "
+             "subsampled cells to a small parquet with canonical TRACER column "
+             "names (cell_id, feature_name, overlaps_nucleus) and exit. The "
+             "output is the input for scripts/build_panels.py, whose "
+             "tracer.panel_builder.load_transcripts_reference() does a plain "
+             "pd.read_parquet and so cannot ingest the 31 GB whole-slide table.",
+    )
+    p.add_argument(
+        "--stage-out",
+        type=Path,
+        default=None,
+        help="Destination for --stage-only (default: "
+             "data/staged_<count_scope>_<subsample>.parquet).",
+    )
+    p.add_argument(
+        "--stage-row-group-size",
+        type=int,
+        default=2_000_000,
+        help="Row-group size for the staged parquet (default 2,000,000).",
+    )
     return p.parse_args()
 
 
@@ -183,6 +206,16 @@ def default_out_path(args: argparse.Namespace) -> Path:
     else:
         label = str(args.subsample_cells)
     return _BENCH_ROOT / "data" / f"whole_tissue_cpmi_{args.count_scope}_{label}.csv.gz"
+
+
+def default_stage_path(args: argparse.Namespace) -> Path:
+    if args.subsample_cells == 0:
+        label = "all"
+    elif args.subsample_cells % 1000 == 0:
+        label = f"{args.subsample_cells // 1000}k"
+    else:
+        label = str(args.subsample_cells)
+    return _BENCH_ROOT / "data" / f"staged_{args.count_scope}_{label}.parquet"
 
 
 def load_panel_genes(path: Path | None) -> set[str] | None:
@@ -474,6 +507,153 @@ def stream_counts(
     return X.tocsr(), genes.astype(str), cells.astype(str), stats
 
 
+def stage_columns(args: argparse.Namespace, schema_names: set[str]) -> list[str]:
+    """Like `batch_columns`, but always keeps the nucleus column when present.
+
+    `batch_columns` only reads `overlaps_nucleus` for the nuclear scope, since
+    that is the only scope whose filter needs it. Staging retains it in EITHER
+    scope so the staged file can still be filtered downstream by
+    `build_panels.py --nucleus-only`.
+    """
+    cols = batch_columns(args, schema_names)
+    if args.nucleus_col in schema_names:
+        cols.append(args.nucleus_col)
+    return list(dict.fromkeys(cols))
+
+
+def filter_batch_stage(
+    df: pd.DataFrame,
+    args: argparse.Namespace,
+    panel: set[str] | None,
+    *,
+    has_is_gene: bool,
+    has_nucleus: bool,
+) -> pd.DataFrame:
+    """Row filter for --stage-only, returning canonical TRACER columns.
+
+    Applies the same is_gene / qv / unassigned / panel-gene filters as
+    `filter_batch`, but deliberately does NOT apply the nuclear filter: the
+    nucleus flag is carried through instead so `--nucleus-only` can apply it
+    downstream. Cell SELECTION stays scope-aware, because pass 1
+    (`collect_sampled_cells`) still goes through `filter_batch`.
+    """
+    if has_is_gene:
+        is_gene = df[args.is_gene_col].astype("boolean").fillna(False)
+        df = df[is_gene.to_numpy(dtype=bool)]
+
+    qv = pd.to_numeric(df[args.qv_col], errors="coerce")
+    df = df[(qv >= args.qv_min).to_numpy(dtype=bool, copy=True)]
+
+    cid = df[args.cell_id_col].astype(str)
+    gene = df[args.gene_col].astype(str)
+    good = ~cid.isin(UNASSIGNED_TOKENS)
+    if panel is not None:
+        good &= gene.isin(panel)
+    good = good.to_numpy(dtype=bool)
+
+    out = {"cell_id": cid[good].to_numpy(dtype=object),
+           "feature_name": gene[good].to_numpy(dtype=object)}
+    if has_nucleus:
+        nuc = pd.to_numeric(df[args.nucleus_col], errors="coerce").fillna(0)
+        out["overlaps_nucleus"] = (
+            (nuc == 1).to_numpy(dtype=bool)[good].astype(np.int8)
+        )
+    return pd.DataFrame(out)
+
+
+def stream_stage_parquet(
+    args: argparse.Namespace,
+    panel: set[str] | None,
+    keep_cells: set[str] | None,
+    out: Path,
+) -> dict:
+    """Pass 2 for --stage-only: write retained transcript rows to a parquet.
+
+    Mirrors `stream_counts`'s row-group walk, but writes rows incrementally
+    through a `ParquetWriter` instead of aggregating a cell x gene matrix, so
+    peak memory stays at one batch regardless of how many transcripts are kept.
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    pf, schema_names = parquet_schema(args)
+    cols = stage_columns(args, schema_names)
+    has_is_gene = args.is_gene_col in schema_names
+    has_nucleus = args.nucleus_col in schema_names
+    total_rows = pf.metadata.num_rows
+    n_row_groups = pf.metadata.num_row_groups
+    log(
+        f"Pass 2 (stage): streaming {total_rows:,} rows / {n_row_groups:,} row "
+        f"groups from {args.transcripts.name} -> {out.name}"
+    )
+    if not has_nucleus:
+        log(f"  WARNING {args.nucleus_col} absent; staged file cannot support "
+            "build_panels.py --nucleus-only")
+
+    fields = [("cell_id", pa.string()), ("feature_name", pa.string())]
+    if has_nucleus:
+        fields.append(("overlaps_nucleus", pa.int8()))
+    schema = pa.schema(fields)
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    n_kept = 0
+    n_nuclear = 0
+    cells_seen: set[str] = set()
+    genes_seen: set[str] = set()
+    rg_done = 0
+    writer = pq.ParquetWriter(out, schema, compression="snappy")
+    try:
+        for rg in range(n_row_groups):
+            if args.max_row_groups and rg >= args.max_row_groups:
+                log(f"  stopping stage pass at {rg} row groups")
+                break
+            for rb in pf.iter_batches(
+                batch_size=args.batch_size, columns=cols, row_groups=[rg]
+            ):
+                sub = filter_batch_stage(
+                    rb.to_pandas(), args, panel,
+                    has_is_gene=has_is_gene, has_nucleus=has_nucleus,
+                )
+                if keep_cells is not None and len(sub):
+                    sub = sub[sub["cell_id"].isin(keep_cells).to_numpy()]
+                if not len(sub):
+                    continue
+                writer.write_table(
+                    pa.Table.from_pandas(sub, schema=schema, preserve_index=False),
+                    row_group_size=args.stage_row_group_size,
+                )
+                n_kept += len(sub)
+                if has_nucleus:
+                    n_nuclear += int(sub["overlaps_nucleus"].sum())
+                cells_seen.update(sub["cell_id"].unique().tolist())
+                genes_seen.update(sub["feature_name"].unique().tolist())
+            rg_done += 1
+            if rg_done % 200 == 0:
+                log(f"  row groups {rg_done:,}/{n_row_groups:,}; staged "
+                    f"tx={n_kept:,}; cells={len(cells_seen):,}; "
+                    f"genes={len(genes_seen):,}")
+    finally:
+        writer.close()
+
+    if n_kept == 0:
+        raise SystemExit("Staged 0 transcripts; refusing to write an empty parquet.")
+
+    size_mb = out.stat().st_size / 1e6
+    log(f"Staged {n_kept:,} transcripts ({len(cells_seen):,} cells, "
+        f"{len(genes_seen):,} genes) -> {out} [{size_mb:,.1f} MB]")
+    return {
+        "stage_only": True,
+        "staged_parquet": str(out),
+        "staged_parquet_mb": round(size_mb, 1),
+        "staged_transcripts": int(n_kept),
+        "staged_nuclear_transcripts": int(n_nuclear) if has_nucleus else None,
+        "staged_cells": len(cells_seen),
+        "staged_genes": len(genes_seen),
+        "has_overlaps_nucleus": bool(has_nucleus),
+        "row_groups_read": rg_done,
+    }
+
+
 def canonicalize_edges(edges: pd.DataFrame) -> pd.DataFrame:
     df = edges.copy()
     df["gene_i"] = df["gene_i"].astype(str)
@@ -556,6 +736,31 @@ def main() -> int:
     args.out.parent.mkdir(parents=True, exist_ok=True)
 
     panel_genes = load_panel_genes(args.panel_genes)
+
+    if args.stage_only:
+        # Cell SELECTION still runs the scope-aware pass 1, so the staged file
+        # holds the same 50k cells the old in-script builder would have used;
+        # only the panel estimation moves out to scripts/build_panels.py.
+        stage_out = args.stage_out or default_stage_path(args)
+        keep_cells = collect_sampled_cells(args, panel_genes)
+        stats = stream_stage_parquet(args, panel_genes, keep_cells, stage_out)
+        write_summary(
+            stage_out,
+            {
+                "transcripts": str(args.transcripts),
+                "count_scope": args.count_scope,
+                "qv_min": float(args.qv_min),
+                "subsample_cells_requested": int(args.subsample_cells),
+                "seed": int(args.seed),
+                "panel_genes": str(args.panel_genes) if args.panel_genes else None,
+                "max_row_groups": int(args.max_row_groups),
+                **stats,
+            },
+        )
+        log("STAGE ONLY complete; no panel written. Next: "
+            "scripts/build_panels.py --transcripts <staged parquet>")
+        return 0
+
     keep_cells = collect_sampled_cells(args, panel_genes)
     X, genes, cells, density_stats = stream_counts(args, panel_genes, keep_cells)
 
