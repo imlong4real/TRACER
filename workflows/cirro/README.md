@@ -70,6 +70,10 @@ walltime are multiplied by the attempt number and capped by
 to 192 CPUs, 4,096 GB RAM, and 336 hours. Other failures terminate immediately
 so invalid inputs are not repeatedly billed.
 
+Set `use_on_demand=true` only when rare high-memory Spot capacity cannot be
+placed or the expected run is too long to tolerate Spot interruptions. The
+selected queue ARN is recorded in the run manifest.
+
 The pinned image does not include the `procps` package. A minimal read-only
 `bin/ps` compatibility shim exposes PID/parent-PID data from `/proc`, which is
 the only operation Nextflow's task monitor needs. Nothing is installed into or

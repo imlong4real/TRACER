@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:tracer:cirro:nextflow-schema:0.1.1-cirro.3",
+  "$id": "urn:tracer:cirro:nextflow-schema:0.1.1-cirro.4",
   "title": "TRACER Seg for Cirro",
   "description": "Refine Xenium transcript-to-cell assignments with an explicit PMI/cPMI reference.",
   "type": "object",
@@ -170,6 +170,12 @@
       "default": 3,
       "title": "OOM retries",
       "description": "Retries for transient/OOM exits; memory increases once per attempt."
+    },
+    "use_on_demand": {
+      "type": "boolean",
+      "default": false,
+      "title": "Use On-Demand compute",
+      "description": "Use Cirro's On-Demand queue instead of Spot for rare high-memory capacity or interruption-sensitive runs."
     },
     "outdir": {
       "type": "string",

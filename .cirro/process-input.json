@@ -23,6 +23,7 @@
   "walltime_hours": "$.dataset.params.walltime_hours",
   "max_walltime_hours": "$.dataset.params.max_walltime_hours",
   "max_retries": "$.dataset.params.max_retries",
+  "use_on_demand": "$.dataset.params.use_on_demand",
   "outdir": "$.dataset.dataPath",
   "tracer_version": "0.1.1",
   "tracer_source_commit": "ee259003be572581c434dd5bed40d7568f05f906",

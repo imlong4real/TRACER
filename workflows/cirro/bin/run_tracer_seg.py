@@ -423,6 +423,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--task-attempt", type=int, required=True)
     result.add_argument("--task-cpus", type=int, required=True)
     result.add_argument("--task-memory-b64", required=True)
+    result.add_argument("--task-queue-b64", required=True)
     return result
 
 
@@ -470,6 +471,7 @@ def main() -> int:
             "task_attempt": args.task_attempt,
             "cpus": args.task_cpus,
             "memory": decode_source(args.task_memory_b64),
+            "queue": decode_source(args.task_queue_b64),
             "hostname": socket.gethostname(),
             "platform": platform.platform(),
             "python": sys.version.split()[0],

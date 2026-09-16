@@ -100,6 +100,7 @@ process TRACER_SEG {
     def cellMaskArg = cell_boundaries ? "--cell-boundaries '${cell_boundaries}'" : ''
     def nucleusMaskArg = nucleus_boundaries ? "--nucleus-boundaries '${nucleus_boundaries}'" : ''
     def taskMemoryB64 = task.memory.toString().bytes.encodeBase64().toString()
+    def taskQueueB64 = (task.queue ?: '').toString().bytes.encodeBase64().toString()
 
     """
     export PYTHONHASHSEED='${seed}'
@@ -134,6 +135,7 @@ process TRACER_SEG {
       --task-attempt '${task.attempt}' \
       --task-cpus '${task.cpus}' \
       --task-memory-b64 '${taskMemoryB64}' \
+      --task-queue-b64 '${taskQueueB64}' \
       ${qvArg} \
       ${controlsArg} \
       ${dropArg} \
