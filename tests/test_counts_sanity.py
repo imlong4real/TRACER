@@ -30,8 +30,8 @@ import pandas as pd
 import pytest
 import scipy.sparse as sp
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from build_panels import _classify_counts, _report_counts_verdict
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from tracer.panel_builder import _classify_counts, _report_counts_verdict
 
 
 def counts_matrix(n=200, g=50, seed=0):

@@ -1,16 +1,16 @@
-#!/usr/bin/env python3
 """Build PMI/cPMI reference panels from a single-cell reference.
 
-Replaces the three dataset-specific builders (build_lung_panels_rep.py,
-build_lung_panels.py, build_lung_vanilla_spec.py), which were hardcoded to the
-lung h5ad, the lung transcripts parquet and Cell_Cluster_level1.
-
-Every strategy calls `build_depth_corrected_reference` once per arm, which emits
-the naive and depth-corrected estimators in the same pass, so a PMI-vs-cPMI
-comparison differs in exactly one term:
+The estimator lives next door in :mod:`tracer.conflict_reference`
+(``build_depth_corrected_reference``), which emits the naive and depth-corrected
+values in one pass so a PMI-vs-cPMI comparison differs in exactly one term:
 
     PMI  = log(p_ij / (p_i * p_j))                    marginal-product null
     cPMI = log((O + eps) / (E + eps)),  E = sum_d n_d * r_id * r_jd
+
+THIS module holds everything around that: how the reference is drawn, how
+presence is called, how the counts matrix is validated, and the on-disk panel
+contract. The CLI is ``scripts/build_panels.py`` — the same split as
+``scripts/build_npmi_from_scrna.py`` over ``tracer.metrics.compute_pmi_bootstrap``.
 
 DRAW STRATEGIES
 ---------------
@@ -27,29 +27,27 @@ capped   Cell-type balanced WITHOUT replacement, every type capped at the rarest
          unbalanced comparison measured sample size rather than estimator.
          Kept because it reproduces the earlier panels.
 
+grid3/4  LABEL-FREE balancing on a marginal n_genes x depth grid, replacement
+         draw. The nuclear recipe — the single largest nuclear improvement
+         measured (cPMI 0.4077 -> 0.2848). On scRNA it LOSES to cell-type
+         labels (0.2976 vs 0.2361), so it is for references with no labels.
+
 vanilla  All cells, natural composition, no balancing.
 
-PRESENCE ARMS (`--arms`)
-------------------------
+PRESENCE ARMS
+-------------
 count1   raw counts, min_count=1
 count2   raw counts, min_count=2
 xgt1     log1p(CP10k) with min_count=1, i.e. count > (e-1)*lib/1e4. For any cell
-         below ~5,820 UMIs this is identical to count >= 1.
+         below ~5,820 UMIs this is identical to count >= 1. NOTE this makes the
+         arm INVARIANT to per-cell rescaling, since CP10k is.
 
 Depth is always the TRUE library size over all genes in the reference, computed
 before restricting to the panel gene set.
-
-EXAMPLES
---------
-    python build_panels.py --h5ad lung_cancer_50k.h5ad \
-        --panel-genes ../tutorials/lung_cancer/data/lung_cancer_df.parquet \
-        --celltype-col Cell_Cluster_level1 --strategy rep --out panels
-
-    python build_panels.py --h5ad lung_cancer_50k.h5ad \
-        --panel-genes ../tutorials/lung_cancer/data/lung_cancer_df.parquet \
-        --strategy vanilla --out panels
 """
-import argparse
+from __future__ import annotations
+
+import logging
 import time
 from pathlib import Path
 
@@ -58,9 +56,15 @@ import numpy as np
 import pandas as pd
 import scipy.sparse as sp
 
-#: Written to every panel. The pipeline resolves its edge weight as
-#: `"PMI" if "PMI" in columns else "NPMI"` and cannot be told which estimator
-#: that column holds, so the promoted-column variants below matter.
+_LOG = logging.getLogger(__name__)
+
+
+def log(m):
+    """Timestamped progress line. Kept module-level so the CLI and the library
+    emit one consistent stream."""
+    print(f"[{time.strftime('%H:%M:%S')}] {m}", flush=True)
+
+
 EDGE_COLS = ["gene_i", "gene_j", "PMI", "cPMI", "O", "E", "z"]
 
 ARM_SPECS = {           # name -> (min_count, log1p_cp10k)
@@ -72,10 +76,6 @@ ARM_SPECS = {           # name -> (min_count, log1p_cp10k)
 #: Output-name suffix per strategy, preserving the historical panel names.
 SUFFIX = {"rep": "_pmi_balanced_rep", "capped": "_pmi_balanced",
           "grid3": "_pmi_grid3", "grid4": "_pmi_grid4"}
-
-
-def log(m):
-    print(f"[{time.strftime('%H:%M:%S')}] {m}", flush=True)
 
 
 def read_panel_genes(path: Path) -> list[str]:
@@ -394,34 +394,6 @@ def cp10k_log1p(sub, depth):
     return L
 
 
-def _write_receipt(args, pcfg) -> None:
-    """Record the resolved recipe beside the panels.
-
-    A bare `.csv.gz` carries no provenance — which is how a panel built with
-    an off-by-2x top-k rule ended up mislabelled `topk1000`. This states the
-    recipe, which estimator sits in the `PMI` column, and the exact command.
-    """
-    import json, sys
-    from dataclasses import asdict
-    out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
-    rec = out / f"{args.prefix}panel_receipt.json"
-    if rec.exists():
-        return
-    rec.write_text(json.dumps({
-        "panel_preset": args._panel_preset,
-        "effective_promote": args._effective_promote,
-        "canonical_panel_substring":
-            "_cpmi_" if args._effective_promote == "cPMI" else "_pmi_",
-        "counts_check": dict(_COUNTS_VERDICT) or None,
-        "resolved_panel_config": asdict(pcfg),
-        "effective_args": {k: (str(v) if isinstance(v, Path) else v)
-                           for k, v in vars(args).items()
-                           if not k.startswith("_")},
-        "command": " ".join(sys.argv),
-    }, indent=2, default=str) + "\n")
-    log(f"receipt -> {rec}")
-
-
 def write_panel(edges, out: Path, name: str, *, promote: str | None = None,
                 min_abs: float | None = None):
     """Write one panel. `promote` copies that estimator into the `PMI` slot.
@@ -464,245 +436,3 @@ def write_panel(edges, out: Path, name: str, *, promote: str | None = None,
     log(f"{name:26s} {len(df):>7,} edges  {len(gs):>3} genes  "
         f"O med {np.median(df.O):>6.0f}  "
         f"pos {np.mean(v > 0.2):.0%} neg {np.mean(v < -0.2):.0%} -> {p.name}")
-
-
-_COUNTS_VERDICT: dict = {}
-
-
-def main():
-    ap = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    src = ap.add_mutually_exclusive_group(required=True)
-    src.add_argument("--h5ad", type=Path,
-                     help="Single-cell reference with a `counts` layer.")
-    src.add_argument("--transcripts", type=Path,
-                     help="Standardized transcript table (cell_id, "
-                          "feature_name). Estimates the panel from the assay's "
-                          "own cells instead of an external reference.")
-    ap.add_argument("--nucleus-only", action="store_true",
-                    help="With --transcripts, keep only overlaps_nucleus == 1 "
-                         "— the segmentation-independent subset.")
-    ap.add_argument("--panel-genes", type=Path, default=None,
-                    help="Transcripts parquet (feature_name column) or a "
-                         "one-gene-per-line text file. Required with --h5ad; "
-                         "with --transcripts defaults to the observed genes.")
-    ap.add_argument("--out", type=Path, required=True, help="Output directory.")
-    ap.add_argument("--strategy",
-                    choices=("rep", "capped", "vanilla", "grid3", "grid4"),
-                    default=None,
-                    help="Reference draw. rep/capped need --celltype-col; "
-                         "grid3/grid4 are LABEL-FREE (n_genes x depth grid, "
-                         "marginal edges, replacement draw); vanilla is none.")
-    ap.add_argument("--celltype-col", default=None,
-                    help="obs column to balance on. Required unless "
-                         "--strategy vanilla.")
-    ap.add_argument("--arms", nargs="+", default=None,
-                    choices=sorted(ARM_SPECS), help="Presence arms to build.")
-    ap.add_argument("--allow-non-integral-counts", action="store_true",
-                    help="Proceed when the counts matrix is not integral. Safe "
-                         "ONLY for a per-cell RESCALING (CP10k/TPM) under the "
-                         "xgt1 + n_genes recipe, where CP10k normalises the "
-                         "factor away; NEVER for log-transformed values.")
-    ap.add_argument("--panel-preset", default=None,
-                    help="Panel RECIPE preset (tracer/configs/panels/*.toml). "
-                         "Inferred when omitted: --h5ad -> the with-reference "
-                         "recipe (rep + xgt1 + cPMI + n_genes); "
-                         "--transcripts --nucleus-only -> 'nuclear' "
-                         "(grid3 + naive PMI). Explicit flags always win.")
-    ap.add_argument("--panel-config", type=Path, default=None,
-                    help="User-override TOML, top of the layer stack.")
-    ap.add_argument("--prefix", default="",
-                    help="Prepended to every output panel name.")
-    ap.add_argument("--emit-cpmi", action="store_true", default=None,
-                    help="Also write a `<arm>_cpmi_balanced...` panel per arm, "
-                         "the same build with cPMI promoted into the `PMI` "
-                         "column so the pipeline consumes the depth-corrected "
-                         "estimator. Adds no information — the default panel "
-                         "already carries both columns — but drops into a run "
-                         "without editing. Implied for --strategy vanilla.")
-    ap.add_argument("--no-emit-cpmi", dest="emit_cpmi", action="store_false",
-                    help="Suppress the cPMI-promoted panel (it is written by "
-                         "default under the with-reference recipe).")
-    ap.add_argument("--seed", type=int, default=None)
-    ap.add_argument("--min-det-cells", type=int, default=None,
-                    help="A gene must be detected in this many cells (default 25).")
-    ap.add_argument("--n-depth-bins", type=int, default=None)
-    ap.add_argument("--depth-metric", default=None,
-                    choices=("total_counts", "n_genes"),
-                    help="Covariate the cPMI null is binned on. Inert for the "
-                         "naive-PMI column, which never reads E.")
-    ap.add_argument("--depth-obs", default=None,
-                    help="obs column holding the TRUE library size. Use it when "
-                         "X has been gene-filtered (e.g. nCount_RNA).")
-    ap.add_argument("--top-k-per-gene", type=int, default=None, metavar="K",
-                    help="Builder-native relative cut: keep each gene's K "
-                         "strongest partners by |cPMI| (ONE ranking per gene "
-                         "over all its edges; an edge survives if in the top-K "
-                         "of either endpoint). Pure rank cut — no magnitude "
-                         "threshold; combine with --min-abs-value if wanted.")
-    ap.add_argument("--min-abs-value", type=float, default=None, metavar="TAU",
-                    help="Drop edges with |value| <= TAU (the uninformative "
-                         "limbo band). Use 0.2 to match TRACER's PMI_THR, "
-                         "making the panel exactly the pairs that can change a "
-                         "decision. Applied to each panel's promoted metric.")
-    ap.add_argument("--exclude-obs", action="append", metavar="COL=VALUE",
-                    help="Drop reference cells where obs[COL] == VALUE. "
-                         "Repeatable.")
-    ap.add_argument("--x-is-log1p-cp10k", action="store_true",
-                    help="X holds log1p(CP10k), not counts; invert it using "
-                         "--depth-obs to recover integer counts.")
-    args = ap.parse_args()
-
-    # ---- resolve the panel recipe -------------------------------------
-    # The recipe lives in tracer/configs (defaults.toml [panel], plus
-    # configs/panels/<preset>.toml). It is inferred from the SOURCE flags,
-    # which already determine it unambiguously, and any explicit CLI flag
-    # overrides it. See PanelConfig for why `promote` matters most: the
-    # pipeline reads whatever estimator sits in the `PMI` column.
-    import sys as _sys
-    _sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-    from tracer.config import load_config
-
-    preset = args.panel_preset
-    if preset is None and args.transcripts and args.nucleus_only:
-        preset = "nuclear"
-    if preset is None and args.transcripts and not args.nucleus_only:
-        ap.error("--transcripts without --nucleus-only is ambiguous: pass "
-                 "--panel-preset {reference,nuclear} explicitly")
-    pcfg = load_config(path=args.panel_config,
-                       panel_preset=None if preset in (None, "reference") else preset).panel
-
-    for field, val in (("strategy", pcfg.strategy), ("arms", list(pcfg.arms)),
-                       ("depth_metric", pcfg.depth_metric), ("seed", pcfg.seed),
-                       ("min_det_cells", pcfg.min_det_cells),
-                       ("n_depth_bins", pcfg.n_depth_bins)):
-        if getattr(args, field) is None:
-            setattr(args, field, val)
-    if args.min_abs_value is None:
-        args.min_abs_value = pcfg.min_abs_value
-    if args.top_k_per_gene is None:
-        args.top_k_per_gene = pcfg.top_k_per_gene
-    if args.emit_cpmi is None:
-        args.emit_cpmi = (pcfg.promote == "cPMI")
-
-    # Report the RESOLVED promotion, not the config's preference: under
-    # --no-emit-cpmi no cPMI panel is written, so pointing at one would lie.
-    effective = "cPMI" if (pcfg.promote == "cPMI" and args.emit_cpmi) else "PMI"
-    canonical = "_cpmi_" if effective == "cPMI" else "_pmi_"
-    log(f"panel recipe: preset={preset or 'reference'}  strategy={args.strategy}  "
-        f"arms={args.arms}  promote={effective}  depth_metric={args.depth_metric}")
-    log(f"  -> the panel TRACER should consume is the one with '{canonical}' "
-        f"in its name (the pipeline reads the PMI column blindly)")
-    if pcfg.promote == "cPMI" and not args.emit_cpmi:
-        log("  WARNING --no-emit-cpmi: only the NAIVE-PMI panel will be written. "
-            "TRACER will consume the depth-CONFOUNDED estimator.")
-    if pcfg.promote == "PMI":
-        log("  NOTE nuclear recipe: naive PMI is INTERIM here (depth-confounded, "
-            "67% of pairs positive). cPMI is better per cell but the nuclear "
-            "reference is evidence-starved. Fix with more nuclei, then switch.")
-    args._panel_cfg = pcfg
-    args._panel_preset = preset or "reference"
-    args._effective_promote = effective
-
-    if args.strategy in ("rep", "capped") and not args.celltype_col:
-        ap.error("--celltype-col is required for --strategy rep/capped")
-    if args.h5ad and not args.panel_genes:
-        ap.error("--panel-genes is required with --h5ad")
-    if args.nucleus_only and not args.transcripts:
-        ap.error("--nucleus-only only applies to --transcripts")
-    if args.x_is_log1p_cp10k and not args.depth_obs:
-        ap.error("--x-is-log1p-cp10k needs --depth-obs to invert the scaling")
-
-    from tracer.conflict_reference import build_depth_corrected_reference
-    args.out.mkdir(parents=True, exist_ok=True)
-
-    genes = read_panel_genes(args.panel_genes) if args.panel_genes else None
-    if args.transcripts:
-        sub, keep, depth, obs = load_transcripts_reference(
-            args.transcripts, nucleus_only=args.nucleus_only, panel_genes=genes)
-    else:
-        sub, keep, depth, obs = load_reference(
-            args.h5ad, genes, depth_obs=args.depth_obs,
-            x_is_log1p_cp10k=args.x_is_log1p_cp10k,
-            exclude_obs=args.exclude_obs,
-            allow_non_integral=args.allow_non_integral_counts,
-            verdict_out=_COUNTS_VERDICT)
-
-    if args.strategy == "vanilla":
-        # All cells, natural composition. Both estimators are written as
-        # separate files, each with its own value promoted into `PMI`.
-        # Honours --arms (it used to hardcode min_count=1 and ignore the
-        # flag). The count1 arm keeps the legacy `vanilla_spec_*` names so
-        # existing panels reproduce bit-identically; other arms are prefixed.
-        log(f"all {sub.shape[0]:,} cells, natural composition, {len(keep)} genes")
-        for arm in args.arms:
-            mc, use_log = ARM_SPECS[arm]
-            src = cp10k_log1p(sub, depth) if use_log else sub
-            if args.depth_metric == "n_genes":
-                cov = np.asarray((src >= (1 if use_log else mc)).sum(1)).ravel().astype(float)
-            else:
-                cov = depth
-            res = build_depth_corrected_reference(
-                counts=src, genes=np.asarray(keep, dtype=object), depth=cov,
-                min_count=1 if use_log else mc, min_det_cells=args.min_det_cells,
-                n_depth_bins=args.n_depth_bins, depth_metric=args.depth_metric,
-            top_k_per_gene=args.top_k_per_gene)
-            _write_receipt(args, pcfg)
-            tag = "" if arm == "count1" else f"{arm}_"
-            for name, est in (("vanilla_spec_cpmi", "cPMI"), ("vanilla_spec_pmi", "PMI")):
-                write_panel(res.edges, args.out, args.prefix + tag + name,
-                            promote=est, min_abs=args.min_abs_value)
-        return
-
-    if args.strategy.startswith("grid"):
-        ref = grid_draw(sub, depth, k=int(args.strategy[-1]), seed=args.seed)
-    else:
-        ct = obs[args.celltype_col].astype(str).to_numpy()
-        ref = balanced_draw(ct, strategy=args.strategy, seed=args.seed)
-    uniq = np.unique(ref)
-
-    for arm in args.arms:
-        mc, use_log = ARM_SPECS[arm]
-        src = cp10k_log1p(sub, depth) if use_log else sub
-        thr = 1 if use_log else mc
-
-        if args.strategy != "capped":
-            # Gene admission is decided on DISTINCT cells, then the builder is
-            # called with min_det_cells=1 so replication cannot manufacture
-            # support for a gene it would not otherwise clear.
-            det = np.asarray((src[uniq] >= thr).sum(0)).ravel()
-            ok = det >= args.min_det_cells
-            genes_ok = [g for g, k in zip(keep, ok) if k]
-            log(f"{arm}: {ok.sum()}/{len(keep)} genes clear "
-                f"min_det_cells={args.min_det_cells} on {len(uniq):,} unique cells")
-            counts, gene_names, min_det = src[ref][:, ok], genes_ok, 1
-        else:
-            counts, gene_names, min_det = src[ref], keep, args.min_det_cells
-
-        # `depth_metric` in the builder only fires when `depth` is None, and we
-        # always pass depth explicitly — so the covariate has to be built here
-        # or the flag is silently inert. n_genes = transcriptome complexity
-        # under THIS arm's presence rule; total_counts = true library size.
-        # After Xgt1 (a depth-RELATIVE presence threshold) the library-size
-        # null is largely redundant, which is what makes n_genes worth having.
-        if args.depth_metric == "n_genes":
-            cov = np.asarray((src >= thr).sum(1)).ravel().astype(float)
-        else:
-            cov = depth
-        res = build_depth_corrected_reference(
-            counts=counts, genes=np.asarray(gene_names, dtype=object),
-            depth=cov[ref], min_count=1 if use_log else mc,
-            min_det_cells=min_det, n_depth_bins=args.n_depth_bins,
-            depth_metric=args.depth_metric,
-            top_k_per_gene=args.top_k_per_gene)
-        _write_receipt(args, pcfg)
-        write_panel(res.edges, args.out, args.prefix + arm + SUFFIX[args.strategy],
-                    min_abs=args.min_abs_value)
-        if args.emit_cpmi:
-            cpmi_name = arm + SUFFIX[args.strategy].replace("_pmi_", "_cpmi_")
-            write_panel(res.edges, args.out, args.prefix + cpmi_name,
-                        promote="cPMI", min_abs=args.min_abs_value)
-
-
-if __name__ == "__main__":
-    main()

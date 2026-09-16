@@ -810,7 +810,7 @@ class PanelConfig:
     """Recipe for a depth-corrected (cPMI) reference panel.
 
     Configures `tracer.conflict_reference.build_depth_corrected_reference`,
-    the estimator behind `build_panels.py`. Distinct from `BootstrapConfig`,
+    the estimator behind `scripts/build_panels.py`. Distinct from `BootstrapConfig`,
     which configures the resampling `compute_pmi_bootstrap` path.
 
     WHY `promote` MATTERS MOST: the pipeline resolves a panel's edge weight as

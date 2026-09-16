@@ -2,7 +2,7 @@
 
 The pipeline resolves a panel's edge weight as `"PMI" if "PMI" in columns`
 (pipeline.py:1640, 2037). It cannot be told which estimator that column
-holds. So whichever estimator `build_panels.py` writes into `PMI` is the one
+holds. So whichever estimator `scripts/build_panels.py` writes into `PMI` is the one
 TRACER consumes, and getting that default wrong silently degrades every run.
 
 Two recipes, settled by benchmark and recorded in the panel-recipe notes:
