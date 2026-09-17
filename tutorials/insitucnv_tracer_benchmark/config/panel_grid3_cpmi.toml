@@ -1,0 +1,34 @@
+# Panel-recipe override for the ovary InSituCNV degradation benchmark.
+#
+# Layered on top of src/tracer/configs/panels/nuclear.toml -- load_config
+# merges a --panel-config file LAST, above the preset. It changes exactly one
+# field, `promote`, and inherits grid3 / xgt1 / n_genes / min_det_cells=25 /
+# n_depth_bins=25 from the preset.
+#
+# WHY DEVIATE FROM THE PRESET
+#
+# nuclear.toml sets promote = "PMI" and is explicit that this is INTERIM, not
+# an endorsement of naive PMI: cPMI is the better estimator per cell, but on
+# the reference they measured it is evidence-starved -- median library ~10
+# tx/nucleus, median co-detection O = 13 -- so few pairs honestly clear
+# PMI_THR and the panel admits too little.
+#
+# That does not describe THIS reference. Whole-tissue Xenium Prime ovary,
+# 50,000 cells, nuclear transcripts only: median 804 tx/cell and median
+# co-detection O = 330, roughly 25x the evidence depth behind the preset's
+# warning. The previous (unbalanced) panels for this benchmark already
+# promoted cPMI -- "PMI=cPMI; NPMI=cNPMI" in their summaries -- and cleared
+# the ROI seed-support gate as HEALTHY with zero zero-support seeds.
+#
+# So: keep the preset's real contribution (grid3, the label-free balanced
+# draw) and keep cPMI, leaving the DRAW as the only thing that changes
+# relative to the panels built in August.
+#
+# Setting `promote` here rather than relying on --emit-cpmi alone matters for
+# provenance: --emit-cpmi only decides WHETHER the cPMI file is written, so
+# with the preset's promote="PMI" the receipt still recorded
+# effective_promote="PMI" and canonical_panel_substring="_pmi_" -- naming a
+# panel we do not feed TRACER. With this override the receipt names the cPMI
+# panel, which is the one actually consumed.
+[panel]
+promote = "cPMI"
