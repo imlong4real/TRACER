@@ -20,6 +20,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--raw-annotations", type=Path, default=None, help="Optional CSV with cell_id,annotation.")
     p.add_argument("--out", required=True, type=Path)
     p.add_argument("--min-marker-hits", type=int, default=2)
+    p.add_argument("--rank-by", choices=("score", "hits"), default="score",
+                   help="Pick the winning marker set by expression fraction "
+                        "(default) or by distinct-hit count (legacy; biased "
+                        "toward larger marker sets).")
     return p.parse_args()
 
 
@@ -33,24 +37,44 @@ def load_raw_annotation_map(path: Path | None) -> pd.Series | None:
     return ann.drop_duplicates("cell_id").set_index("cell_id")["annotation"]
 
 
-def marker_scores(df: pd.DataFrame, entity_col: str, marker_sets: dict[str, list[str]]) -> pd.DataFrame:
+def marker_scores(df: pd.DataFrame, entity_col: str, marker_sets: dict[str, list[str]],
+                  rank_by: str = "score") -> pd.DataFrame:
+    """Score each entity against every marker set and take the winner.
+
+    `rank_by` decides the winner:
+
+    ``score``  fraction of the entity's transcripts belonging to the set.
+    ``hits``   number of DISTINCT marker genes detected (the original rule).
+
+    Ranking on `hits` is biased by marker-set SIZE, because a larger set can
+    accumulate more distinct hits from ambient/low-level reads alone. On the
+    ovary ROI that let a 4-gene epithelial set outscore a 5-gene fibroblast
+    set for true fibroblasts, and reference recall was 28%. Ranking on the
+    expression fraction instead -- the quantity that actually discriminates --
+    takes it to 84%. Set `rank_by="hits"` to reproduce the old behaviour.
+    """
+    if rank_by not in {"score", "hits"}:
+        raise SystemExit(f"rank_by must be 'score' or 'hits', got {rank_by!r}")
     rows = []
     grouped = df.groupby(entity_col, observed=True)["feature_name"]
     marker_sets = {k: set(map(str, v)) for k, v in marker_sets.items()}
     for entity, genes in grouped:
         counts = genes.astype(str).value_counts()
         row = {"entity_id": str(entity), "n_transcripts": int(counts.sum()), "n_genes": int(len(counts))}
-        best_label = "unknown"
-        best_hits = 0
-        best_score = 0.0
+        per_label = {}
         for label, markers in marker_sets.items():
             hits = int(counts.index.isin(markers).sum())
             score = float(counts.loc[counts.index.intersection(markers)].sum()) / max(float(counts.sum()), 1.0)
             row[f"marker_hits_{label}"] = hits
             row[f"marker_score_{label}"] = score
-            if (hits, score) > (best_hits, best_score):
-                best_label, best_hits, best_score = label, hits, score
-        row["marker_annotation"] = best_label if best_hits > 0 else "unknown"
+            per_label[label] = (hits, score)
+        # Ties break on the other quantity, then on label for determinism.
+        def key(item):
+            label, (hits, score) = item
+            return (score, hits, label) if rank_by == "score" else (hits, score, label)
+        best_label, (best_hits, best_score) = max(per_label.items(), key=key)
+        keep = best_score > 0 if rank_by == "score" else best_hits > 0
+        row["marker_annotation"] = best_label if keep else "unknown"
         row["marker_hits_best"] = best_hits
         row["marker_score_best"] = best_score
         rows.append(row)
@@ -89,7 +113,7 @@ def main() -> int:
     df[args.entity_col] = df[args.entity_col].astype(str)
     df = df.loc[~df[args.entity_col].isin(UNASSIGNED_TOKENS)].copy()
 
-    out = marker_scores(df, args.entity_col, marker_sets)
+    out = marker_scores(df, args.entity_col, marker_sets, rank_by=args.rank_by)
     raw_map = load_raw_annotation_map(args.raw_annotations)
     if raw_map is not None:
         out = out.merge(majority_raw_annotation(df, args.entity_col, raw_map), on="entity_id", how="left")

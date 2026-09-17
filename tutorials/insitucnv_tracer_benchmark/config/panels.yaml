@@ -5,44 +5,57 @@
 # sets once the ovarian full-data annotation labels are locked.
 
 marker_sets:
+  # Markers must EXIST in the assay panel. The original sets were written for a
+  # generic scRNA reference and do not survive contact with Xenium Prime 5K on
+  # this ovary sample: fibroblast had 0/2 genes present (COL1A1, COL1A2 are both
+  # absent), myeloid 1/6 (only FCGR3A), epithelial 4/7 (no KRT8/18/19). The
+  # fibroblast and monocyte compartments were therefore unassignable at any
+  # threshold, and reference recall against the reviewed full-slide labels was
+  # 28% -- with 409 true reference cells landing in the tumour compartment.
+  #
+  # These sets are all confirmed present in the panel and were selected by
+  # compartment-level accuracy against the 1,897 reviewed ROI labels:
+  # reference recall 84%, with 12 tumour cells leaking into the baseline.
+  #
+  # Note PDGFRB/THY1 are mural/pericyte genes, so they also light up
+  # endothelium; that costs endothelial-vs-fibroblast class accuracy but is
+  # irrelevant here because both map to `reference`. Dropping them for cleaner
+  # class labels measurably HURT what matters (recall 84% -> 78%).
+  #
+  # Canonical fibroblast markers COL1A1/COL1A2/COL3A1/DCN/LUM/VCAN/FBLN1 are
+  # all absent from this panel; COL5A1/FAP/PDGFRB/THY1/POSTN is what it offers.
   epithelial:
     - EPCAM
-    - KRT8
-    - KRT18
-    - KRT19
     - MSLN
     - PAX8
-    - MUC16
+    - CDH1
   t_cell:
-    - CD3D
     - CD3E
-    - TRAC
-    - CD4
-    - CD8A
-    - CD8B
+    - CD2
+    - CD7
+    - GZMA
   b_cell:
     - MS4A1
     - CD79A
-    - CD79B
+    - BANK1
     - MZB1
   myeloid:
-    - LST1
-    - TYROBP
-    - LYZ
-    - C1QA
-    - C1QB
-    - FCGR3A
+    - CD68
+    - CD14
+    - CSF1R
+    - CD163
+    - MSR1
   fibroblast:
-    - COL1A1
-    - COL1A2
-    - DCN
-    - LUM
+    - COL5A1
+    - FAP
+    - PDGFRB
+    - THY1
+    - POSTN
   endothelial:
     - PECAM1
-    - VWF
-    - KDR
-    - EMCN
-
+    - CDH5
+    - CLDN5
+    - EGFL7
 priority_genes:
   - TP53
   - BRCA1
