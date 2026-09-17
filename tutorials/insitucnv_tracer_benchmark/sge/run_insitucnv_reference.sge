@@ -24,7 +24,11 @@ set -euo pipefail
 REPO=${REPO:-/mnt/storage/dept/medonc/beroukhim/youyun/BTC_GBM/code/TRACER}
 BENCH=$REPO/tutorials/insitucnv_tracer_benchmark
 ARM="${ARM:?Set ARM=raw or ARM=tracer_whole}"
-RUN=${RUN:-pilot_full_100}
+# Required, like ARM. The old default was `pilot_full_100`, a run directory
+# that has never existed -- so a bare submit failed on a missing input
+# rather than telling you what to set. Run names are chosen per panel/
+# condition, e.g. roi_nuclear_grid3cpmi.
+RUN="${RUN:?Set RUN=<run dir name under output/runs>, e.g. roi_nuclear_grid3cpmi}"
 RUNDIR=$BENCH/output/runs/$RUN
 
 ROI=${ROI:-$BENCH/data/roi_transcripts.parquet}
