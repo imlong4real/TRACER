@@ -33,7 +33,8 @@ from pathlib import Path
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
-import numpy as np  # noqa: E402
+import numpy as np
+from common import cnv_bin_chromosomes, chromosome_rank  # noqa: E402
 import pandas as pd  # noqa: E402
 
 
@@ -86,19 +87,23 @@ def compute_umap(adata, clone_col: str, n_neighbors: int):
 
 
 def summarize_chrom_by_clone(adata, clone_col: str) -> pd.DataFrame:
-    from scipy import sparse as sp
-    if "gene_values_cnv" not in adata.layers or "chromosome" not in adata.var.columns:
+    """Mean CNV per clone x chromosome, from the obsm CNV matrix.
+
+    Uses `cnv_bin_chromosomes`; the old `layers["gene_values_cnv"]` lookup made
+    this return empty on every run, which is why the chromosome heatmap was
+    always skipped.
+    """
+    X, chrom = cnv_bin_chromosomes(adata)
+    if X is None:
         return pd.DataFrame()
-    X = adata.layers["gene_values_cnv"]
-    X = X.toarray() if sp.issparse(X) else np.asarray(X)
-    chrom = adata.var["chromosome"].astype(str).to_numpy()
     clones = adata.obs[clone_col].astype(str).to_numpy()
     rows = {}
     for cl in sorted(pd.unique(clones)):
         mask = clones == cl
-        per_gene = X[mask].mean(axis=0)
-        rows[cl] = pd.Series(per_gene, index=chrom).groupby(level=0).mean()
-    return pd.DataFrame(rows).T  # clone x chromosome
+        per_bin = np.asarray(X[mask].mean(axis=0)).ravel()
+        rows[cl] = pd.Series(per_bin, index=chrom).groupby(level=0).mean()
+    out = pd.DataFrame(rows).T  # clone x chromosome
+    return out.reindex(columns=sorted(out.columns, key=chromosome_rank))
 
 
 def main() -> int:

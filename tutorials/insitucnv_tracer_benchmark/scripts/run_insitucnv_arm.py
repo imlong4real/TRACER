@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from common import UNASSIGNED_TOKENS, ensure_parent, read_gene_positions, require_columns, standardize_transcript_columns, write_json
+from common import UNASSIGNED_TOKENS, ensure_parent, read_gene_positions, require_columns, standardize_transcript_columns, write_json, cnv_bin_chromosomes, chromosome_rank
 
 TRACER_WHOLE_ETYPES = {"cell"}
 TRACER_ALL_ETYPES = {"cell", "partial"}
@@ -41,10 +41,20 @@ def parse_args() -> argparse.Namespace:
 def resolve_entity_col(df: pd.DataFrame, arm: str) -> str:
     if arm == "raw":
         return "cell_id"
-    for col in ("cell_id_tracer", "stitched", "cell_id_finetuned"):
+    # `tracer_id` first: it is the RECONCILED assignment run_tracer.py scores
+    # on (its own label_col default). The rest are legacy names kept so older
+    # refined parquets still load. Order matters -- outputs from before the
+    # rename carry both `tracer_id` and `stitched`, and they disagree (38% of
+    # rows on the 2026-08-06 run), so falling back to `stitched` when
+    # `tracer_id` is present would silently analyse different entities.
+    candidates = ("tracer_id", "cell_id_tracer", "stitched", "cell_id_finetuned")
+    for col in candidates:
         if col in df.columns:
             return col
-    raise SystemExit("No TRACER entity column found; looked for cell_id_tracer, stitched, cell_id_finetuned")
+    raise SystemExit(
+        f"No TRACER entity column found; looked for {', '.join(candidates)}. "
+        f"Present: {sorted(df.columns)}"
+    )
 
 
 def filter_arm(df: pd.DataFrame, arm: str, entity_col: str) -> pd.DataFrame:
@@ -150,20 +160,22 @@ def run_infercnv(adata, window_size: int, resolution: float, smoothing_neighbors
 
 
 def summarize_chromosomes(adata) -> pd.DataFrame:
-    from scipy import sparse as sp
+    """Mean CNV per compartment x chromosome, from the obsm CNV matrix.
 
-    if "gene_values_cnv" not in adata.layers:
+    Reads `obsm["X_cnv"]` via `cnv_bin_chromosomes`; see that docstring for why
+    the old `layers["gene_values_cnv"]` lookup silently produced nothing.
+    """
+    X, chrom = cnv_bin_chromosomes(adata)
+    if X is None:
         return pd.DataFrame()
-    X = adata.layers["gene_values_cnv"]
-    X = X.toarray() if sp.issparse(X) else np.asarray(X)
-    chrom = adata.var["chromosome"].astype(str).to_numpy()
     rows = []
     for comp in sorted(adata.obs["compartment"].astype(str).unique()):
         mask = adata.obs["compartment"].astype(str).to_numpy() == comp
         if not mask.any():
             continue
-        per_gene = X[mask].mean(axis=0)
-        row = pd.Series(per_gene, index=chrom).groupby(level=0).mean()
+        per_bin = np.asarray(X[mask].mean(axis=0)).ravel()
+        row = pd.Series(per_bin, index=chrom).groupby(level=0).mean()
+        row = row.reindex(sorted(row.index, key=chromosome_rank))
         row["compartment"] = comp
         rows.append(row)
     return pd.DataFrame(rows)

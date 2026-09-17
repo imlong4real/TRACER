@@ -98,6 +98,44 @@ def read_gene_positions(path: str | Path) -> pd.DataFrame:
     return df.drop_duplicates("gene", keep="first")
 
 
+def cnv_bin_chromosomes(adata) -> tuple[Any, Any]:
+    """Return ``(values, chrom_label_per_column)`` for an infercnvpy result.
+
+    infercnvpy writes its CNV estimate to ``adata.obsm["X_cnv"]`` -- a
+    cells x genomic-BIN matrix, NOT cells x genes -- and records where each
+    chromosome starts along that axis in ``adata.uns["cnv"]["chr_pos"]``
+    (chromosome -> first column index). On this pipeline's output X_cnv is
+    (n_cells, 354) against 4,968 genes, so the bin axis cannot be indexed with
+    ``adata.var``.
+
+    Callers previously looked for a ``layers["gene_values_cnv"]``, which
+    nothing in this pipeline produces. Both chromosome summaries therefore
+    returned empty silently: no ``chrom_cnv_by_compartment.csv`` was written,
+    which is the input ``compare_reference_condition.py`` requires, and the
+    per-clone chromosome heatmap was skipped with a one-line notice.
+
+    Returns ``(None, None)`` when the CNV matrix or its chromosome map is
+    absent, so callers can degrade as before rather than raise.
+    """
+    import numpy as np
+    import scipy.sparse as sp
+
+    X = adata.obsm.get("X_cnv") if hasattr(adata, "obsm") else None
+    chr_pos = (adata.uns.get("cnv") or {}).get("chr_pos") if hasattr(adata, "uns") else None
+    if X is None or not chr_pos:
+        return None, None
+    X = X.toarray() if sp.issparse(X) else np.asarray(X)
+
+    # chr_pos gives only the START column of each chromosome; expand to a label
+    # per column by taking each chromosome's span up to the next start.
+    items = sorted(((str(k), int(v)) for k, v in dict(chr_pos).items()), key=lambda kv: kv[1])
+    labels = np.empty(X.shape[1], dtype=object)
+    for i, (name, start) in enumerate(items):
+        stop = items[i + 1][1] if i + 1 < len(items) else X.shape[1]
+        labels[start:stop] = name
+    return X, labels
+
+
 def write_json(path: str | Path, payload: dict[str, Any]) -> None:
     path = ensure_parent(path)
     with path.open("w") as handle:

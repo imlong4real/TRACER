@@ -39,13 +39,20 @@ MIN_TX=${MIN_TX:-20}
 MIN_GENES=${MIN_GENES:-10}
 
 # Arm-specific inputs. Raw uses the original ROI (cell_id segmentation); TRACER
-# uses the refined parquet whose final label column is "stitched" (also carries
-# _etype for the whole/partial split). run_insitucnv_arm resolves the entity col.
+# uses the refined parquet, whose final label column is the reconciled
+# `tracer_id` (it also carries _etype for the whole/partial split).
+#
+# This was `stitched`, which no longer exists: run_tracer.py emits `tracer_id`
+# as the reconciled assignment and treats `stitched` as legacy. Older outputs
+# carried BOTH, and they are NOT interchangeable -- on the 2026-08-06 run they
+# disagreed on 38% of rows (2,792 vs 2,304 distinct entities), so `stitched`
+# would feed InSituCNV a different entity definition than the one TRACER scored
+# itself on. Override with ENTITY_COL=... for an older parquet.
 case "$ARM" in
     raw)
-        TX=$ROI;             ENTITY_COL=cell_id ;;
+        TX=$ROI;             ENTITY_COL=${ENTITY_COL:-cell_id} ;;
     tracer_whole)
-        TX=$TRACER_REFINED;  ENTITY_COL=stitched ;;
+        TX=$TRACER_REFINED;  ENTITY_COL=${ENTITY_COL:-tracer_id} ;;
     *)
         echo "ARM must be raw or tracer_whole, got: $ARM" >&2; exit 1 ;;
 esac
