@@ -253,8 +253,17 @@ fi
 
 if [[ "$STAGE_ONLY" == "1" ]]; then
     echo "STAGE_ONLY=1: skipping ROI seed-support check because no panel was written."
+    # The nuclear arm filters on the nucleus flag; the whole-cell arm keeps
+    # every assigned transcript, and build_panels.py then REQUIRES an explicit
+    # --panel-preset (it refuses --transcripts without --nucleus-only unless
+    # told which recipe to use).
+    if [[ "$COUNT_SCOPE" == "nuclear" ]]; then
+        NEXT_SCOPE_FLAG="--nucleus-only "
+    else
+        NEXT_SCOPE_FLAG=""
+    fi
     echo "Next: scripts/build_panels.py --transcripts $STAGE_OUT \\"
-    echo "        --nucleus-only --panel-preset nuclear --emit-cpmi"
+    echo "        ${NEXT_SCOPE_FLAG}--panel-preset nuclear --emit-cpmi"
     exit 0
 fi
 
