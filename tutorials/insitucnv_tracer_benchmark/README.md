@@ -392,6 +392,28 @@ reasonable `median_positive_pairs_per_seed`. This is more important than global
 panel positivity. If a panel is `CHECK`, do not trust downstream CNV from that
 panel until you adjust `QV_MIN`, `MIN_OCC`, `SUBSAMPLE`, or `TOP_K_PER_GENE`.
 
+Re-run the gate whenever the ROI is re-selected. It is a property of the
+panel AND the ROI, so a gate result from an earlier ROI says nothing about the
+current one. This bit us once: the `whole_tissue_cpmi_*_50k.csv.gz.seed_support.json`
+files were written 2026-07-27 15:46, but `select_roi.py` regenerated
+`data/roi_transcripts.parquet` at 20:27 the same day. Those gate results
+describe a superseded 28,673-cell ROI; the final ROI has 1,898 cells, of which
+1,793 are usable seeds. The panels used for the 2026-08-06/07 TRACER runs were
+therefore never gated against the ROI they ran on. (They do pass -- re-checked
+later -- but the record claimed evidence it did not have.) A quick sanity check
+catches this class of error: `n_seeds` x `median_nuclear_genes_per_seed` cannot
+exceed the ROI parquet's row count.
+
+The gate is a FLOOR, not a ranking. It counts how much positive support exists,
+not whether the weights are well calibrated, and a smaller panel scores lower
+simply by having fewer edges. Measured on the final ROI, the unbalanced August
+panels score slightly higher than the `grid3` rebuilds (nuclear median 85,793 vs
+82,960; whole-cell 87,444 vs 83,853) while all four are `HEALTHY` with zero
+zero-support seeds. Do not read that as the old draw being better -- note the
+gap narrows at `p10` (6,523 vs 6,456; 6,750 vs 6,572), i.e. the support given up
+sits in already-well-covered cells. Use the gate to reject unusable panels, and
+judge draws on downstream CNV concordance instead.
+
 Use the nuclear 50k CPMI panel by default for the first TRACER run. If the
 whole-cell CPMI panel has better support and you intentionally want to test that
 arm, pass it with `PANEL=...`.
