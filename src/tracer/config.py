@@ -806,6 +806,103 @@ class BootstrapConfig:
 
 
 @dataclass(frozen=True)
+class PanelConfig:
+    """Recipe for a depth-corrected (cPMI) reference panel.
+
+    Configures `tracer.conflict_reference.build_depth_corrected_reference`,
+    the estimator behind `scripts/build_panels.py`. Distinct from `BootstrapConfig`,
+    which configures the resampling `compute_pmi_bootstrap` path.
+
+    WHY `promote` MATTERS MOST: the pipeline resolves a panel's edge weight as
+    ``"PMI" if "PMI" in columns`` (pipeline.py:1640, 2037) and cannot be told
+    which estimator that column holds. Whatever lands in `PMI` is what TRACER
+    consumes.
+
+    TWO RECIPES, and they INVERT on `promote` and `strategy`:
+
+    WITH an scRNA reference -- these defaults (`xgt1_cpmi_balanced_rep`).
+        Cell-type balanced with replacement; xgt1 presence; cPMI promoted;
+        depth binned on n_genes, because the xgt1 rule
+        ``count > (e-1)*lib/1e4`` already conditions on library size, which
+        makes total_counts the wrong covariate.
+
+    WITHOUT one (nuclear / in-situ) -- `load_config(panel_preset="nuclear")`
+        (`nucgrid_pmi`). Label-free grid3 balancing and NAIVE PMI. This is
+        INTERIM, not an endorsement: naive PMI on nuclei is depth-confounded
+        (67% of pairs positive, median +0.46; the marginal-product null
+        under-predicts E by ~59% when libraries vary 200x). cPMI is better
+        PER CELL there (size-matched entropy 0.2845 vs 0.3576) but the
+        nuclear reference is evidence-starved -- O median 13 vs 86 for scRNA
+        -- so against PMI_THR=0.2 read as an effect size it admits too little
+        (retention 54-78% vs 91%). Fix with more nuclei, not a lower
+        threshold, then switch `promote` to cPMI.
+        grid3 is nuclear-ONLY: on scRNA it loses to cell-type labels
+        (0.2976 vs 0.2361).
+    """
+
+    #: Reference draw. rep/capped need a cell-type column; grid3/grid4 are
+    #: label-free; vanilla is unbalanced.
+    strategy: Literal["rep", "capped", "vanilla", "grid3", "grid4"] = "rep"
+    #: Presence arms to build. xgt1 = log1p(CP10k) with min_count=1, i.e.
+    #: count > (e-1)*lib/1e4. NOTE xgt1 is a NO-OP on nuclear input
+    #: ((e-1)*lib/1e4 maxes at 0.036 there); it is active on scRNA (28.7% of
+    #: lung cells, 39% of PDAC).
+    arms: tuple[str, ...] = ("xgt1",)
+    #: Which estimator is copied into the `PMI` column the pipeline reads.
+    promote: Literal["cPMI", "PMI"] = "cPMI"
+    #: Covariate the cPMI null is binned on. Inert for the naive-PMI column,
+    #: which never reads E.
+    depth_metric: Literal["total_counts", "n_genes"] = "n_genes"
+    min_det_cells: int = 25
+    n_depth_bins: int = 25
+    seed: int = 0
+    #: Conjunctive magnitude cut (drop only if BOTH |PMI| and |cPMI| <= tau).
+    #: OFF by default and it should stay that way -- truncation is NOT
+    #: behaviour-neutral. Absent edges are PERMISSIVE in the pipeline
+    #: (skipped, not vetoed), so a thinner panel ADMITS MORE: a 12.2%
+    #: conjunctive cut on lung moved cells 49,155 -> 49,809 and whole-cell
+    #: RCTD entropy 0.227 -> 0.252.
+    min_abs_value: float | None = None
+    #: Per-gene rank cut: keep each gene's K strongest partners by |cPMI|
+    #: (one ranking per gene; an edge survives if in the top-K of either
+    #: endpoint). A memory lever for whole-transcriptome panels.
+    top_k_per_gene: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.promote not in ("cPMI", "PMI"):
+            raise ValueError(
+                f"panel.promote must be 'cPMI' or 'PMI'; got {self.promote!r}"
+            )
+        if self.strategy not in ("rep", "capped", "vanilla", "grid3", "grid4"):
+            raise ValueError(f"panel.strategy invalid: {self.strategy!r}")
+        if self.depth_metric not in ("total_counts", "n_genes"):
+            raise ValueError(f"panel.depth_metric invalid: {self.depth_metric!r}")
+        if self.min_det_cells < 1:
+            raise ValueError("panel.min_det_cells must be >= 1")
+        if self.n_depth_bins < 1:
+            raise ValueError("panel.n_depth_bins must be >= 1")
+        if self.top_k_per_gene is not None and self.top_k_per_gene < 1:
+            raise ValueError("panel.top_k_per_gene must be >= 1 or None")
+        import warnings
+        if "xgt1" in tuple(self.arms) and self.depth_metric == "total_counts":
+            warnings.warn(
+                "panel.depth_metric='total_counts' with an xgt1 arm: the xgt1 "
+                "presence rule already conditions on library size, so the "
+                "depth-conditioned null double-counts it. Use n_genes.",
+                UserWarning, stacklevel=2,
+            )
+        if self.min_abs_value is not None:
+            warnings.warn(
+                f"panel.min_abs_value={self.min_abs_value} truncates the panel. "
+                "This is NOT behaviour-neutral: absent edges are permissive in "
+                "the pipeline (skipped, not vetoed), so a thinner panel admits "
+                "MORE. Measured on lung: a 12.2% cut moved whole-cell entropy "
+                "0.227 -> 0.252.",
+                UserWarning, stacklevel=2,
+            )
+
+
+@dataclass(frozen=True)
 class PipelineConfig:
     """Top-level pipeline config. `final_rescue` defaults to a copy of
     `rescue` with `small_entity_guard_n = 0`; override by passing an
@@ -831,6 +928,7 @@ class PipelineConfig:
         )
     )
     bootstrap: BootstrapConfig = field(default_factory=BootstrapConfig)
+    panel: PanelConfig = field(default_factory=PanelConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -853,6 +951,7 @@ _SECTION_TO_CLS: dict[str, type] = {
     "demote": DemoteConfig,
     "final_rescue": RescueConfig,
     "bootstrap": BootstrapConfig,
+    "panel": PanelConfig,
 }
 
 
@@ -970,11 +1069,14 @@ def load_config(
     path: str | Path | None = None,
     *,
     platform: str | None = None,
+    panel_preset: str | None = None,
 ) -> PipelineConfig:
     """Load a pipeline config.
 
-    Layering: ``configs/defaults.toml``  ← (optional) ``configs/platforms/<platform>.toml``
-    ← (optional) ``path``. Each layer patches keys.
+    Layering: ``configs/defaults.toml`` ← (optional)
+    ``configs/platforms/<platform>.toml`` ← (optional)
+    ``configs/panels/<panel_preset>.toml`` ← (optional) ``path``.
+    Each layer patches keys.
 
     Parameters
     ----------
@@ -984,6 +1086,13 @@ def load_config(
         Optional platform-preset name (file under ``configs/platforms/``,
         without the ``.toml`` suffix). E.g. ``"xenium_3d"`` or
         ``"vhd_unsegmented"``.
+    panel_preset
+        Optional PANEL-recipe preset (file under ``configs/panels/``). This
+        axis is ORTHOGONAL to ``platform``: it selects the reference-panel
+        recipe, not the assay. ``None`` keeps the with-scRNA-reference recipe
+        in ``defaults.toml``; ``"nuclear"`` switches to the label-free,
+        naive-PMI recipe for in-situ input with no matched reference. The two
+        invert on ``panel.promote`` and ``panel.strategy``.
 
     Returns
     -------
@@ -1004,6 +1113,16 @@ def load_config(
             )
         merged = _deep_merge(merged, _load_toml(plat_path))
 
+    if panel_preset is not None:
+        panel_path = _DEFAULT_CONFIGS_DIR / "panels" / f"{panel_preset}.toml"
+        if not panel_path.exists():
+            available = sorted(
+                p.stem for p in (_DEFAULT_CONFIGS_DIR / "panels").glob("*.toml")
+            ) if (_DEFAULT_CONFIGS_DIR / "panels").exists() else []
+            raise FileNotFoundError(
+                f"Unknown panel_preset {panel_preset!r}; available: {available}"
+            )
+        merged = _deep_merge(merged, _load_toml(panel_path))
     if path is not None:
         merged = _deep_merge(merged, _load_toml(Path(path)))
 

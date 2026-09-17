@@ -421,3 +421,30 @@ min_occurrences_per_context = 2
 min_expected_cooccur_for_evidence = 10.0
 min_expected_cooccur_for_bootstrap = 10.0            # flavor-C: explicit (= evidence threshold)
 set_neg_one = true                                   # k=0 + E_full≥thr → neg_one sentinel
+
+# ---------------------------------------------------------------------
+# Depth-corrected (cPMI) reference panel — `build_depth_corrected_reference`,
+# the estimator behind `build_panels.py`. Distinct from [bootstrap], which
+# configures the resampling `compute_pmi_bootstrap` path.
+#
+# THIS BLOCK IS THE **WITH-scRNA-REFERENCE** RECIPE (`xgt1_cpmi_balanced_rep`).
+# For nuclear / in-situ input with NO matched reference, load the override:
+#     load_config(panel_preset="nuclear")      -> configs/panels/nuclear.toml
+# `promote` and `strategy` INVERT between the two recipes.
+#
+# `promote` is the field that matters most: the pipeline resolves a panel's
+# edge weight as `"PMI" if "PMI" in columns` and cannot be told which
+# estimator that column holds, so whatever is promoted is what TRACER uses.
+# ---------------------------------------------------------------------
+[panel]
+strategy = "rep"            # cell-type balanced, WITH replacement
+arms = ["xgt1"]             # count > (e-1)*lib/1e4; active on scRNA, no-op on nuclei
+promote = "cPMI"            # depth-corrected estimator into the PMI column
+depth_metric = "n_genes"    # xgt1 already conditions on library size
+min_det_cells = 25
+n_depth_bins = 25
+seed = 0
+# min_abs_value  — leave unset. Truncation is NOT behaviour-neutral: absent
+#                  edges are permissive, so a thinner panel ADMITS MORE.
+# top_k_per_gene — per-gene rank cut; a memory lever for whole-transcriptome
+#                  panels (VisiumHD), not a quality setting.
