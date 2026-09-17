@@ -60,7 +60,11 @@ def marker_scores(df: pd.DataFrame, entity_col: str, marker_sets: dict[str, list
 def majority_raw_annotation(df: pd.DataFrame, entity_col: str, raw_map: pd.Series) -> pd.DataFrame:
     if "cell_id" not in df.columns:
         return pd.DataFrame(columns=["entity_id", "majority_raw_annotation", "raw_annotation_fraction"])
-    tmp = df[[entity_col, "cell_id"]].copy()
+    # Dedupe: on the raw arm `entity_col` IS "cell_id", and selecting it twice
+    # yields duplicate columns, so `tmp["cell_id"]` returns a DataFrame whose
+    # .map() rejects a dict. That made --raw-annotations unusable for the raw
+    # arm while working fine for TRACER entities ("stitched").
+    tmp = df[list(dict.fromkeys([entity_col, "cell_id"]))].copy()
     tmp["raw_annotation"] = tmp["cell_id"].astype(str).map(raw_map)
     tmp = tmp.dropna(subset=["raw_annotation"])
     if tmp.empty:
