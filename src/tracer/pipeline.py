@@ -1647,6 +1647,9 @@ def run_segmented_pipeline(df: pd.DataFrame,
     _p1_agg_pct = getattr(_p1, "aggregator_percentile", 25.0) if _p1 is not None else 25.0
     _p1_rs_thr = getattr(_p1, "real_signal_threshold", 0.05) if _p1 is not None else 0.05
     _p1_neg_thr = getattr(_p1, "neg_npmi_threshold", -0.2) if _p1 is not None else -0.2
+    # phase1.tx_weighted_prune was loaded but never read (the module constant won);
+    # wire it so `tx_weighted_prune = false` gives the flat (one-vote-per-gene) 1a/1c greedy.
+    _p1_tx_weighted = getattr(_p1, "tx_weighted_prune", TX_WEIGHTED_PRUNE) if _p1 is not None else TX_WEIGHTED_PRUNE
     _set_admit_independent(getattr(_p1, "admit_independent", True) if _p1 is not None else True)
     # Prune scope: one enum drives BOTH the Phase-1a seed source and the
     # 1b/1c admission, so the split-brain state (nuclear seed gating a
@@ -1667,7 +1670,7 @@ def run_segmented_pipeline(df: pd.DataFrame,
             nuclear_only_admit=_p1_admit_only,
             nuclear_seed_only=_p1_seed_only,
             fallback_whole_cell_admit=FALLBACK_WHOLE_CELL_ADMIT,
-            tx_weighted=TX_WEIGHTED_PRUNE,
+            tx_weighted=_p1_tx_weighted,
             veto_mode=_p1_veto_mode,
             mean_admit_threshold=_p1_mean_admit,
             min_admit_threshold=_p1_min_admit,
