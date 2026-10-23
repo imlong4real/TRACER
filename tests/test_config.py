@@ -292,12 +292,17 @@ def test_stitch_g_z_um_rejects_nonpositive():
 @pytest.mark.parametrize("platform, expected_g_z", [
     ("xenium", 1.0),
     ("atera", 1.0),
-    ("cosmx", 0.8),
-    ("merfish", 1.5),
+    # Discrete-plane platforms bin at the MEASURED plane spacing of micron z
+    # (0.8 / 1.5 µm on the benchmark ROIs) instead of a hard-coded value.
+    ("cosmx", "auto"),
+    ("merfish", "auto"),
 ])
 def test_platform_presets_set_g_z_um(platform, expected_g_z):
     cfg = load_config(platform=platform)
-    assert cfg.stitch.g_z_um == pytest.approx(expected_g_z)
+    if isinstance(expected_g_z, str):
+        assert cfg.stitch.g_z_um == expected_g_z
+    else:
+        assert cfg.stitch.g_z_um == pytest.approx(expected_g_z)
 
 
 def test_g_z_um_precedence_user_over_platform(tmp_path: Path):

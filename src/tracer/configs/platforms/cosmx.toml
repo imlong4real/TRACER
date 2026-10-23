@@ -3,20 +3,29 @@
 # Layered on top of `defaults.toml` via:
 #   load_config(platform="cosmx")
 #
-# Why this preset exists
-# ----------------------
-# CosMx images a stack of DISCRETE optical z-planes. On the NSCLC ROI
-# used for benchmarking the planes are spaced ~0.8 µm apart
-# (z ∈ {-0.8, 0.0, 0.8, 1.6, ... 7.2}, 11 planes). The global default
-# `stitch.g_z_um = 1.0` µm is misaligned with that 0.8 µm grid: some
-# adjacent planes collapse into one z-bin while others split, giving
-# uneven z-connectivity in Stitch. Setting g_z_um to the plane spacing
-# makes consecutive planes map to consecutive z-bins (exactly one bin
-# apart), so they connect cleanly at `z_neighbor_depth = 1`.
+# Units: read before running a raw flat file
+# ------------------------------------------
+# CosMx flat files give `x_global_px` / `y_global_px` in PIXELS and `z` as a
+# z-plane INDEX, while every TRACER threshold is in microns. Declare both for
+# that input, with the calibration of YOUR run (instrument documentation or
+# run metadata):
+#   --xy-units px --um-per-px <um/px> --z-units plane --z-step-um <um>
+# or the same keys under [coordinates] in a user TOML. This preset sets
+# neither: pixel size and z-step differ across instruments and acquisitions,
+# and TRACER never infers them from the platform name. Tables that are
+# already in microns (e.g. the benchmark ROIs) need no declaration.
 #
-# Set `g_z_um = "auto"` instead to derive this from the observed z
-# distribution at run time (recommended if plane spacing varies across
-# CosMx instruments / panels).
+# z-bin
+# -----
+# CosMx images DISCRETE z-planes. Once z is in microns, `g_z_um = "auto"`
+# sets the z-bin to the observed plane spacing, so consecutive planes sit
+# exactly one bin apart and connect at `z_neighbor_depth = 1`. On the NSCLC
+# benchmark ROI (11 planes, 0.8 µm apart) it resolves to 0.8 µm, the value
+# this preset used to hard-code. A fixed 0.8 is wrong for an acquisition
+# with another z-step: smaller than the spacing and adjacent planes stop
+# connecting, larger and planes merge. "auto" only MEASURES spacing in
+# micron data; it does not convert plane indices, which is why they must be
+# declared above. An explicit --g-z-um or user-config value still wins.
 
 [bootstrap]
 # CosMx exports an `overlaps_nucleus`-equivalent flag; restrict the PMI
@@ -25,5 +34,5 @@ nuclear_only = true
 nucleus_col = "overlaps_nucleus"
 
 [stitch]
-# z-plane spacing on CosMx ≈ 0.8 µm. See header.
-g_z_um = 0.8
+# Discrete planes: bin at the measured plane spacing. See header.
+g_z_um = "auto"

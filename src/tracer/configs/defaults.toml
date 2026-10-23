@@ -8,6 +8,33 @@
 # the two in lock-step.
 
 # ---------------------------------------------------------------------
+# Coordinates — units of the INPUT x/y/z, converted ONCE to microns.
+#
+# Every *_um threshold below assumes microns. The entry points
+# (run_tracer.py, preprocess_xenium.py, tracer.units.to_microns) apply
+# this declaration before the pipeline runs; the pipeline never rescales.
+# The default is what TRACER has always assumed: x, y, z already in µm
+# (Xenium/Atera, MERSCOPE global_x/global_y, any standardized parquet).
+#
+# Raw CosMx *_px coordinates and z-plane indices (CosMx `z`, MERSCOPE
+# `global_z`) are NOT microns. Declare them for that input (user TOML or
+# CLI), with a calibration from the instrument's documentation or run
+# metadata. It is never inferred from coordinate ranges or the platform.
+# This is unit conversion; choosing bin sizes for micron data is a
+# separate step (stitch.g_z_um = "auto" measures plane spacing, it does
+# not convert units).
+# ---------------------------------------------------------------------
+[coordinates]
+xy_units = "um"        # "um" | "mm" | "nm" | "px"
+z_units = "um"         # "um" | "mm" | "nm" | "px" | "plane"
+# Calibration keys (no defaults — a value here must come from YOUR run):
+# um_per_px = <µm per xy pixel>   # or [x, y]; required for xy_units = "px"
+# z_step_um = <µm between planes> # required for z_units = "plane"
+# z_um_per_px = <µm per z pixel>  # required for z_units = "px"
+# pixel_transform = "<run>/images/micron_to_mosaic_pixel_transform.csv"
+#                    # vendor micron->pixel affine (MERSCOPE); inverted
+
+# ---------------------------------------------------------------------
 # Phase 1 — nuclear-anchored greedy bad-edge prune + admission.
 # ---------------------------------------------------------------------
 [phase1]
@@ -329,9 +356,10 @@ max_merger_depth = 3
 candidate_source = "grid"
 bin_size_um = 2.0
 # z-bin size (µm). Default 1.0 is tuned for Xenium's near-continuous z.
-# Discrete-plane platforms need a value matching their plane spacing —
-# use a platform preset (cosmx=0.8, merfish=1.5) or set g_z_um = "auto"
-# to derive it from the observed z distribution at run time. Use null to
+# Discrete-plane platforms need a value matching their plane spacing:
+# g_z_um = "auto" measures it from the observed z at run time (the cosmx
+# and merfish presets use it). z must already be microns — "auto" sizes
+# bins, it does not convert plane indices (see [coordinates]). Use null to
 # fall back to the legacy within-cell auto_Gz estimator.
 g_z_um = 1.0
 z_neighbor_depth = 1

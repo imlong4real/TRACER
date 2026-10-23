@@ -25,6 +25,14 @@ connect at ``z_neighbor_depth = 1``. This module resolves the requested
 **observed** z distribution and returns the value to use plus a
 human-readable reason and any warnings.
 
+This is bin SIZING, not unit conversion. The z values must already be
+microns: given raw plane indices (0, 1, 2, ...) ``"auto"`` would measure a
+spacing of 1 and treat the planes as 1 µm apart, while every other µm
+threshold (``split_phase1.dz_threshold_um``, the Rescue z-bound, the Stitch
+3D distance) would also read the indices as microns. Convert first with
+``tracer.units.to_microns`` (``[coordinates] z_units = "plane"``,
+``z_step_um``).
+
 Heuristic (documented + explicit)
 ---------------------------------
 1. **Degenerate z** (absent / all-NaN / a single distinct value): run in
