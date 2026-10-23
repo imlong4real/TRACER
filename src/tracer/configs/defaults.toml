@@ -438,7 +438,7 @@ set_neg_one = true                                   # k=0 + E_full≥thr → ne
 # ---------------------------------------------------------------------
 [panel]
 strategy = "rep"            # cell-type balanced, WITH replacement
-arms = ["xgt1"]             # count > (e-1)*lib/1e4; active on scRNA, no-op on nuclei
+arms = ["xgt1"]             # log1p(CP10k) >= 1: count >= (e-1)*lib/1e4; active on scRNA, no-op on nuclei
 promote = "cPMI"            # depth-corrected estimator into the PMI column
 depth_metric = "n_genes"    # xgt1 already conditions on library size
 min_det_cells = 25

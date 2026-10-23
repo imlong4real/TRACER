@@ -328,15 +328,21 @@ def explode_to_transcripts(
 # 2. NPMI panel
 # =====================================================================
 def load_pmi_panel(npmi_path: str | Path) -> pd.DataFrame:
-    """Load the long-format NPMI panel (gene_i, gene_j, NPMI[, ...])."""
+    """Load the long-format panel (gene_i, gene_j, PMI and/or NPMI[, ...]).
+
+    The pipeline reads PMI when present, else NPMI, so either is enough. The
+    cPMI reference panel from build_panels.py carries only PMI (cPMI promoted
+    into it) and used to be rejected here.
+    """
     df = pd.read_csv(npmi_path)
     needed = {"gene_i", "gene_j"}
     if not needed.issubset(df.columns):
         raise ValidationError(
             f"NPMI panel {npmi_path} missing columns {needed - set(df.columns)}"
         )
-    if "NPMI" not in df.columns:
-        raise ValidationError(f"NPMI panel {npmi_path} has no 'NPMI' column.")
+    if not {"PMI", "NPMI"} & set(df.columns):
+        raise ValidationError(
+            f"panel {npmi_path} has neither a 'PMI' nor an 'NPMI' column.")
     df["gene_i"] = df["gene_i"].astype(str).str.strip()
     df["gene_j"] = df["gene_j"].astype(str).str.strip()
     return df

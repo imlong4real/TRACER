@@ -5,6 +5,12 @@ Orchestrates ``tracer.metrics.compute_pmi_bootstrap`` (active-sampler
 bootstrap with per-pair CIs, sparse CSR output) to produce the long-format
 NPMI panel that TRACER and the get_metric benchmark consume.
 
+This is the BOOTSTRAP estimator (marginal-product null, per-pair CIs). The
+canonical panel for a single-cell reference is the depth-corrected cPMI recipe
+in ``scripts/build_panels.py`` (``xgt1_cpmi_balanced_rep``). Use this script
+when you deliberately want the bootstrap PMI/NPMI panel, e.g. to reproduce
+earlier runs.
+
 USAGE
 =====
 Small-panel (lung Xenium, ~300 genes)::

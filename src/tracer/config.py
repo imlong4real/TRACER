@@ -823,7 +823,7 @@ class PanelConfig:
     WITH an scRNA reference -- these defaults (`xgt1_cpmi_balanced_rep`).
         Cell-type balanced with replacement; xgt1 presence; cPMI promoted;
         depth binned on n_genes, because the xgt1 rule
-        ``count > (e-1)*lib/1e4`` already conditions on library size, which
+        ``count >= (e-1)*lib/1e4`` already conditions on library size, which
         makes total_counts the wrong covariate.
 
     WITHOUT one (nuclear / in-situ) -- `load_config(panel_preset="nuclear")`
@@ -843,8 +843,9 @@ class PanelConfig:
     #: Reference draw. rep/capped need a cell-type column; grid3/grid4 are
     #: label-free; vanilla is unbalanced.
     strategy: Literal["rep", "capped", "vanilla", "grid3", "grid4"] = "rep"
-    #: Presence arms to build. xgt1 = log1p(CP10k) with min_count=1, i.e.
-    #: count > (e-1)*lib/1e4. NOTE xgt1 is a NO-OP on nuclear input
+    #: Presence arms to build. xgt1 = log1p(CP10k) >= 1 with the true library
+    #: size, i.e. count >= (e-1)*lib/1e4 (the name says "> 1"; on integer
+    #: counts the two never differ). NOTE xgt1 is a NO-OP on nuclear input
     #: ((e-1)*lib/1e4 maxes at 0.036 there); it is active on scRNA (28.7% of
     #: lung cells, 39% of PDAC).
     arms: tuple[str, ...] = ("xgt1",)
