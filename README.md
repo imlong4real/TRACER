@@ -85,8 +85,30 @@ python -m pytest
 
 ## Quick start
 
-TRACER consumes a **standardized transcript table** plus a **gene–gene NPMI panel**
-(both produced by the helper scripts in `scripts/`).
+TRACER consumes a **standardized transcript table** plus a **gene–gene panel**
+(both produced by the helper scripts in `scripts/`). With a single-cell reference,
+build the depth-corrected cPMI panel first:
+
+```bash
+python scripts/build_panels.py \
+  --h5ad         atlas.h5ad \
+  --panel-genes  panel_genes.txt \
+  --celltype-col cell_type \
+  --out          panels
+# panels/xgt1_cpmi_balanced_rep.csv.gz  TRACER input: cPMI in its PMI column
+# panels/xgt1_pmi_balanced_rep.csv.gz   naive-PMI companion, for comparison only
+# panels/panel_receipt.json             recipe, draw, gene support, which file to use
+```
+
+The default recipe (`xgt1_cpmi_balanced_rep`, `[panel]` in
+`src/tracer/configs/defaults.toml`): a cell-type balanced draw with replacement;
+presence `log1p(CP10k) >= 1`, where CP10k divides by the true library size over all
+genes, taken before restricting to the panel; gene support counted on distinct
+cells; the expectation stratified on `n_genes`; cPMI promoted into the `PMI` column,
+the only column TRACER reads. In-situ input with no reference
+(`--transcripts tx.parquet --nucleus-only`) uses the separate nuclear recipe
+(`--panel-preset nuclear`). In Python, `tracer.panel_builder.build_reference_panels`
+runs the same recipe.
 
 **Segmentation mode** — refine an existing segmentation:
 
@@ -210,9 +232,11 @@ python scripts/run_tracer.py ... --g-z-um 1.5
   transcripts are allowed), and a `transcript_id`. An optional `overlaps_nucleus`
   flag enables nuclear-aware steps. Standardize raw vendor exports with
   `scripts/preprocess_xenium.py`.
-- **NPMI panel** (`--npmi`, CSV/CSV.gz): long-format gene–gene co-occurrence statistics
-  (`gene_i`, `gene_j`, `PMI`, `NPMI`), built with `scripts/build_npmi_from_scrna.py`
-  from the dataset or a single-cell reference.
+- **Gene–gene panel** (`--npmi`, CSV/CSV.gz): long-format pair weights (`gene_i`,
+  `gene_j`, and `PMI` and/or `NPMI`; TRACER reads `PMI`, else `NPMI`). From a
+  single-cell reference use the `*_cpmi_*` panel of `scripts/build_panels.py` (see
+  Quick start). `scripts/build_npmi_from_scrna.py` builds the bootstrap PMI/NPMI
+  panel instead, a different estimator kept for reproducing earlier runs.
 - **No-segmentation mode** additionally takes a VisiumHD feature–barcode matrix and its
   `spatial/` directory in place of a transcript table.
 

@@ -416,3 +416,61 @@ def test_receipt_describes_the_latest_run(ref, cli_build, monkeypatch):
         "--panel-genes", str(ref["panel_txt"]), "--celltype-col", "cell_type",
         "--out", str(out)])
     bp.main()                                   # restore seed 0 for later tests
+
+
+def test_promoted_cpmi_is_what_the_pipeline_reads(cli_build, monkeypatch):
+    """Follow the cPMI values from the panel file into the weight matrix the
+    pipeline builds, and into the run receipt."""
+    out, _ = cli_build
+    rt = _load_script("run_tracer")
+    log = logging.getLogger("test_reference_recipe")
+    panel_path = out / "xgt1_cpmi_balanced_rep.csv.gz"
+    panel = rt.load_npmi_panel(panel_path, log)
+    prov = rt.panel_provenance(panel_path)
+    assert prov["pmi_column"] == "cPMI" and prov["tracer_input"] is True
+    assert rt.panel_provenance(out / "xgt1_pmi_balanced_rep.csv.gz")["tracer_input"] is False
+
+    import tracer.pipeline as pl
+    from tests.synthetic import make_synthetic_transcripts
+
+    seen = {}
+    real = pl.prune_transcripts_fast
+
+    def spy(df, npmi_panel, **kw):
+        res = real(df, npmi_panel, **kw)
+        seen.update(metric_col=kw.get("metric_col"), aux=res[1])
+        return res
+
+    monkeypatch.setattr(pl, "prune_transcripts_fast", spy)
+    genes = sorted(set(panel.gene_i) | set(panel.gene_j))[:12]
+    df, _ = make_synthetic_transcripts(n_cells=4, voxels_per_cell_mean=40,
+                                       tx_per_cell=15, n_genes=12, seed=2)
+    df["feature_name"] = df["feature_name"].map(
+        dict(zip([f"gene_{i:02d}" for i in range(12)], genes)))
+    pl.run_segmented_pipeline(df.drop(columns="is_nuclear"), panel)
+    assert seen["metric_col"] == "PMI"
+    W, g2i = seen["aux"]["W"], seen["aux"]["gene_to_idx"]
+    raw = pd.read_csv(panel_path)
+    for a, b, v in zip(raw.gene_i, raw.gene_j, raw.PMI):
+        assert W[g2i[a], g2i[b]] == pytest.approx(np.float32(v))
+        assert W[g2i[b], g2i[a]] == pytest.approx(np.float32(v))
+
+
+def test_other_entry_points_accept_a_cpmi_panel(cli_build):
+    """noseg loader and the tiled global stitch read PMI like the pipeline."""
+    out, _ = cli_build
+    from tracer.noseg_pipeline import load_pmi_panel
+    from tracer.pipeline_tiled import run_segmented_pipeline_tiled
+    from tests.synthetic import make_synthetic_transcripts
+
+    panel = load_pmi_panel(out / "xgt1_cpmi_balanced_rep.csv.gz")
+    assert "NPMI" not in panel.columns
+    genes = sorted(set(panel.gene_i) | set(panel.gene_j))[:12]
+    df, _ = make_synthetic_transcripts(n_cells=6, voxels_per_cell_mean=40,
+                                       tx_per_cell=15, n_genes=12, seed=4)
+    df["feature_name"] = df["feature_name"].map(
+        dict(zip([f"gene_{i:02d}" for i in range(12)], genes)))
+    res = run_segmented_pipeline_tiled(df.drop(columns="is_nuclear"), panel,
+                                       n_tiles_xy=(2, 1), n_workers=1,
+                                       global_stitch=True)
+    assert len(res["df_out"]) == len(df)
