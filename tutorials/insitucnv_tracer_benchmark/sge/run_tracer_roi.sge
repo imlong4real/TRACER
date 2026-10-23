@@ -13,7 +13,9 @@
 # 50k CPMI panel. Runs INSIDE tracer_latest.sif (Apptainer).
 #
 #   qsub tutorials/insitucnv_tracer_benchmark/sge/run_tracer_roi.sge
-# Overridable: TRANSCRIPTS, PANEL (or legacy NPMI), OUTDIR, SAMPLE, PLATFORM, SEED.
+# Overridable: TRANSCRIPTS, PANEL (or legacy NPMI), OUTDIR, SAMPLE, PLATFORM, SEED,
+# USER_CONFIG (optional TOML of TRACER config overrides, passed as --user-config;
+# layered on top of defaults + the platform preset, so it may hold a single key).
 
 set -euo pipefail
 
@@ -36,6 +38,19 @@ OUTDIR=${OUTDIR:-$BENCH/output/runs/pilot_full_100/tracer}
 SAMPLE=${SAMPLE:-pilot_roi}
 PLATFORM=${PLATFORM:-xenium}
 SEED=${SEED:-1}
+USER_CONFIG=${USER_CONFIG:-}
+
+# Optional extra run_tracer.py args. Expanded below as ${EXTRA_ARGS[@]+...}
+# because bash < 4.4 treats an empty "${arr[@]}" as unbound under `set -u`.
+EXTRA_ARGS=()
+if [[ -n "$USER_CONFIG" ]]; then
+    if [[ ! -f "$USER_CONFIG" ]]; then
+        echo "Missing USER_CONFIG: $USER_CONFIG" >&2
+        exit 1
+    fi
+    USER_CONFIG=$(readlink -f "$USER_CONFIG")
+    EXTRA_ARGS+=(--user-config "$USER_CONFIG")
+fi
 
 TRANSCRIPTS=$(readlink -f "$TRANSCRIPTS")
 PANEL=$(readlink -f "$PANEL")
@@ -69,6 +84,8 @@ echo "Transcripts : $TRANSCRIPTS"
 echo "Panel       : $PANEL"
 echo "Outdir      : $OUTDIR"
 echo "Container app dir: $CONTAINER_APP_DIR"
+echo "Container   : $SIF"
+echo "User config : ${USER_CONFIG:-<none>}"
 
 apptainer exec \
     --bind /mnt/storage:/mnt/storage \
@@ -81,6 +98,7 @@ apptainer exec \
         --outdir "$OUTDIR" \
         --sample-name "$SAMPLE" \
         --seed "$SEED" \
-        --overwrite
+        --overwrite \
+        ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}
 
 echo "TRACER refined transcripts: $OUTDIR/outputs/transcripts_tracer_refined.parquet"
