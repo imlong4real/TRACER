@@ -14,7 +14,17 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from common import UNASSIGNED_TOKENS, ensure_parent, read_gene_positions, require_columns, standardize_transcript_columns, write_json, cnv_bin_chromosomes, chromosome_rank
+from common import (
+    UNASSIGNED_TOKENS,
+    chromosome_rank,
+    cnv_bin_chromosomes,
+    ensure_parent,
+    prepare_smoothing_graph,
+    read_gene_positions,
+    require_columns,
+    standardize_transcript_columns,
+    write_json,
+)
 
 TRACER_WHOLE_ETYPES = {"cell"}
 TRACER_ALL_ETYPES = {"cell", "partial"}
@@ -33,7 +43,36 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--tumor-annotations", default="epithelial")
     p.add_argument("--window-size", type=int, default=60)
     p.add_argument("--cluster-resolution", type=float, default=0.4)
-    p.add_argument("--smoothing-neighbors", type=int, default=200)
+    p.add_argument("--smoothing-neighbors", type=int, default=200,
+                   help="Neighbours for --smoothing-graph spatial only.")
+    p.add_argument(
+        "--smoothing-graph",
+        choices=("expression", "spatial"),
+        default="expression",
+        help=(
+            "Graph InSituCNV smooths the counts over. 'expression' is the "
+            "published recipe and matches the graph behind the full-slide "
+            "cnv_epi labels. 'spatial' is a non-manuscript experiment that "
+            "makes CNV a spatial field rather than a per-entity genotype -- see "
+            "common.build_spatial_neighbors."
+        ),
+    )
+    p.add_argument(
+        "--expression-neighbors",
+        type=int,
+        default=100,
+        help=(
+            "Neighbours for --smoothing-graph expression. 100 is the insitucnv "
+            "package default (insitucnv/tl/cnv.py smoothing_neighbors=100) and "
+            "what the manuscript's CosMx notebook used. The full-slide cnv_epi "
+            "run effectively used 15, but drew them from 566k epithelial cells; "
+            "at ROI scale (~1k epithelial entities) more averaging is needed. "
+            "Measured across k=15..200 the raw-vs-TRACER conclusion is stable, "
+            "so this is not a tuned choice."
+        ),
+    )
+    p.add_argument("--neighbor-n-pcs", type=int, default=50,
+                   help="PCs for --smoothing-graph expression.")
     p.add_argument("--dry-run", action="store_true")
     return p.parse_args()
 
@@ -114,32 +153,35 @@ def assign_compartment(adata, reference: set[str], tumor: set[str]) -> None:
     adata.obs.loc[ann.isin(tumor), "compartment"] = "tumor"
 
 
-def build_spatial_neighbors(adata, n_neighbors: int) -> int:
-    import scvelo as scv
-
-    if "spatial" not in adata.obsm:
-        raise SystemExit("InSituCNV smoothing requires entity spatial coordinates.")
-    if adata.n_obs < 2:
-        raise SystemExit("InSituCNV smoothing requires at least two entities.")
-    effective_neighbors = min(n_neighbors, adata.n_obs - 1)
-    scv.pp.neighbors(
-        adata,
-        n_neighbors=effective_neighbors,
-        n_pcs=None,
-        use_rep="spatial",
-    )
-    return effective_neighbors
-
-
-def run_infercnv(adata, window_size: int, resolution: float, smoothing_neighbors: int):
+def run_infercnv(
+    adata,
+    window_size: int,
+    resolution: float,
+    smoothing_neighbors: int,
+    smoothing_graph: str = "expression",
+    expression_neighbors: int = 15,
+    neighbor_n_pcs: int = 50,
+):
     import scanpy as sc
     import infercnvpy as cnv
     import insitucnv as icv
 
-    effective_neighbors = build_spatial_neighbors(adata, smoothing_neighbors)
+    graph, effective_neighbors = prepare_smoothing_graph(
+        adata,
+        smoothing_graph=smoothing_graph,
+        smoothing_neighbors=smoothing_neighbors,
+        expression_neighbors=expression_neighbors,
+        neighbor_n_pcs=neighbor_n_pcs,
+    )
+    adata.uns["smoothing_graph"] = graph
     adata.X = adata.layers["counts"].copy()
     sc.pp.normalize_total(adata)
-    sc.pp.log1p(adata)
+    # No log1p here. smooth_data_for_cnv documents its input as "normalized but
+    # not log-transformed", the canonical insitucnv.tl.prepare_cnv_input chain
+    # is counts -> normalize -> smooth -> normalize+log1p, and the full-slide
+    # script that produced cnv_epi does the same. Since infercnv below reads
+    # layer="M", a log1p here would put the arms on a different scale from
+    # those reference labels.
     icv.tl.smooth_data_for_cnv(adata, n_neighbors=effective_neighbors)
     if "M" not in adata.layers:
         raise SystemExit("InSituCNV smoothing did not create adata.layers['M']")
@@ -208,6 +250,12 @@ def main() -> int:
         "median_transcripts": float(adata.obs["n_transcripts"].median()) if adata.n_obs else 0.0,
         "median_genes": float(adata.obs["n_genes"].median()) if adata.n_obs else 0.0,
         "dry_run": args.dry_run,
+        "smoothing_graph": args.smoothing_graph,
+        "expression_neighbors": args.expression_neighbors,
+        "neighbor_n_pcs": args.neighbor_n_pcs,
+        "spatial_neighbors": args.smoothing_neighbors,
+        "window_size": args.window_size,
+        "cluster_resolution": args.cluster_resolution,
     }
     write_json(outdir / "arm_stats.json", summary)
     if args.dry_run:
@@ -216,7 +264,17 @@ def main() -> int:
         return 0
     if int((adata.obs["compartment"] == "reference").sum()) == 0:
         raise SystemExit("No reference entities after QC/annotation; cannot run inferCNV.")
-    adata = run_infercnv(adata, args.window_size, args.cluster_resolution, args.smoothing_neighbors)
+    adata = run_infercnv(
+        adata,
+        args.window_size,
+        args.cluster_resolution,
+        args.smoothing_neighbors,
+        smoothing_graph=args.smoothing_graph,
+        expression_neighbors=args.expression_neighbors,
+        neighbor_n_pcs=args.neighbor_n_pcs,
+    )
+    summary["smoothing_graph_realised"] = adata.uns.get("smoothing_graph")
+    write_json(outdir / "arm_stats.json", summary)
     adata.write_h5ad(outdir / "adata_cnv.h5ad")
     chrom = summarize_chromosomes(adata)
     if not chrom.empty:

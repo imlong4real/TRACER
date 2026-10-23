@@ -136,6 +136,74 @@ def cnv_bin_chromosomes(adata) -> tuple[Any, Any]:
     return X, labels
 
 
+def build_expression_neighbors(adata, n_neighbors: int, n_pcs: int) -> tuple[dict[str, Any], int]:
+    """Build the log-normalised expression/PCA kNN graph InSituCNV smooths over.
+
+    Mirrors `make_full_ovary_cnv_preview.build_expression_neighbors`, which is
+    the graph that produced the full-slide `cnv_epi` reference labels, so arm
+    CNV values stay on the same footing as those labels.
+    """
+    import scanpy as sc
+
+    if adata.n_obs < 2:
+        raise SystemExit("InSituCNV smoothing requires at least two entities.")
+    pcs = min(int(n_pcs), adata.n_obs - 1, adata.n_vars - 1)
+    if pcs < 1:
+        raise SystemExit(f"Need at least two entities and genes for PCA; got {adata.n_obs}x{adata.n_vars}.")
+    effective = min(int(n_neighbors), adata.n_obs - 1)
+    adata.X = adata.layers["counts"].copy()
+    sc.pp.normalize_total(adata)
+    sc.pp.log1p(adata)
+    sc.pp.pca(adata, n_comps=pcs)
+    sc.pp.neighbors(adata, n_neighbors=effective, n_pcs=pcs)
+    return {"mode": "expression", "n_neighbors": effective, "n_pcs": pcs}, effective
+
+
+def build_spatial_neighbors(adata, n_neighbors: int) -> tuple[dict[str, Any], int]:
+    """Physical-coordinate kNN graph. NOT the published recipe -- see warning.
+
+    `use_rep="spatial"` appears nowhere in the InSituCNV manuscript. It is kept
+    only as an explicit experiment: at 200 neighbours in a 500x500 um ROI the
+    kernel is a ~92 um disc covering ~10% of the field, which makes each
+    entity's CNV profile report its neighbourhood instead of its own genome
+    (measured: Spearman +0.74 between an entity's local tumour fraction and its
+    similarity to the tumour CNV profile, even for entities with zero
+    epithelial expression). That also averages away the per-cell differences
+    TRACER exists to produce.
+    """
+    import scanpy as sc
+
+    if "spatial" not in adata.obsm:
+        raise SystemExit("Spatial smoothing requires adata.obsm['spatial'].")
+    if adata.n_obs < 2:
+        raise SystemExit("Spatial smoothing requires at least two entities.")
+    effective = min(int(n_neighbors), adata.n_obs - 1)
+    sc.pp.neighbors(adata, n_neighbors=effective, n_pcs=None, use_rep="spatial")
+    return {"mode": "spatial", "n_neighbors": effective, "n_pcs": None}, effective
+
+
+def prepare_smoothing_graph(
+    adata,
+    smoothing_graph: str,
+    smoothing_neighbors: int,
+    expression_neighbors: int,
+    neighbor_n_pcs: int,
+) -> tuple[dict[str, Any], int]:
+    """Dispatch to the requested smoothing graph.
+
+    Returns the graph summary and the neighbour count actually realised. Pass
+    that count to `smooth_data_for_cnv`: its `n_neighbors` argument can only
+    PRUNE an existing graph, never widen it (scvelo's `get_connectivities`
+    prunes only when `n_neighbors < get_n_neighs(adata)`), so handing it a
+    larger number than the graph holds is a silent no-op.
+    """
+    if smoothing_graph == "expression":
+        return build_expression_neighbors(adata, expression_neighbors, neighbor_n_pcs)
+    if smoothing_graph == "spatial":
+        return build_spatial_neighbors(adata, smoothing_neighbors)
+    raise ValueError(f"Unsupported smoothing graph mode: {smoothing_graph}")
+
+
 def write_json(path: str | Path, payload: dict[str, Any]) -> None:
     path = ensure_parent(path)
     with path.open("w") as handle:

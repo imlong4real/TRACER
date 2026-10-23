@@ -38,6 +38,19 @@ MARKERS=${MARKERS:-$BENCH/config/panels.yaml}
 MIN_TX=${MIN_TX:-20}
 MIN_GENES=${MIN_GENES:-10}
 
+# InSituCNV smoothing. Default is an expression/PCA graph (the published recipe)
+# with 100 neighbours on 50 PCs, the insitucnv package default. The full-slide
+# cnv_epi labels were built on the existing 15-NN cell-typing graph instead.
+# SMOOTHING_GRAPH=spatial reproduces the earlier non-manuscript behaviour, where
+# a 200-NN physical-coordinate kernel (~92 um in this ROI) makes CNV a spatial
+# field instead of a per-entity genotype -- keep it for comparison only.
+SMOOTHING_GRAPH=${SMOOTHING_GRAPH:-expression}
+EXPRESSION_NEIGHBORS=${EXPRESSION_NEIGHBORS:-100}
+NEIGHBOR_N_PCS=${NEIGHBOR_N_PCS:-50}
+SMOOTH_NEIGHBORS=${SMOOTH_NEIGHBORS:-200}
+WINDOW_SIZE=${WINDOW_SIZE:-60}
+CLUSTER_RES=${CLUSTER_RES:-0.4}
+
 # Arm-specific inputs. Raw uses the original ROI (cell_id segmentation); TRACER
 # uses the refined parquet, whose final label column is the reconciled
 # `tracer_id` (it also carries _etype for the whole/partial split).
@@ -78,6 +91,7 @@ export NUMEXPR_NUM_THREADS=1
 export KMP_DUPLICATE_LIB_OK=TRUE
 
 echo "ARM=$ARM  transcripts=$TX  entity_col=$ENTITY_COL"
+echo "smoothing=$SMOOTHING_GRAPH (expr k=$EXPRESSION_NEIGHBORS, pcs=$NEIGHBOR_N_PCS; spatial k=$SMOOTH_NEIGHBORS)  window=$WINDOW_SIZE  cluster_res=$CLUSTER_RES"
 
 # 1) Marker-based entity annotation (lowercase labels: epithelial, t_cell, ...),
 #    which match run_insitucnv_arm's reference/tumor defaults.
@@ -95,7 +109,13 @@ python "$BENCH/scripts/run_insitucnv_arm.py" \
     --gene-positions "$GENEPOS" \
     --annotations "$ANNOT" \
     --min-transcripts "$MIN_TX" \
-    --min-genes "$MIN_GENES"
+    --min-genes "$MIN_GENES" \
+    --smoothing-graph "$SMOOTHING_GRAPH" \
+    --expression-neighbors "$EXPRESSION_NEIGHBORS" \
+    --neighbor-n-pcs "$NEIGHBOR_N_PCS" \
+    --smoothing-neighbors "$SMOOTH_NEIGHBORS" \
+    --window-size "$WINDOW_SIZE" \
+    --cluster-resolution "$CLUSTER_RES"
 
 # 3) Per-arm UMAP + dotplot-by-clone + per-clone chromosome CNV heatmap.
 python "$BENCH/scripts/plot_cnv_arm.py" \
