@@ -677,7 +677,7 @@ def prune_transcripts_nuclear_seed(
     #
     # Both shapes funnel into the same symmetric-CSR triple
     # ``(W_indptr, W_indices, W_data)`` consumed by the sparse Cython
-    # kernel _cy_prune.prune_cells_nuclear_seed_sparse (use_sparse=True).
+    # kernel _cy_prune.prune_entities (use_sparse=True).
     # Structurally-absent pairs are SKIPPED by `_wget` — never counted
     # as zero. Memory: O(n_pairs), not O(G²), so WTX panels (G~18k)
     # don't OOM.
@@ -755,7 +755,11 @@ def prune_transcripts_nuclear_seed(
     )
 
     if use_sparse_panel:
-        codes = _cy_prune.prune_cells_nuclear_seed_sparse(
+        # The shared per-entity prune (same unit the Group cascade uses).
+        # Phase-1 vocabulary -> generic: the nuclear flag is the seed mask,
+        # nuclear_seed_only = seed from the mask, nuclear_only_admit =
+        # admit masked tx only, skip_phase_1c = no carve.
+        codes = _cy_prune.prune_entities(
             cell_tx_idx_lists,
             gene_idx_int,
             is_nuc_int,
@@ -763,18 +767,19 @@ def prune_transcripts_nuclear_seed(
             W_sp_indices,
             W_sp_data,
             float(threshold),
-            int(min_nuclear_genes),
-            1 if skip_phase_1c else 0,
-            1 if nuclear_only_admit else 0,
-            1 if tx_weighted else 0,
-            veto_mode_int,
-            float(min_admit_threshold),
-            float(mean_admit_threshold),
-            float(aggregator_percentile),
-            rs_thr_kernel,
-            float(neg_npmi_threshold),
-            1 if fallback_whole_cell_admit else 0,
-            1 if nuclear_seed_only else 0,
+            min_seed_genes=int(min_nuclear_genes),
+            max_carves=0 if skip_phase_1c else 1,
+            admit_non_seed=1,
+            seed_from_mask=1 if nuclear_seed_only else 0,
+            admit_mask_only=1 if nuclear_only_admit else 0,
+            tx_weighted=1 if tx_weighted else 0,
+            veto_mode=veto_mode_int,
+            min_admit_threshold=float(min_admit_threshold),
+            mean_admit_threshold=float(mean_admit_threshold),
+            aggregator_percentile=float(aggregator_percentile),
+            real_signal_threshold=rs_thr_kernel,
+            neg_npmi_threshold=float(neg_npmi_threshold),
+            fallback_whole_cell_admit=1 if fallback_whole_cell_admit else 0,
         )
     else:
         codes = _cy_prune.prune_cells_nuclear_seed(

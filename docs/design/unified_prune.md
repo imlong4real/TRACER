@@ -82,7 +82,7 @@ Nuclear-specific steps stay outside `prune_entity` as Phase-1 wrappers: the seed
 |---|---|
 | `PHASE1_QC_MIN_TX`, `group.cascade_min_anchor_tx`, prototype `TRACER_CASCADE_SIB_MIN` | `prune.min_tx` |
 | `SPLIT_PHASE1_DZ`, plus a missing cascade equivalent | `prune.split_dz` |
-| Prototype `TRACER_CASCADE_PRUNE` | `prune.max_carves` (0 = window behaviour, 1 = cell-style) |
+| Prototype `TRACER_CASCADE_PRUNE` | `prune.max_carves`: 0 (window behaviour) for the cascade, by decision; 1 for Phase 1 |
 | SEG-path hard-coded cascade literals | `cfg.group.*`, read on both paths |
 
 ## Migration plan (each step is its own PR)
@@ -96,6 +96,7 @@ Nuclear-specific steps stay outside `prune_entity` as Phase-1 wrappers: the seed
 4. **Move the cascade onto `prune_entity` with `max_carves=0` and no admission.** Group output must stay bit-identical to step 2.
    *Done.* Each seed window in `density_cascade_phase1` is one entity passed to `_cy_prune.prune_entities(seed_from_mask=0, admit_non_seed=0, max_carves=0, update_counters=0)`; committed = code 0, returned to the pool = code 2. The CSR arrays are built once per cascade call (`_csr_arrays_for_prune`; a dense W keeps its zeros as stored entries) instead of once per seed. `update_counters=0` keeps the Phase-1 prune counters about cells only. This covers both the SEG residual cascade and NOSEG, which call the same function.
 5. **Change the cascade's behaviour, one flag at a time:** carving (`max_carves=1`), the size minimum on carved entities, the z-split, then admission. Measure each on a real ROI (coverage, coherence, RCTD max weight), and check runtime and peak memory with `scripts/bench_stages.py`.
+   *Decision (2026-11-13): the cascade keeps one partial per window.* Its job is: take the densest 3×3 bin neighbourhood of unassigned transcripts, extract one coherent partial, return the rest to the pool, repeat. So carving, the carved-entity size minimum and admission of non-seed genes are dropped (`max_carves=0`, `admit_non_seed=0` stay). The prototype's case for carving came from the broken W: before step 2, window-mode partials had low coherence and carving raised it; after step 2 they are already coherent. The remaining candidate is the **z-split**: a window spans all z, so stacked cells can fuse into one partial. Measure it before changing code.
 6. **SEG path reads `cfg.group`.** Remove the hard-coded literals.
 7. **Retire the legacy Group path** (`annotate_unassigned_components_fast` with `prune_genes_by_pmi_greedy`), or route it through `prune_entity`.
 
