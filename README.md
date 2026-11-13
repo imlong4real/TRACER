@@ -6,7 +6,7 @@
 
 [![Tests](https://github.com/imlong4real/TRACER/actions/workflows/test.yml/badge.svg)](https://github.com/imlong4real/TRACER/actions/workflows/test.yml)
 [![Docker](https://github.com/imlong4real/TRACER/actions/workflows/build-docker.yml/badge.svg)](https://github.com/imlong4real/TRACER/actions/workflows/build-docker.yml)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![bioRxiv](https://img.shields.io/badge/bioRxiv-10.64898%2F2026.03.08.710395-B31B1B)](https://www.biorxiv.org/content/10.64898/2026.03.08.710395v1)
 [![ISMB 2026](https://img.shields.io/badge/ISMB-2026-purple)](https://www.iscb.org/ismb2026/whats-happening/track-details)
 [![Statistical Bioinformatics Seminar](https://img.shields.io/badge/Statistical%20Bioinformatics-Seminar-red)](https://www.youtube.com/watch?v=CugrfP88tAk)
@@ -248,4 +248,4 @@ For questions or collaboration:
 
 ## License
 
-Apache License 2.0 — see [LICENSE](LICENSE).
+MIT License — see [LICENSE](LICENSE).
