@@ -195,19 +195,8 @@ def _symmetric_csr_arrays(W_upper):
     absent so the kernel skips them (the gene-fit / seed-coherence
     convention; the opposite of coherence's absent-as-0).
     """
-    Wu = W_upper.tocoo()
-    Wsym = sp.csr_matrix(
-        (
-            np.concatenate([Wu.data, Wu.data]).astype(np.float32),
-            (
-                np.concatenate([Wu.row, Wu.col]),
-                np.concatenate([Wu.col, Wu.row]),
-            ),
-        ),
-        shape=W_upper.shape,
-        dtype=np.float32,
-    )
-    Wsym.sort_indices()
+    from ._utils import symmetric_csr
+    Wsym = symmetric_csr(W_upper)
     return (
         Wsym.indptr.astype(np.int32),
         Wsym.indices.astype(np.int32),

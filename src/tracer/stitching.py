@@ -34,7 +34,7 @@ import pandas as pd
 from tqdm.auto import tqdm
 
 from ._repro import _ensure_reproducibility_seed
-from ._utils import relu_symmetric
+from ._utils import fold_symmetric_dense, relu_symmetric, symmetric_csr
 from .graph import _BIN_BIAS, bin_xy, delaunay_edges, neighbor_bins, unpack_bin
 
 
@@ -424,15 +424,13 @@ def _slice_pmi_submatrix(npmi_mat, gene_ids):
         sparse = None
 
     if sparse is not None and sparse.issparse(npmi_mat):
-        # Slice rows then cols (CSR/CSC). The bootstrap stores only the
-        # upper triangle of W_sparse, but `gene_ids` may reorder genes
-        # so the upper triangle of `sub` no longer covers the same cells
-        # as the upper triangle of the original. Symmetrise via sub+sub.T
-        # — exactly one of (sub[a,b], sub[b,a]) is nonzero by
-        # construction, so the sum is just the value, not doubled.
+        # Slice rows then cols (CSR/CSC). `gene_ids` may reorder genes, so
+        # a triangular W no longer gives a triangular block. Fold instead of
+        # `sub + sub.T`: correct for a triangular W (identical to the sum)
+        # AND for a symmetric W (the sum doubled every value).
         sub = npmi_mat[gene_ids, :][:, gene_ids]
         dense = np.asarray(sub.todense())
-        return dense + dense.T
+        return fold_symmetric_dense(dense)
     return npmi_mat[np.ix_(gene_ids, gene_ids)]
 
 
@@ -641,25 +639,18 @@ def compute_housekeeping_mask(
         return np.empty((0,), dtype=bool)
 
     if sparse is not None and sparse.issparse(W):
-        # The bootstrap CSR stores only the upper triangle.
-        # Symmetrise virtually by counting both rows and columns.
-        Wcsr = W.tocsr().astype(np.float32)
+        # Symmetrize (idempotent) and count rows only. Counting rows +
+        # columns of W directly, as before, was right for a triangular W
+        # but double-counted every neighbour of a symmetric one.
+        Wcsr = symmetric_csr(W)
         # Boolean masks as sparse — diagonal entries shouldn't be stored
         # (PmiBootstrapResult never stores i==j) but be defensive.
         Wcsr.setdiag(0.0)
         Wcsr.eliminate_zeros()
         pos_mask = (Wcsr > pos_thresh)
         neg_mask = (Wcsr < neg_thresh)
-        # Counts: per-row + per-column (since only upper-tri stored,
-        # row i counts the j>i neighbors and col i counts the j<i ones).
-        pos_counts = (
-            np.asarray(pos_mask.sum(axis=1)).ravel()
-            + np.asarray(pos_mask.sum(axis=0)).ravel()
-        )
-        neg_counts = (
-            np.asarray(neg_mask.sum(axis=1)).ravel()
-            + np.asarray(neg_mask.sum(axis=0)).ravel()
-        )
+        pos_counts = np.asarray(pos_mask.sum(axis=1)).ravel()
+        neg_counts = np.asarray(neg_mask.sum(axis=1)).ravel()
     else:
         W_arr = np.asarray(W, dtype=np.float32)
         diag_mask = np.eye(G, dtype=bool)
@@ -1043,14 +1034,14 @@ def stitch_entities_hierarchical(
     # Densify the (small, gene×gene) panel ONCE so each per-candidate coherence()
     # call takes the dense fast path instead of rebuilding a sparse CSR submatrix
     # (scipy fancy-indexing — _major/_minor_index_fancy + csr __init__ — dominated
-    # Stitch: ~550k calls). Symmetrize `W + W.T` to match _slice_pmi_submatrix's
-    # sparse branch, which returns `sub + sub.T` on the upper-triangle-only
-    # bootstrap W (exactly one of (a,b)/(b,a) is nonzero → no doubling), so the
-    # per-candidate dense slice is value-identical → bit-identical coherence.
+    # Stitch: ~550k calls). `symmetric_csr` is idempotent: it mirrors a
+    # triangular W and leaves a symmetric W unchanged. (`W + W.T`, used here
+    # before, doubled every value when aux["W"] was already symmetric, as it
+    # is on the whole-cell and NOSEG paths.)
     import scipy.sparse as _sp
     if _sp.issparse(npmi_mat):
         npmi_mat = np.ascontiguousarray(
-            (npmi_mat + npmi_mat.T).toarray(), dtype=np.float32
+            symmetric_csr(npmi_mat).toarray(), dtype=np.float32
         )
     gene_to_idx = aux["gene_to_idx"]
     housekeeping_mask = aux.get("housekeeping_mask")

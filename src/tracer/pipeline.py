@@ -528,23 +528,10 @@ def _reassign_nuclear_post_1c_etype(df_in: pd.DataFrame, *,
     import scipy.sparse as _sp
     W_is_sparse = _sp.issparse(W)
     if W_is_sparse:
-        # Symmetrize the upper-triangle CSR via COO-stacking. NOT `W + W.T`:
-        # scipy's sparse add eliminates explicit zeros, which would drop an
-        # observed PMI of exactly 0.0. Never call eliminate_zeros() here for
-        # the same reason.
-        Wu = W.tocoo()
-        Wsym = _sp.csr_matrix(
-            (
-                np.concatenate([Wu.data, Wu.data]).astype(np.float32),
-                (
-                    np.concatenate([Wu.row, Wu.col]),
-                    np.concatenate([Wu.col, Wu.row]),
-                ),
-            ),
-            shape=W.shape,
-            dtype=np.float32,
-        )
-        Wsym.sort_indices()
+        # Idempotent symmetrize (keeps explicit zeros; never doubles a
+        # symmetric W). See tracer._utils.symmetric_csr.
+        from ._utils import symmetric_csr
+        Wsym = symmetric_csr(W)
         W_sp_indptr = Wsym.indptr.astype(np.int32)
         W_sp_indices = Wsym.indices.astype(np.int32)
         W_sp_data = Wsym.data.astype(np.float32)
