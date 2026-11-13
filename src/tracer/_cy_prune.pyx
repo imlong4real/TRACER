@@ -384,6 +384,7 @@ cdef int _prune_entity(
     int fallback_whole_cell_admit,
     int nuclear_seed_only,
     int admit_non_seed,
+    int update_counters,
 ) except -1:
     """Prune ONE entity: seed (1a) -> admission (1b) -> one carve (1c).
 
@@ -398,7 +399,9 @@ cdef int _prune_entity(
     passes the nuclear flag. ``admit_non_seed=0`` disables the
     ``_admission_test`` for genes outside the seed, so only seed genes are
     admitted (the cascade's current membership rule); ``skip_phase_1c=1``
-    disables the carve. Body moved verbatim from the former inline loop of
+    disables the carve. ``update_counters=0`` leaves the Phase-1 prune
+    counters untouched (the cascade's seed windows are not cells). Body
+    moved verbatim from the former inline loop of
     ``_prune_cells_nuclear_seed_core``; with ``admit_non_seed=1`` the
     output is bit-identical.
     """
@@ -419,7 +422,8 @@ cdef int _prune_entity(
     n_cell_tx = tx_inds_arr.shape[0]
     if n_cell_tx == 0:
         return 0
-    _CNT_CELLS += 1
+    if update_counters:
+        _CNT_CELLS += 1
 
     # Collect unique nuclear gene indices for this cell.
     # (Python-level numpy ops here are fine: per-cell, not per-tx.)
@@ -444,8 +448,9 @@ cdef int _prune_entity(
         # 1b/1c nuclear_only_admit exemption for thin nuclei.
         is_fallback = 1 if n_unique_nuc < min_nuclear_genes else 0
         if is_fallback:
-            _CNT_THIN_NUCLEUS += 1
-            if nuclear_seed_only:
+            if update_counters:
+                _CNT_THIN_NUCLEUS += 1
+            if nuclear_seed_only and update_counters:
                 # only a real FALLBACK when a nuclear seed was wanted
                 _CNT_FALLBACK += 1
         all_genes = []
@@ -455,14 +460,14 @@ cdef int _prune_entity(
             if g >= 0:
                 all_genes.append(g)
         uniq_all_arr = np.asarray(all_genes, dtype=np.int32)
-        uniq_all = np.unique(uniq_all_arr)
+        # Whole-cell tx counts: all tx contribute (nuc + cyto). One
+        # np.unique pass (sorted, same order as before) instead of a
+        # np.sum(arr == g) scan per gene.
+        uniq_all, _cnt_all = np.unique(uniq_all_arr, return_counts=True)
         n_unique_all = uniq_all.shape[0]
         if n_unique_all == 0:
             return 0
-        # Whole-cell tx counts: all tx contribute (nuc + cyto).
-        tx_counts_all = np.zeros(n_unique_all, dtype=np.int32)
-        for ti in range(n_unique_all):
-            tx_counts_all[ti] = int(np.sum(uniq_all_arr == uniq_all[ti]))
+        tx_counts_all = _cnt_all.astype(np.int32)
         if not tx_weighted:
             tx_counts_all = np.ones(n_unique_all, dtype=np.int32)
         seed = _greedy_prune_to_retained(
@@ -473,9 +478,7 @@ cdef int _prune_entity(
         is_fallback = 0
         # Per-gene nuclear tx counts for the tx-weighted greedy.
         nuc_arr = np.asarray(nuc_genes, dtype=np.int32)
-        tx_counts_nuc = np.zeros(n_unique_nuc, dtype=np.int32)
-        for ti in range(n_unique_nuc):
-            tx_counts_nuc[ti] = int(np.sum(nuc_arr == uniq_nuc[ti]))
+        tx_counts_nuc = np.unique(nuc_arr, return_counts=True)[1].astype(np.int32)
         if not tx_weighted:
             tx_counts_nuc = np.ones(n_unique_nuc, dtype=np.int32)
         seed = _greedy_prune_to_retained(
@@ -485,7 +488,8 @@ cdef int _prune_entity(
     seed_len = seed.shape[0]
     if seed_len == 0:
         # No seed found; all tx → unassigned (code 2 already default)
-        _CNT_SEED_EMPTY += 1
+        if update_counters:
+            _CNT_SEED_EMPTY += 1
         return 0
 
     # ---- Phase 1b: per-tx admit by mean PMI to seed ----
@@ -557,9 +561,7 @@ cdef int _prune_entity(
 
     # Tx-weighted prune for sub-seed too.
     n_uniq_rej = uniq_rej_nuc.shape[0]
-    tx_counts_rej = np.zeros(n_uniq_rej, dtype=np.int32)
-    for ti in range(n_uniq_rej):
-        tx_counts_rej[ti] = int(np.sum(rej_nuc_arr == uniq_rej_nuc[ti]))
+    tx_counts_rej = np.unique(rej_nuc_arr, return_counts=True)[1].astype(np.int32)
     if not tx_weighted:
         tx_counts_rej = np.ones(n_uniq_rej, dtype=np.int32)
     sub_seed = _greedy_prune_to_retained(
@@ -644,6 +646,7 @@ cdef cnp.ndarray _prune_cells_nuclear_seed_core(
                                           #     or incoherent nucleus cannot veto a cell
                                           #     whose cytoplasm is coherent
     int admit_non_seed = 1,              # 0 ⇒ only seed genes are admitted (no 1b test)
+    int update_counters = 1,             # 0 ⇒ leave the Phase-1 prune counters alone
 ):
     """Shared orchestration for the dense and sparse nuclear-seed prune.
 
@@ -670,8 +673,11 @@ cdef cnp.ndarray _prune_cells_nuclear_seed_core(
         panel_n_genes = W_indptr.shape[0] - 1
     else:
         panel_n_genes = W_mv.shape[0]
+    # Only the admission test reads it: skip the G-sized allocation when
+    # admission is off (cascade seed windows call this once per window).
     cdef cnp.ndarray[cnp.float32_t, ndim=1] pmi_buf_arr = np.zeros(
-        panel_n_genes if panel_n_genes > 0 else 1, dtype=np.float32
+        panel_n_genes if (panel_n_genes > 0 and admit_non_seed) else 1,
+        dtype=np.float32,
     )
     cdef cnp.float32_t[:] pmi_buf_mv = pmi_buf_arr
 
@@ -688,6 +694,7 @@ cdef cnp.ndarray _prune_cells_nuclear_seed_core(
             veto_mode, min_admit_threshold, mean_admit_threshold,
             aggregator_percentile, real_signal_threshold, neg_npmi_threshold,
             fallback_whole_cell_admit, nuclear_seed_only, admit_non_seed,
+            update_counters,
         )
     return out
 
@@ -838,6 +845,7 @@ def prune_entities(
     double real_signal_threshold=0.0,
     double neg_npmi_threshold=-0.2,
     int fallback_whole_cell_admit=0,
+    int update_counters=1,
 ):
     """Prune many entities with the shared per-entity unit (sparse W).
 
@@ -873,6 +881,9 @@ def prune_entities(
         ``min_seed_genes``); 0 = seed from all tx.
     admit_mask_only : {0, 1}
         1 = only masked tx may be admitted (``nuclear_only_admit``).
+    update_counters : {0, 1}
+        1 = count these entities in ``get_prune_counters()`` (Phase 1);
+        0 = leave the counters alone (cascade seed windows).
 
     Returns
     -------
@@ -893,6 +904,7 @@ def prune_entities(
         fallback_whole_cell_admit,
         seed_from_mask,
         admit_non_seed,
+        update_counters,
     )
 
 

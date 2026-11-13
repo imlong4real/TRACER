@@ -62,6 +62,29 @@ def _greedy_prune_retained(uniq_g, uniq_c, W, threshold: float):
         threshold=threshold)
 
 
+def _csr_arrays_for_prune(W):
+    """(indptr, indices, data) of ``W`` for ``_cy_prune.prune_entities``.
+
+    Sparse ``W`` is used as stored (``aux["W"]`` is symmetric). A dense ``W``
+    (already NaN->0 filled above) becomes a CSR that stores EVERY entry,
+    zeros included, because the dense kernel treated every non-NaN pair as
+    observed; dropping zeros would turn them into skipped pairs.
+    """
+    import scipy.sparse as sp
+    if isinstance(W, np.ndarray):
+        G = W.shape[0]
+        rows = np.repeat(np.arange(G, dtype=np.int32), G)
+        cols = np.tile(np.arange(G, dtype=np.int32), G)
+        Wc = sp.csr_matrix((W.ravel().astype(np.float32), (rows, cols)), shape=W.shape)
+    else:
+        Wc = W.tocsr()
+        if not Wc.has_sorted_indices:
+            Wc = Wc.sorted_indices()
+    return (np.ascontiguousarray(Wc.indptr, dtype=np.int32),
+            np.ascontiguousarray(Wc.indices, dtype=np.int32),
+            np.ascontiguousarray(Wc.data, dtype=np.float32))
+
+
 # ============================================================================
 # Auto-floor selection (tx-coverage rule)
 # ============================================================================
@@ -296,6 +319,8 @@ def density_cascade_phase1(
     # structurally-absent pairs are skipped by _wget).
     if isinstance(W, np.ndarray):
         np.nan_to_num(W, copy=False, nan=0.0)
+    from tracer import _cy_prune
+    W_ip, W_ix, W_dt = _csr_arrays_for_prune(W)
 
     coords = df[["x", "y"]].to_numpy(dtype=np.float32)
     gene_strs = df["feature_name"].to_numpy()
@@ -377,17 +402,29 @@ def density_cascade_phase1(
             if len(tentative) < min_anchor_tx:
                 continue
 
-            ten_genes = gene_idx[tentative]
-            uniq_g, uniq_c = np.unique(ten_genes, return_counts=True)
-            seed_genes = _greedy_prune_retained(
-                uniq_g, uniq_c, W, pmi_threshold).tolist()
-
+            # Shared prune unit (unified-prune step 4): the window is one
+            # entity; seed from every tx (tx-weighted greedy), no admission
+            # of non-seed genes, no carve -> code 0 = committed, 2 = back
+            # to the pool. Every seed gene has >=1 tx in the window, so the
+            # seed size is the number of distinct committed genes.
+            ten_genes = gene_idx[tentative].astype(np.int32)
+            n_ten = len(tentative)
+            codes = _cy_prune.prune_entities(
+                [np.arange(n_ten, dtype=np.int32)], ten_genes,
+                np.ones(n_ten, dtype=np.uint8), W_ip, W_ix, W_dt,
+                float(pmi_threshold),
+                max_carves=0, admit_non_seed=0, seed_from_mask=0,
+                update_counters=0,
+            )
+            keep = codes == 0
+            # Retained genes, ascending (the order greedy_prune_retained
+            # returned them in, since its input was np.unique-sorted).
+            seed_genes = np.unique(ten_genes[keep]).tolist()
             if len(seed_genes) < 2:
                 continue
-            seed_set = set(seed_genes)
 
-            committed = [i for i in tentative if int(gene_idx[i]) in seed_set]
-            returned = [i for i in tentative if int(gene_idx[i]) not in seed_set]
+            committed = [i for i, k in zip(tentative, keep) if k]
+            returned = [i for i, k in zip(tentative, keep) if not k]
 
             if len(committed) < min_anchor_tx:
                 continue

@@ -112,3 +112,34 @@ def test_max_carves_validated(setup):
     lists, gidx, nuc, (ip, ix, dt) = setup
     with pytest.raises(ValueError):
         _cy_prune.prune_entities(lists, gidx, nuc, ip, ix, dt, THR, max_carves=2)
+
+
+def test_dense_w_conversion_matches_dense_kernel():
+    """The cascade converts a dense (NaN->0 filled) W to CSR once. Every
+    entry, zeros included, must stay stored, so the greedy prune sees the
+    same observed pairs as the dense kernel did."""
+    from tracer.density_cascade import _csr_arrays_for_prune
+    rng = np.random.default_rng(1)
+    G = 40
+    A = rng.normal(0, 0.5, (G, G)).astype(np.float32)
+    A = (A + A.T) / 2
+    A[rng.random((G, G)) < 0.3] = 0.0          # observed zeros
+    np.fill_diagonal(A, 0.0)
+    ip, ix, dt = _csr_arrays_for_prune(A)
+    assert dt.size == G * G
+    for _ in range(50):
+        g = np.unique(rng.choice(G, size=rng.integers(2, 15), replace=False)).astype(np.int32)
+        c = rng.integers(1, 6, size=g.size).astype(np.int32)
+        dense = _cy_prune.greedy_prune_retained(g, c, W_dense=A, threshold=THR)
+        sparse = _cy_prune.greedy_prune_retained(g, c, W_indptr=ip, W_indices=ix,
+                                                 W_data=dt, threshold=THR)
+        assert np.array_equal(dense, sparse)
+
+
+def test_update_counters_off_leaves_counters(setup):
+    lists, gidx, nuc, (ip, ix, dt) = setup
+    _cy_prune.reset_prune_counters()
+    _cy_prune.prune_entities(lists, gidx, nuc, ip, ix, dt, THR, update_counters=0)
+    assert all(v == 0 for v in _cy_prune.get_prune_counters().values())
+    _cy_prune.prune_entities(lists, gidx, nuc, ip, ix, dt, THR, update_counters=1)
+    assert _cy_prune.get_prune_counters()["cells"] == len(lists)
