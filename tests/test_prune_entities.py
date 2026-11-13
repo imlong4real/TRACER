@@ -1,0 +1,114 @@
+"""``_cy_prune.prune_entities``: the per-entity prune unit (unified-prune step 3).
+
+Phase-1 Prune and the Group cascade both prune a set of transcripts down to
+a coherent program. Step 3 moved Phase-1's per-cell body (seed -> admission
+-> one carve) into ``_prune_entity`` and exposed it as ``prune_entities``.
+
+These tests pin:
+* with Phase-1 settings it is the Phase-1 kernel, code for code;
+* with the cascade's settings (seed from every tx, no admission of
+  non-seed genes, no carve) it reproduces the cascade's current membership
+  rule, so step 4 can move the cascade onto it without a behaviour change.
+"""
+from __future__ import annotations
+
+import numpy as np
+import pytest
+
+from tracer import _cy_prune
+from tracer._utils import symmetric_csr
+from tracer.pruning import build_sparse_pmi_matrix_from_long
+from tests.segmentation_sim import simulate_dapi_voronoi_segmentation
+from tests.synthetic import (
+    make_synthetic_npmi_panel_for_transcripts,
+    make_synthetic_transcripts,
+)
+
+THR = 0.2
+
+
+@pytest.fixture(scope="module")
+def setup():
+    df, gt = make_synthetic_transcripts(
+        n_cells=30, voxels_per_cell_mean=120, tx_per_cell=60, n_genes=24,
+        n_types=4, domain_z_um=10.0, nuclear_layers=2, seed=7,
+    )
+    df = simulate_dapi_voronoi_segmentation(df)
+    panel = make_synthetic_npmi_panel_for_transcripts(df, gt)
+    genes, g2i, W = build_sparse_pmi_matrix_from_long(panel, metric_col="NPMI")
+    S = symmetric_csr(W)
+    gidx = df["feature_name"].map(g2i).fillna(-1).to_numpy(np.int32)
+    nuc = df["is_nuclear"].to_numpy(np.uint8)
+    cells = df["cell_id"].astype(str).to_numpy()
+    lists = [np.flatnonzero(cells == c).astype(np.int32)
+             for c in sorted(set(cells) - {"-1"})]
+    csr = (S.indptr.astype(np.int32), S.indices.astype(np.int32),
+           S.data.astype(np.float32))
+    return lists, gidx, nuc, csr
+
+
+@pytest.mark.parametrize("veto_mode", [0, 1, 2])
+@pytest.mark.parametrize("nuclear_seed_only", [0, 1])
+@pytest.mark.parametrize("nuclear_only_admit", [0, 1])
+def test_phase1_settings_match_phase1_kernel(setup, veto_mode, nuclear_seed_only,
+                                             nuclear_only_admit):
+    lists, gidx, nuc, (ip, ix, dt) = setup
+    common = dict(tx_weighted=1, veto_mode=veto_mode, min_admit_threshold=0.0,
+                  mean_admit_threshold=0.2, aggregator_percentile=25.0,
+                  real_signal_threshold=0.2, neg_npmi_threshold=-0.2,
+                  fallback_whole_cell_admit=1)
+    ref = _cy_prune.prune_cells_nuclear_seed_sparse(
+        lists, gidx, nuc, ip, ix, dt, THR, 3, 0,
+        nuclear_only_admit=nuclear_only_admit,
+        nuclear_seed_only=nuclear_seed_only, **common)
+    got = _cy_prune.prune_entities(
+        lists, gidx, nuc, ip, ix, dt, THR,
+        min_seed_genes=3, max_carves=1, admit_non_seed=1,
+        seed_from_mask=nuclear_seed_only, admit_mask_only=nuclear_only_admit,
+        **common)
+    assert np.array_equal(ref, got)
+    assert (got == 0).any() and (got == 1).any(), "fixture exercises no carve"
+
+
+def test_cascade_settings_reproduce_cascade_membership(setup):
+    """Seed from all tx, admit only seed genes, no carve == the cascade's
+    rule: retained = greedy_prune_retained(unique genes, tx counts);
+    committed = tx whose gene is retained."""
+    lists, gidx, nuc, (ip, ix, dt) = setup
+    ones = np.ones_like(nuc)
+    got = _cy_prune.prune_entities(
+        lists, gidx, ones, ip, ix, dt, THR,
+        min_seed_genes=3, max_carves=0, admit_non_seed=0, seed_from_mask=0)
+    n_changed = 0
+    for rows in lists:
+        g = gidx[rows]
+        g = g[g >= 0]
+        if g.size == 0:
+            assert (got[rows] == 2).all()
+            continue
+        ug, uc = np.unique(g, return_counts=True)
+        kept = set(_cy_prune.greedy_prune_retained(
+            ug.astype(np.int32), uc.astype(np.int32),
+            W_indptr=ip, W_indices=ix, W_data=dt, threshold=THR).tolist())
+        expect = np.where(np.isin(gidx[rows], list(kept)), 0, 2)
+        assert np.array_equal(got[rows], expect)
+        n_changed += int((expect == 2).sum())
+    assert n_changed > 0, "no entity lost a gene; the comparison is vacuous"
+    assert not (got == 1).any()
+
+
+def test_no_admission_is_stricter_than_admission(setup):
+    lists, gidx, nuc, (ip, ix, dt) = setup
+    kw = dict(min_seed_genes=3, max_carves=0, seed_from_mask=0, veto_mode=2,
+              real_signal_threshold=0.2)
+    with_adm = _cy_prune.prune_entities(lists, gidx, nuc, ip, ix, dt, THR,
+                                        admit_non_seed=1, **kw)
+    without = _cy_prune.prune_entities(lists, gidx, nuc, ip, ix, dt, THR,
+                                       admit_non_seed=0, **kw)
+    assert ((without == 0) <= (with_adm == 0)).all()
+
+
+def test_max_carves_validated(setup):
+    lists, gidx, nuc, (ip, ix, dt) = setup
+    with pytest.raises(ValueError):
+        _cy_prune.prune_entities(lists, gidx, nuc, ip, ix, dt, THR, max_carves=2)

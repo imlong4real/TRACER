@@ -359,6 +359,262 @@ def prune_cells_retained(list g_lists, list tx_counts_lists, W, double threshold
     return out
 
 
+cdef int _prune_entity(
+    cnp.ndarray[cnp.int32_t, ndim=1] tx_inds_arr,
+    cnp.int32_t[:] tx_gene_mv,
+    cnp.uint8_t[:] tx_nuc_mv,
+    cnp.int8_t[:] out_mv,
+    cnp.float32_t[:] pmi_buf_mv,
+    cnp.float32_t[:, :] W_mv,
+    const int[::1] W_indptr,
+    const int[::1] W_indices,
+    const float[::1] W_data,
+    int use_sparse,
+    double threshold,
+    int min_nuclear_genes,
+    int skip_phase_1c,
+    int nuclear_only_admit,
+    int tx_weighted,
+    int veto_mode,
+    double min_admit_threshold,
+    double mean_admit_threshold,
+    double aggregator_percentile,
+    double real_signal_threshold,
+    double neg_npmi_threshold,
+    int fallback_whole_cell_admit,
+    int nuclear_seed_only,
+    int admit_non_seed,
+) except -1:
+    """Prune ONE entity: seed (1a) -> admission (1b) -> one carve (1c).
+
+    The per-entity unit shared by Phase-1 Prune and (from unified-prune
+    step 4) the Group cascade. Writes this entity's per-tx codes into
+    ``out_mv`` at the rows in ``tx_inds_arr``: 0 = main, 1 = carved
+    partial; rows left untouched keep the caller's default (2 =
+    unassigned). Updates the module prune counters.
+
+    ``tx_nuc_mv`` is the SEED MASK: the transcripts the seed (1a, under
+    ``nuclear_seed_only``) and the carve (1c) are built from. Phase 1
+    passes the nuclear flag. ``admit_non_seed=0`` disables the
+    ``_admission_test`` for genes outside the seed, so only seed genes are
+    admitted (the cascade's current membership rule); ``skip_phase_1c=1``
+    disables the carve. Body moved verbatim from the former inline loop of
+    ``_prune_cells_nuclear_seed_core``; with ``admit_non_seed=1`` the
+    output is bit-identical.
+    """
+    global _CNT_CELLS, _CNT_SEED_EMPTY, _CNT_FALLBACK, _CNT_THIN_NUCLEUS
+    cdef cnp.int32_t[:] tx_inds_mv
+    cdef int n_cell_tx, ti, tx_row, g, n_unique_nuc, fitted, n_unique_all
+    cdef int is_fallback   # took the whole-cell fallback seed path
+    cdef cnp.ndarray[cnp.int32_t, ndim=1] uniq_nuc
+    cdef cnp.ndarray[cnp.int32_t, ndim=1] uniq_all
+    cdef cnp.ndarray[cnp.int32_t, ndim=1] seed
+    cdef cnp.int32_t[:] seed_mv
+    cdef int seed_len
+    cdef cnp.ndarray[cnp.int32_t, ndim=1] uniq_rej_nuc
+    cdef cnp.ndarray[cnp.int32_t, ndim=1] sub_seed
+    cdef cnp.int32_t[:] sub_seed_mv
+    cdef int sub_seed_len
+    tx_inds_mv = tx_inds_arr
+    n_cell_tx = tx_inds_arr.shape[0]
+    if n_cell_tx == 0:
+        return 0
+    _CNT_CELLS += 1
+
+    # Collect unique nuclear gene indices for this cell.
+    # (Python-level numpy ops here are fine: per-cell, not per-tx.)
+    nuc_genes = []
+    for ti in range(n_cell_tx):
+        tx_row = tx_inds_mv[ti]
+        if tx_nuc_mv[tx_row]:
+            g = tx_gene_mv[tx_row]
+            if g >= 0:
+                nuc_genes.append(g)
+    uniq_nuc = np.unique(np.asarray(nuc_genes, dtype=np.int32))
+    n_unique_nuc = uniq_nuc.shape[0]
+
+    if (not nuclear_seed_only) or n_unique_nuc < min_nuclear_genes:
+        # Whole-cell seed. Two ways to get here:
+        #   (a) nuclear_seed_only == 0 — the caller asked for a CELL
+        #       seed, so Phase 1a uses every tx in the cell. No thin-
+        #       nucleus case exists, so this is not a "fallback".
+        #   (b) the legacy fallback: fewer than min_nuclear_genes
+        #       unique nuclear genes, so a nuclear seed is impossible.
+        # is_fallback stays keyed on (b) alone — it only controls the
+        # 1b/1c nuclear_only_admit exemption for thin nuclei.
+        is_fallback = 1 if n_unique_nuc < min_nuclear_genes else 0
+        if is_fallback:
+            _CNT_THIN_NUCLEUS += 1
+            if nuclear_seed_only:
+                # only a real FALLBACK when a nuclear seed was wanted
+                _CNT_FALLBACK += 1
+        all_genes = []
+        for ti in range(n_cell_tx):
+            tx_row = tx_inds_mv[ti]
+            g = tx_gene_mv[tx_row]
+            if g >= 0:
+                all_genes.append(g)
+        uniq_all_arr = np.asarray(all_genes, dtype=np.int32)
+        uniq_all = np.unique(uniq_all_arr)
+        n_unique_all = uniq_all.shape[0]
+        if n_unique_all == 0:
+            return 0
+        # Whole-cell tx counts: all tx contribute (nuc + cyto).
+        tx_counts_all = np.zeros(n_unique_all, dtype=np.int32)
+        for ti in range(n_unique_all):
+            tx_counts_all[ti] = int(np.sum(uniq_all_arr == uniq_all[ti]))
+        if not tx_weighted:
+            tx_counts_all = np.ones(n_unique_all, dtype=np.int32)
+        seed = _greedy_prune_to_retained(
+            uniq_all, tx_counts_all, W_mv,
+            W_indptr, W_indices, W_data, use_sparse, threshold)
+    else:
+        # ---- Phase 1a: nuclear seed (tx-weighted) ----
+        is_fallback = 0
+        # Per-gene nuclear tx counts for the tx-weighted greedy.
+        nuc_arr = np.asarray(nuc_genes, dtype=np.int32)
+        tx_counts_nuc = np.zeros(n_unique_nuc, dtype=np.int32)
+        for ti in range(n_unique_nuc):
+            tx_counts_nuc[ti] = int(np.sum(nuc_arr == uniq_nuc[ti]))
+        if not tx_weighted:
+            tx_counts_nuc = np.ones(n_unique_nuc, dtype=np.int32)
+        seed = _greedy_prune_to_retained(
+            uniq_nuc, tx_counts_nuc, W_mv,
+            W_indptr, W_indices, W_data, use_sparse, threshold)
+    seed_mv = seed
+    seed_len = seed.shape[0]
+    if seed_len == 0:
+        # No seed found; all tx → unassigned (code 2 already default)
+        _CNT_SEED_EMPTY += 1
+        return 0
+
+    # ---- Phase 1b: per-tx admit by mean PMI to seed ----
+    # rejected accumulator (Python list, per-cell, OK overhead).
+    # When nuclear_only_admit is set, cytoplasmic tx are not eligible
+    # for admission to main here — they stay unassigned (code 2)
+    # for downstream Group/Rescue/Stitch to route by spatial+gene
+    # proximity. Identity is established exclusively from nuclear tx.
+    rejected_rows = []
+    for ti in range(n_cell_tx):
+        tx_row = tx_inds_mv[ti]
+        g = tx_gene_mv[tx_row]
+        if g < 0:
+            # No gene index — leave as unassigned (already default 2)
+            rejected_rows.append(tx_row)
+            continue
+        if (nuclear_only_admit and not tx_nuc_mv[tx_row]
+                and not (is_fallback and fallback_whole_cell_admit)):
+            # Cytoplasmic tx skipped — stays unassigned for Rescue.
+            # EXCEPT for fallback cells when fallback_whole_cell_admit:
+            # the seed was built from whole-cell genes anyway, and the
+            # thin nucleus can't veto its dominant local program with a
+            # noisy nuclear/cyto boundary.
+            continue
+        # Check if g is in seed (linear scan; seed_len typically tiny)
+        fitted = 0
+        for j in range(seed_len):
+            if seed_mv[j] == g:
+                fitted = 1
+                break
+        if fitted == 0 and admit_non_seed:
+            fitted = _admission_test(
+                g,
+                &seed_mv[0],
+                seed_len,
+                W_mv,
+                W_indptr, W_indices, W_data, use_sparse,
+                &pmi_buf_mv[0],
+                veto_mode,
+                mean_admit_threshold if veto_mode != 1 else threshold,
+                min_admit_threshold,
+                aggregator_percentile,
+                real_signal_threshold,
+                neg_npmi_threshold,
+                0,  # small_entity_guard_n unused at Phase 1b
+                1,  # legacy_mean_test = 1 (Phase 1b mean uses `>=`)
+            )
+        if fitted:
+            out_mv[tx_row] = 0  # main
+        else:
+            rejected_rows.append(tx_row)
+
+    if skip_phase_1c or len(rejected_rows) == 0:
+        return 0
+
+    # ---- Phase 1c: recursive prune on rejected tx's nuclear genes ----
+    rej_nuc = []
+    for tx_row in rejected_rows:
+        if tx_nuc_mv[tx_row]:
+            g = tx_gene_mv[tx_row]
+            if g >= 0:
+                rej_nuc.append(g)
+    if len(rej_nuc) == 0:
+        return 0
+    rej_nuc_arr = np.asarray(rej_nuc, dtype=np.int32)
+    uniq_rej_nuc = np.unique(rej_nuc_arr)
+    if uniq_rej_nuc.shape[0] < min_nuclear_genes:
+        return 0
+
+    # Tx-weighted prune for sub-seed too.
+    n_uniq_rej = uniq_rej_nuc.shape[0]
+    tx_counts_rej = np.zeros(n_uniq_rej, dtype=np.int32)
+    for ti in range(n_uniq_rej):
+        tx_counts_rej[ti] = int(np.sum(rej_nuc_arr == uniq_rej_nuc[ti]))
+    if not tx_weighted:
+        tx_counts_rej = np.ones(n_uniq_rej, dtype=np.int32)
+    sub_seed = _greedy_prune_to_retained(
+        uniq_rej_nuc, tx_counts_rej, W_mv,
+        W_indptr, W_indices, W_data, use_sparse, threshold)
+    sub_seed_mv = sub_seed
+    sub_seed_len = sub_seed.shape[0]
+    if sub_seed_len == 0:
+        return 0
+
+    # Coherence floor on sub-seed: reject if internal mean PMI is
+    # below the floor — prevents degenerate "any non-conflicting
+    # clique" sub-seeds from forming spurious partials. Rest-pile
+    # tx stay unassigned (code 2, already default) for downstream
+    # Rescue to route based on neighbour gene composition.
+
+    # Re-test rejected tx against sub-seed. When nuclear_only_admit
+    # is set, cytoplasmic rejected tx are not eligible for partial
+    # admission either — they stay unassigned for Rescue.
+    for tx_row in rejected_rows:
+        g = tx_gene_mv[tx_row]
+        if g < 0:
+            continue
+        if (nuclear_only_admit and not tx_nuc_mv[tx_row]
+                and not (is_fallback and fallback_whole_cell_admit)):
+            continue
+        fitted = 0
+        for j in range(sub_seed_len):
+            if sub_seed_mv[j] == g:
+                fitted = 1
+                break
+        if fitted == 0 and admit_non_seed:
+            fitted = _admission_test(
+                g,
+                &sub_seed_mv[0],
+                sub_seed_len,
+                W_mv,
+                W_indptr, W_indices, W_data, use_sparse,
+                &pmi_buf_mv[0],
+                veto_mode,
+                mean_admit_threshold if veto_mode != 1 else threshold,
+                min_admit_threshold,
+                aggregator_percentile,
+                real_signal_threshold,
+                neg_npmi_threshold,
+                0,
+                1,
+            )
+        if fitted:
+            out_mv[tx_row] = 1  # partial
+        # else: stays 2 (unassigned) — already default
+
+    return 0
+
+
 cdef cnp.ndarray _prune_cells_nuclear_seed_core(
     list cell_tx_idx_lists,
     cnp.int32_t[:] tx_gene_mv,
@@ -387,6 +643,7 @@ cdef cnp.ndarray _prune_cells_nuclear_seed_core(
                                           #     0 ⇒ seed from the WHOLE CELL, so a thin
                                           #     or incoherent nucleus cannot veto a cell
                                           #     whose cytoplasm is coherent
+    int admit_non_seed = 1,              # 0 ⇒ only seed genes are admitted (no 1b test)
 ):
     """Shared orchestration for the dense and sparse nuclear-seed prune.
 
@@ -398,27 +655,11 @@ cdef cnp.ndarray _prune_cells_nuclear_seed_core(
     public :func:`prune_cells_nuclear_seed` /
     :func:`prune_cells_nuclear_seed_sparse` wrappers.
     """
-    global _CNT_CELLS, _CNT_SEED_EMPTY, _CNT_FALLBACK, _CNT_THIN_NUCLEUS
     cdef int n_cells = len(cell_tx_idx_lists)
     cdef cnp.ndarray[cnp.int8_t, ndim=1] out = np.full(n_tx, 2, dtype=np.int8)
     cdef cnp.int8_t[:] out_mv = out
 
     cdef Py_ssize_t cidx
-    cdef cnp.ndarray[cnp.int32_t, ndim=1] tx_inds_arr
-    cdef cnp.int32_t[:] tx_inds_mv
-    cdef int n_cell_tx, ti, tx_row, g, n_unique_nuc, fitted, n_unique_all
-    cdef int is_fallback   # per-cell: took the whole-cell fallback seed path
-
-    # Reusable scratch buffers
-    cdef cnp.ndarray[cnp.int32_t, ndim=1] uniq_nuc
-    cdef cnp.ndarray[cnp.int32_t, ndim=1] uniq_all
-    cdef cnp.ndarray[cnp.int32_t, ndim=1] seed
-    cdef cnp.int32_t[:] seed_mv
-    cdef int seed_len
-    cdef cnp.ndarray[cnp.int32_t, ndim=1] uniq_rej_nuc
-    cdef cnp.ndarray[cnp.int32_t, ndim=1] sub_seed
-    cdef cnp.int32_t[:] sub_seed_mv
-    cdef int sub_seed_len
 
     # Scratch float buffer for the hybrid admission gate's percentile
     # aggregator. Sized at the PMI panel's row dimension. Allocated once,
@@ -439,204 +680,15 @@ cdef cnp.ndarray _prune_cells_nuclear_seed_core(
     # set; use a small inline helper.
 
     for cidx in range(n_cells):
-        tx_inds_arr = cell_tx_idx_lists[cidx]
-        tx_inds_mv = tx_inds_arr
-        n_cell_tx = tx_inds_arr.shape[0]
-        if n_cell_tx == 0:
-            continue
-        _CNT_CELLS += 1
-
-        # Collect unique nuclear gene indices for this cell.
-        # (Python-level numpy ops here are fine: per-cell, not per-tx.)
-        nuc_genes = []
-        for ti in range(n_cell_tx):
-            tx_row = tx_inds_mv[ti]
-            if tx_nuc_mv[tx_row]:
-                g = tx_gene_mv[tx_row]
-                if g >= 0:
-                    nuc_genes.append(g)
-        uniq_nuc = np.unique(np.asarray(nuc_genes, dtype=np.int32))
-        n_unique_nuc = uniq_nuc.shape[0]
-
-        if (not nuclear_seed_only) or n_unique_nuc < min_nuclear_genes:
-            # Whole-cell seed. Two ways to get here:
-            #   (a) nuclear_seed_only == 0 — the caller asked for a CELL
-            #       seed, so Phase 1a uses every tx in the cell. No thin-
-            #       nucleus case exists, so this is not a "fallback".
-            #   (b) the legacy fallback: fewer than min_nuclear_genes
-            #       unique nuclear genes, so a nuclear seed is impossible.
-            # is_fallback stays keyed on (b) alone — it only controls the
-            # 1b/1c nuclear_only_admit exemption for thin nuclei.
-            is_fallback = 1 if n_unique_nuc < min_nuclear_genes else 0
-            if is_fallback:
-                _CNT_THIN_NUCLEUS += 1
-                if nuclear_seed_only:
-                    # only a real FALLBACK when a nuclear seed was wanted
-                    _CNT_FALLBACK += 1
-            all_genes = []
-            for ti in range(n_cell_tx):
-                tx_row = tx_inds_mv[ti]
-                g = tx_gene_mv[tx_row]
-                if g >= 0:
-                    all_genes.append(g)
-            uniq_all_arr = np.asarray(all_genes, dtype=np.int32)
-            uniq_all = np.unique(uniq_all_arr)
-            n_unique_all = uniq_all.shape[0]
-            if n_unique_all == 0:
-                continue
-            # Whole-cell tx counts: all tx contribute (nuc + cyto).
-            tx_counts_all = np.zeros(n_unique_all, dtype=np.int32)
-            for ti in range(n_unique_all):
-                tx_counts_all[ti] = int(np.sum(uniq_all_arr == uniq_all[ti]))
-            if not tx_weighted:
-                tx_counts_all = np.ones(n_unique_all, dtype=np.int32)
-            seed = _greedy_prune_to_retained(
-                uniq_all, tx_counts_all, W_mv,
-                W_indptr, W_indices, W_data, use_sparse, threshold)
-        else:
-            # ---- Phase 1a: nuclear seed (tx-weighted) ----
-            is_fallback = 0
-            # Per-gene nuclear tx counts for the tx-weighted greedy.
-            nuc_arr = np.asarray(nuc_genes, dtype=np.int32)
-            tx_counts_nuc = np.zeros(n_unique_nuc, dtype=np.int32)
-            for ti in range(n_unique_nuc):
-                tx_counts_nuc[ti] = int(np.sum(nuc_arr == uniq_nuc[ti]))
-            if not tx_weighted:
-                tx_counts_nuc = np.ones(n_unique_nuc, dtype=np.int32)
-            seed = _greedy_prune_to_retained(
-                uniq_nuc, tx_counts_nuc, W_mv,
-                W_indptr, W_indices, W_data, use_sparse, threshold)
-        seed_mv = seed
-        seed_len = seed.shape[0]
-        if seed_len == 0:
-            # No seed found; all tx → unassigned (code 2 already default)
-            _CNT_SEED_EMPTY += 1
-            continue
-
-        # ---- Phase 1b: per-tx admit by mean PMI to seed ----
-        # rejected accumulator (Python list, per-cell, OK overhead).
-        # When nuclear_only_admit is set, cytoplasmic tx are not eligible
-        # for admission to main here — they stay unassigned (code 2)
-        # for downstream Group/Rescue/Stitch to route by spatial+gene
-        # proximity. Identity is established exclusively from nuclear tx.
-        rejected_rows = []
-        for ti in range(n_cell_tx):
-            tx_row = tx_inds_mv[ti]
-            g = tx_gene_mv[tx_row]
-            if g < 0:
-                # No gene index — leave as unassigned (already default 2)
-                rejected_rows.append(tx_row)
-                continue
-            if (nuclear_only_admit and not tx_nuc_mv[tx_row]
-                    and not (is_fallback and fallback_whole_cell_admit)):
-                # Cytoplasmic tx skipped — stays unassigned for Rescue.
-                # EXCEPT for fallback cells when fallback_whole_cell_admit:
-                # the seed was built from whole-cell genes anyway, and the
-                # thin nucleus can't veto its dominant local program with a
-                # noisy nuclear/cyto boundary.
-                continue
-            # Check if g is in seed (linear scan; seed_len typically tiny)
-            fitted = 0
-            for j in range(seed_len):
-                if seed_mv[j] == g:
-                    fitted = 1
-                    break
-            if fitted == 0:
-                fitted = _admission_test(
-                    g,
-                    &seed_mv[0],
-                    seed_len,
-                    W_mv,
-                    W_indptr, W_indices, W_data, use_sparse,
-                    &pmi_buf_mv[0],
-                    veto_mode,
-                    mean_admit_threshold if veto_mode != 1 else threshold,
-                    min_admit_threshold,
-                    aggregator_percentile,
-                    real_signal_threshold,
-                    neg_npmi_threshold,
-                    0,  # small_entity_guard_n unused at Phase 1b
-                    1,  # legacy_mean_test = 1 (Phase 1b mean uses `>=`)
-                )
-            if fitted:
-                out_mv[tx_row] = 0  # main
-            else:
-                rejected_rows.append(tx_row)
-
-        if skip_phase_1c or len(rejected_rows) == 0:
-            continue
-
-        # ---- Phase 1c: recursive prune on rejected tx's nuclear genes ----
-        rej_nuc = []
-        for tx_row in rejected_rows:
-            if tx_nuc_mv[tx_row]:
-                g = tx_gene_mv[tx_row]
-                if g >= 0:
-                    rej_nuc.append(g)
-        if len(rej_nuc) == 0:
-            continue
-        rej_nuc_arr = np.asarray(rej_nuc, dtype=np.int32)
-        uniq_rej_nuc = np.unique(rej_nuc_arr)
-        if uniq_rej_nuc.shape[0] < min_nuclear_genes:
-            continue
-
-        # Tx-weighted prune for sub-seed too.
-        n_uniq_rej = uniq_rej_nuc.shape[0]
-        tx_counts_rej = np.zeros(n_uniq_rej, dtype=np.int32)
-        for ti in range(n_uniq_rej):
-            tx_counts_rej[ti] = int(np.sum(rej_nuc_arr == uniq_rej_nuc[ti]))
-        if not tx_weighted:
-            tx_counts_rej = np.ones(n_uniq_rej, dtype=np.int32)
-        sub_seed = _greedy_prune_to_retained(
-            uniq_rej_nuc, tx_counts_rej, W_mv,
-            W_indptr, W_indices, W_data, use_sparse, threshold)
-        sub_seed_mv = sub_seed
-        sub_seed_len = sub_seed.shape[0]
-        if sub_seed_len == 0:
-            continue
-
-        # Coherence floor on sub-seed: reject if internal mean PMI is
-        # below the floor — prevents degenerate "any non-conflicting
-        # clique" sub-seeds from forming spurious partials. Rest-pile
-        # tx stay unassigned (code 2, already default) for downstream
-        # Rescue to route based on neighbour gene composition.
-
-        # Re-test rejected tx against sub-seed. When nuclear_only_admit
-        # is set, cytoplasmic rejected tx are not eligible for partial
-        # admission either — they stay unassigned for Rescue.
-        for tx_row in rejected_rows:
-            g = tx_gene_mv[tx_row]
-            if g < 0:
-                continue
-            if (nuclear_only_admit and not tx_nuc_mv[tx_row]
-                    and not (is_fallback and fallback_whole_cell_admit)):
-                continue
-            fitted = 0
-            for j in range(sub_seed_len):
-                if sub_seed_mv[j] == g:
-                    fitted = 1
-                    break
-            if fitted == 0:
-                fitted = _admission_test(
-                    g,
-                    &sub_seed_mv[0],
-                    sub_seed_len,
-                    W_mv,
-                    W_indptr, W_indices, W_data, use_sparse,
-                    &pmi_buf_mv[0],
-                    veto_mode,
-                    mean_admit_threshold if veto_mode != 1 else threshold,
-                    min_admit_threshold,
-                    aggregator_percentile,
-                    real_signal_threshold,
-                    neg_npmi_threshold,
-                    0,
-                    1,
-                )
-            if fitted:
-                out_mv[tx_row] = 1  # partial
-            # else: stays 2 (unassigned) — already default
-
+        _prune_entity(
+            cell_tx_idx_lists[cidx], tx_gene_mv, tx_nuc_mv, out_mv, pmi_buf_mv,
+            W_mv, W_indptr, W_indices, W_data, use_sparse,
+            threshold, min_nuclear_genes, skip_phase_1c,
+            nuclear_only_admit, tx_weighted,
+            veto_mode, min_admit_threshold, mean_admit_threshold,
+            aggregator_percentile, real_signal_threshold, neg_npmi_threshold,
+            fallback_whole_cell_admit, nuclear_seed_only, admit_non_seed,
+        )
     return out
 
 
@@ -761,6 +813,86 @@ def prune_cells_nuclear_seed_sparse(
         aggregator_percentile, real_signal_threshold, neg_npmi_threshold,
         fallback_whole_cell_admit,
         nuclear_seed_only,
+    )
+
+
+def prune_entities(
+    list entity_tx_idx_lists,
+    cnp.ndarray[cnp.int32_t, ndim=1] tx_gene_idx,
+    cnp.ndarray[cnp.uint8_t, ndim=1] tx_seed_mask,
+    cnp.ndarray[cnp.int32_t, ndim=1] W_indptr,
+    cnp.ndarray[cnp.int32_t, ndim=1] W_indices,
+    cnp.ndarray[cnp.float32_t, ndim=1] W_data,
+    double threshold,
+    *,
+    int min_seed_genes=3,
+    int max_carves=1,
+    int admit_non_seed=1,
+    int seed_from_mask=1,
+    int admit_mask_only=0,
+    int tx_weighted=1,
+    int veto_mode=1,
+    double min_admit_threshold=0.0,
+    double mean_admit_threshold=0.2,
+    double aggregator_percentile=25.0,
+    double real_signal_threshold=0.0,
+    double neg_npmi_threshold=-0.2,
+    int fallback_whole_cell_admit=0,
+):
+    """Prune many entities with the shared per-entity unit (sparse W).
+
+    The entry point for any caller that prunes a set of transcripts into
+    a coherent main program plus at most one carved partial: Phase-1
+    cells today (via ``prune_cells_nuclear_seed_sparse``, which is this
+    function under Phase-1 parameter names) and, from unified-prune step
+    4, the Group cascade's seed windows.
+
+    Parameters
+    ----------
+    entity_tx_idx_lists : list of int32 arrays
+        Per-entity row indices into ``tx_gene_idx`` / ``tx_seed_mask``.
+    tx_gene_idx : int32 array
+        Per-tx gene index into W (-1 = no panel gene).
+    tx_seed_mask : uint8 array
+        Transcripts the seed and the carve are built from (Phase 1: the
+        nuclear flag). Pass all-ones for "use every transcript".
+    W_indptr, W_indices, W_data
+        Symmetric, column-sorted CSR (``tracer._utils.symmetric_csr``).
+        Absent pairs are skipped.
+    threshold : float
+        Bad-edge PMI cutoff for the greedy prune (``PMI_THR``).
+    min_seed_genes : int
+        Minimum distinct masked genes for a masked seed / a carve.
+    max_carves : {0, 1}
+        0 = no carve (rejected tx stay unassigned), 1 = one 1c carve.
+    admit_non_seed : {0, 1}
+        1 = transcripts of non-seed genes may join by ``_admission_test``
+        (Phase 1b); 0 = only seed genes join.
+    seed_from_mask : {0, 1}
+        1 = seed from masked tx (falling back to all tx below
+        ``min_seed_genes``); 0 = seed from all tx.
+    admit_mask_only : {0, 1}
+        1 = only masked tx may be admitted (``nuclear_only_admit``).
+
+    Returns
+    -------
+    int8 array of length ``len(tx_gene_idx)``: 0 = main, 1 = carved
+    partial, 2 = unassigned (and every row not in any entity).
+    """
+    if max_carves not in (0, 1):
+        raise ValueError("max_carves must be 0 or 1 (recursive carving is not implemented)")
+    cdef cnp.ndarray[cnp.float32_t, ndim=2] _W = np.zeros((1, 1), dtype=np.float32)
+    return _prune_cells_nuclear_seed_core(
+        entity_tx_idx_lists, tx_gene_idx, tx_seed_mask, _W,
+        W_indptr, W_indices, W_data, 1,
+        tx_gene_idx.shape[0],
+        threshold, min_seed_genes, 1 if max_carves == 0 else 0,
+        admit_mask_only, tx_weighted,
+        veto_mode, min_admit_threshold, mean_admit_threshold,
+        aggregator_percentile, real_signal_threshold, neg_npmi_threshold,
+        fallback_whole_cell_admit,
+        seed_from_mask,
+        admit_non_seed,
     )
 
 
