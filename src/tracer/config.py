@@ -55,18 +55,16 @@ class Phase1Config:
     admits to the main cell via gene-fit to the seed. ``veto_mode``
     selects the gate:
 
-    - ``"mean"`` (default; back-compat): admit when mean PMI(gene,seed)
+    - ``"mean"``: admit when mean PMI(gene,seed)
       >= ``pmi_threshold``. Permissive — at lineage interfaces a few
       housekeeping/IFN positives can dilute strong opposing-lineage
       signal (see the EPCAM-vs-macrophage case study in the hybrid
       admission spec).
-    - ``"hybrid"``: real-signal filter + unanimous-min fast-pass +
-      percentile-aggregator gate. Mirrors the Rescue hybrid kernel
-      (see `_cy_prune._admission_test`). Recommended for lineage-aware
-      panels; rejects cross-lineage candidates that the mean gate
-      admits. Note: switching the default to ``"hybrid"`` will
-      regenerate the Phase-1 partition. Regression refs will need
-      deliberate regeneration before flipping the default.
+    - ``"hybrid"`` (default): real-signal filter + unanimous-min
+      fast-pass + percentile-aggregator gate (``aggregator_percentile``,
+      25 by default). Mirrors the Rescue hybrid kernel (see
+      `_cy_prune._admission_test`); rejects cross-lineage candidates that
+      the mean gate admits.
     - ``"min"``: veto on any seed pair with PMI < ``neg_npmi_threshold``.
       Strictest, rarely used outside diagnostic runs.
     """

@@ -1,0 +1,119 @@
+{
+  "fixture": {
+    "n_cells": 30,
+    "voxels_per_cell_mean": 120,
+    "tx_per_cell": 60,
+    "n_genes": 24,
+    "n_types": 4,
+    "domain_z_um": 10.0,
+    "nuclear_layers": 2,
+    "seed": 7
+  },
+  "stages": [
+    {
+      "stage": "input",
+      "n_tx": 1800,
+      "n_labels": 21,
+      "label_sha": "e6297529b78178194545801c9b75e5a20b1b883ada72f0b4a1861e82f22dbea1",
+      "partition_sha": "ee01eb477d93c98c486a8fcfc33d1e25d0357cdc89b4a8ca1ea719fd98c86361"
+    },
+    {
+      "stage": "Prune",
+      "n_tx": 1800,
+      "n_labels": 25,
+      "label_sha": "841980e1341c051e0f976a34791253dbac0574502b0b16c5ccf1e3c69bbc5f71",
+      "partition_sha": "abdc46564923e0fe960b05314db0880aac9289b56cf2820329ee9d1f96c7a2e9"
+    },
+    {
+      "stage": "Phase1-Reassign-1c",
+      "n_tx": 1800,
+      "n_labels": 25,
+      "label_sha": "841980e1341c051e0f976a34791253dbac0574502b0b16c5ccf1e3c69bbc5f71",
+      "partition_sha": "abdc46564923e0fe960b05314db0880aac9289b56cf2820329ee9d1f96c7a2e9"
+    },
+    {
+      "stage": "Split-Phase1",
+      "n_tx": 1800,
+      "n_labels": 31,
+      "label_sha": "b1f5f05a79f0fb57925eb85773712ee74a22736247beb00204ad9368c531dacf",
+      "partition_sha": "16eaa5d2b60ca4fa20614e22d9baf507b8ae278870e48aa112fbdeb2573f18bd"
+    },
+    {
+      "stage": "Phase1-Rerank",
+      "n_tx": 1800,
+      "n_labels": 31,
+      "label_sha": "37c244b70eee66d958bde3b4d2c8d5482c991803da319243f75ea9e8e78cdf02",
+      "partition_sha": "ac95e4edb557339eac4a43949d6af8822ad53b3ea7fe02a95fb8354b2aa1ad95"
+    },
+    {
+      "stage": "Phase1-QC",
+      "n_tx": 1800,
+      "n_labels": 26,
+      "label_sha": "62d44c88a67246d97f214ab7501b781590de9ee4f87f1b092167ecd4b37c5c1d",
+      "partition_sha": "d282aa1d86b100e355fc8ccc1c53ee75aef2301ce8af7231dabee5aeb375f993"
+    },
+    {
+      "stage": "Phase1-Maha-Remerge",
+      "n_tx": 1800,
+      "n_labels": 26,
+      "label_sha": "62d44c88a67246d97f214ab7501b781590de9ee4f87f1b092167ecd4b37c5c1d",
+      "partition_sha": "d282aa1d86b100e355fc8ccc1c53ee75aef2301ce8af7231dabee5aeb375f993"
+    },
+    {
+      "stage": "Rescue",
+      "n_tx": 1800,
+      "n_labels": 26,
+      "label_sha": "786a5253019be020becb0aa08363a6ae7f30abc183fad99f9c5a0381c1e1e757",
+      "partition_sha": "9716e340377392579d867e0bfb3467082968a8ec8ca4308b5c2fd103b072ec42"
+    },
+    {
+      "stage": "Group",
+      "n_tx": 1800,
+      "n_labels": 43,
+      "label_sha": "b68b9a1cce58bcd464ae006694484470fae0b2f835a74bfd3847349b6d8f503c",
+      "partition_sha": "3ea4c74d44c366ef3a57e193b60b2d2384833fd85b764e10eb16d7fa2220f229"
+    },
+    {
+      "stage": "Mid-QC",
+      "n_tx": 1800,
+      "n_labels": 43,
+      "label_sha": "b68b9a1cce58bcd464ae006694484470fae0b2f835a74bfd3847349b6d8f503c",
+      "partition_sha": "3ea4c74d44c366ef3a57e193b60b2d2384833fd85b764e10eb16d7fa2220f229"
+    },
+    {
+      "stage": "Post-Group Rescue",
+      "n_tx": 1800,
+      "n_labels": 43,
+      "label_sha": "192030331543902d6daff534e420b795f26527ca126663bea18dedf13f25e744",
+      "partition_sha": "173d41e73e1355186310aac94fee6f4dad9a9f685aac4854b6a8f24115914292"
+    },
+    {
+      "stage": "Stitch",
+      "n_tx": 1800,
+      "n_labels": 32,
+      "label_sha": "9bda29708b08fae0bf5dcd5d4482993546e085a783362be2594ef95ab5975401",
+      "partition_sha": "a3caf9180b278fb56ee0c3d609a7e60a3743805a186f15f2bb9bd3992ae6e3cd"
+    },
+    {
+      "stage": "Demote",
+      "n_tx": 1800,
+      "n_labels": 28,
+      "label_sha": "6cd05d2443b781acf347d24300c568379eb284432441c55cdcc92e6a515a8335",
+      "partition_sha": "165c8aeecda15f5ca77ef6ebe3eff084fe4cf469b1253c1cb8bda40c7a70acee"
+    },
+    {
+      "stage": "Final Rescue",
+      "n_tx": 1800,
+      "n_labels": 28,
+      "label_sha": "a2e71fab06a2361d2dd724e846dd652db913e5e9ad2efca659f79bd81a4a1e65",
+      "partition_sha": "dd7e8e72f87e0a8d197d9eb482272f068ec7ddff64c582418e53a8c7f1a12f53"
+    },
+    {
+      "stage": "Finalize",
+      "n_tx": 1800,
+      "n_labels": 28,
+      "label_sha": "a5a18d79f3a32160fd945bc19e49f152ff613e3133aaf179d5d182c7a349e94c",
+      "partition_sha": "f3410608f46af3823707cfee5a07970be8a42f5f1a0131ded8255c1e0d99bc8b"
+    }
+  ]
+}

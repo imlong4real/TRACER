@@ -28,7 +28,8 @@ Compare a new run with a baseline (exit code 1 if anything is flagged)::
 
 Input columns: ``x/y/z`` (or Xenium ``x_location``/...), ``feature_name``,
 ``transcript_id``, ``cell_id`` (or ``input_cell_id``), optional
-``overlaps_nucleus``. The panel is deduplicated to one row per unordered
+``overlaps_nucleus``. The panel (CSV or parquet; ``gene_i``, ``gene_j`` and a
+PMI-like column, see ``--panel-col``) is deduplicated to one row per unordered
 gene pair before use, as production runners do.
 """
 from __future__ import annotations
@@ -140,7 +141,14 @@ def _load(args):
     for c in ("feature_name", "cell_id", "transcript_id"):
         t[c] = t[c].astype(str)
 
-    p = pd.read_csv(args.panel)
+    p = (pd.read_parquet(args.panel) if str(args.panel).endswith(".parquet")
+         else pd.read_csv(args.panel))
+    col = getattr(args, "panel_col", None)
+    if col is None:
+        col = next((c for c in ("PMI", "cPMI", "value") if c in p.columns), None)
+    if col is None:
+        sys.exit(f"panel has no PMI column; pass --panel-col (columns: {list(p.columns)})")
+    p = p[["gene_i", "gene_j", col]].rename(columns={col: "PMI"})
     key = np.where(p.gene_i < p.gene_j, p.gene_i + "|" + p.gene_j, p.gene_j + "|" + p.gene_i)
     p = p.loc[~pd.Series(key).duplicated().values].reset_index(drop=True)
     return t, p
@@ -202,6 +210,8 @@ def _record(args) -> None:
     worker_argv = [sys.executable, __file__, "_worker",
                    "--input", args.input, "--panel", args.panel,
                    "--mode", args.mode, "--sample-ms", str(args.sample_ms)]
+    if args.panel_col:
+        worker_argv += ["--panel-col", args.panel_col]
     if args.roi:
         worker_argv += ["--roi", *map(str, args.roi)]
     if args.no_nucleus:
@@ -309,6 +319,8 @@ def main(argv=None) -> int:
         p.add_argument("--no-nucleus", action="store_true",
                        help="drop overlaps_nucleus (whole-cell Prune path)")
         p.add_argument("--sample-ms", type=float, default=50.0)
+        p.add_argument("--panel-col", default=None,
+                       help="panel value column (default: first of PMI, cPMI, value)")
 
     rec = sub.add_parser("record")
     run_args(rec)

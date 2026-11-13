@@ -21,6 +21,12 @@ Variants
                   path whose ``aux["W"]`` is upper-triangle only.
 ``seg_wholecell`` SEG without a nucleus column -> ``prune_transcripts_fast``.
 ``noseg``         NOSEG -> cascade driven by ``cfg.group``.
+``seg_nuclear_stitch_r2``  ``seg_nuclear`` with the Stitch settings used for
+                  analysis (ΔC_min -0.3, rescue ΔC floor -0.2, R2 reach,
+                  depth cap 5): looser merging puts more pairs near the
+                  thresholds that W fixes move.
+``seg_nuclear_scope_nuclear``  ``seg_nuclear`` with ``prune_scope="nuclear"``
+                  (nuclear seed + nuclear admission), the non-default scope.
 
 The existing synthetic fixtures carry ``is_nuclear`` but not
 ``overlaps_nucleus`` and a panel with only an ``NPMI`` column, so they never
@@ -36,6 +42,7 @@ Only do that for an intentional behaviour change, and say so in the commit.
 """
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import os
@@ -105,7 +112,7 @@ def _stage_hashes(tid: np.ndarray, label: np.ndarray, etype: np.ndarray) -> dict
     }
 
 
-def _run(monkeypatch, runner, df, panel) -> tuple[list[dict], dict]:
+def _run(monkeypatch, runner, df, panel, cfg=None) -> tuple[list[dict], dict]:
     """Run ``runner`` and return per-stage hashes plus raw captures."""
     stages, raw = [], {}
     orig = P._record_stage
@@ -122,7 +129,7 @@ def _run(monkeypatch, runner, df, panel) -> tuple[list[dict], dict]:
         return orig(progression, stage_name, frame, col)
 
     monkeypatch.setattr(P, "_record_stage", capture)
-    runner(df.copy(), panel)
+    runner(df.copy(), panel, cfg)
     return stages, raw
 
 
@@ -187,6 +194,48 @@ def test_stage_labels_noseg(monkeypatch, inputs):
     df, panel = inputs
     stages, _ = _run(monkeypatch, P.run_noseg_pipeline, df, panel)
     _assert_stages("noseg", stages)
+
+
+def _cfg(**sections):
+    """Default PipelineConfig with the named sections' fields replaced."""
+    cfg = P._resolve_pipeline_cfg(None)
+    for name, fields in sections.items():
+        cfg = dataclasses.replace(cfg, **{name: dataclasses.replace(getattr(cfg, name), **fields)})
+    return cfg
+
+
+STITCH_R2 = dict(deltaC_min=-0.3, rescue_delta_c_floor=-0.2,
+                 neighborhood="R2", max_merger_depth=5)
+
+
+def test_stage_labels_seg_nuclear_stitch_r2(monkeypatch, inputs):
+    df, panel = inputs
+    stages, _ = _run(monkeypatch, P.run_segmented_pipeline, df, panel,
+                     _cfg(stitch=STITCH_R2))
+    _assert_stages("seg_nuclear_stitch_r2", stages)
+
+
+def test_stage_labels_seg_nuclear_scope_nuclear(monkeypatch, inputs):
+    df, panel = inputs
+    stages, _ = _run(monkeypatch, P.run_segmented_pipeline, df, panel,
+                     _cfg(phase1=dict(prune_scope="nuclear")))
+    _assert_stages("seg_nuclear_scope_nuclear", stages)
+
+
+def test_variants_differ_from_default(monkeypatch, inputs):
+    """Each variant must actually change the run where it should, or it
+    pins nothing the default fixture does not already pin."""
+    df, panel = inputs
+    base, _ = _run(monkeypatch, P.run_segmented_pipeline, df, panel)
+    r2, _ = _run(monkeypatch, P.run_segmented_pipeline, df, panel, _cfg(stitch=STITCH_R2))
+    nuc, _ = _run(monkeypatch, P.run_segmented_pipeline, df, panel,
+                  _cfg(phase1=dict(prune_scope="nuclear")))
+
+    def first_diff(a, b):
+        return next((x["stage"] for x, y in zip(a, b) if x != y), None)
+
+    assert first_diff(base, r2) == "Stitch"
+    assert first_diff(base, nuc) == "Prune"
 
 
 def test_fixture_exercises_target_paths(monkeypatch, inputs):
