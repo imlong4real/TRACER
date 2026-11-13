@@ -206,9 +206,8 @@ def test_fixture_exercises_target_paths(monkeypatch, inputs):
     stages, raw = _run(monkeypatch, P.run_segmented_pipeline, df, panel)
 
     assert seen, "nuclear-seed Prune did not run (overlaps_nucleus ignored?)"
-    # Documents today's W contract (upper triangle only). Unified-prune
-    # step 2 symmetrizes W; update this assertion in that commit.
-    assert seen["W_upper_nnz"] > 0 and seen["W_lower_nnz"] == 0
+    # aux["W"] contract (unified-prune step 2b): symmetric on every path.
+    assert seen["W_upper_nnz"] > 0 and seen["W_lower_nnz"] == seen["W_upper_nnz"]
 
     names = [s["stage"] for s in stages]
     for st in ("Prune", "Phase1-Reassign-1c", "Split-Phase1", "Phase1-QC",

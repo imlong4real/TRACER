@@ -288,8 +288,10 @@ def density_cascade_phase1(
         # with a long-DataFrame panel. Use the sparse builder so even
         # the standalone path doesn't materialize a (G,G) dense matrix.
         from tracer.pruning import build_sparse_pmi_matrix_from_long
+        from tracer._utils import symmetric_csr
         _, gene_to_idx, W = build_sparse_pmi_matrix_from_long(
             panel, metric_col="PMI")
+        W = symmetric_csr(W)  # builder emits the upper triangle only
     # NaN→0 fill only for dense W (sparse CSR has no NaNs by construction —
     # structurally-absent pairs are skipped by _wget).
     if isinstance(W, np.ndarray):

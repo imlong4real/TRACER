@@ -836,13 +836,20 @@ def prune_transcripts_nuclear_seed(
     df.drop(columns=["_cell_str", "_is_nuc", "_gene_idx", "_row_pos"], inplace=True)
 
     from .stitching import compute_housekeeping_mask
+    # aux["W"] contract: symmetric CSR (as prune_transcripts_fast already
+    # emits). Handing on the upper triangle made every consumer that reads
+    # W as given (cascade seed prune, Rescue's negative-gene veto, Mid-QC)
+    # see only half the pairs. Reuse the arrays already built for the kernel.
+    W_sym = sp.csr_matrix(
+        (W_sp_data, W_sp_indices, W_sp_indptr), shape=W.shape, dtype=np.float32,
+    )
     aux = {
         "genes": genes,
         "gene_to_idx": gene_to_idx,
-        "W": W,
+        "W": W_sym,
         "partial_map": partial_map,
         "threshold": threshold,
-        "housekeeping_mask": compute_housekeeping_mask(W),
+        "housekeeping_mask": compute_housekeeping_mask(W_sym),
         "seed_per_cell": seed_per_cell,
     }
     return df, aux
