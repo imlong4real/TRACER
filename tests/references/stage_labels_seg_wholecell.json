@@ -1,0 +1,112 @@
+{
+  "fixture": {
+    "n_cells": 30,
+    "voxels_per_cell_mean": 120,
+    "tx_per_cell": 60,
+    "n_genes": 24,
+    "n_types": 4,
+    "domain_z_um": 10.0,
+    "nuclear_layers": 2,
+    "seed": 7
+  },
+  "stages": [
+    {
+      "stage": "input",
+      "n_tx": 1800,
+      "n_labels": 21,
+      "label_sha": "e6297529b78178194545801c9b75e5a20b1b883ada72f0b4a1861e82f22dbea1",
+      "partition_sha": "ee01eb477d93c98c486a8fcfc33d1e25d0357cdc89b4a8ca1ea719fd98c86361"
+    },
+    {
+      "stage": "Prune",
+      "n_tx": 1800,
+      "n_labels": 41,
+      "label_sha": "f649c4f3bd64896e0d4d30dbfd752a59ad8beadc90b18d95615c9b7f49b1f881",
+      "partition_sha": "ce2d836f68797f2354c56235c3b6176a6d20755c57d6e0dbc7f9cb0c2d0d991e"
+    },
+    {
+      "stage": "Split-Phase1",
+      "n_tx": 1800,
+      "n_labels": 62,
+      "label_sha": "d827f09d551342d0fa75a5f5ad0e65767593cef49f5df64fc2798f2bda9ed1fe",
+      "partition_sha": "6c823094241024801210a65ce52bb4b56d3e46d8288ddab3fe79544a5ef62b95"
+    },
+    {
+      "stage": "Phase1-QC",
+      "n_tx": 1800,
+      "n_labels": 49,
+      "label_sha": "61d41ad1bd8cac2ed23e160da3660a3c255c5e2059dfa4ad56e990398d781117",
+      "partition_sha": "1e9561eabdf1238ae490787f18abcdfeac3974c37d54d90f6b1475b290080421"
+    },
+    {
+      "stage": "Phase1-Maha-Remerge",
+      "n_tx": 1800,
+      "n_labels": 49,
+      "label_sha": "61d41ad1bd8cac2ed23e160da3660a3c255c5e2059dfa4ad56e990398d781117",
+      "partition_sha": "1e9561eabdf1238ae490787f18abcdfeac3974c37d54d90f6b1475b290080421"
+    },
+    {
+      "stage": "Split",
+      "n_tx": 1800,
+      "n_labels": 56,
+      "label_sha": "d25032c8ac37c23f9405429eb7e5ba768650798acbd52d9b57697ea0f13b116d",
+      "partition_sha": "1f1f7c7b8ab81c89b117b5fecb09c390943928b6723067b48600f676ad96f749"
+    },
+    {
+      "stage": "Rescue",
+      "n_tx": 1800,
+      "n_labels": 56,
+      "label_sha": "8a8ae7207e44c92db3197d0346543f2e14e692cb6377d0a89476aa4bd025f912",
+      "partition_sha": "f4ae6d1d4327a0089339417f1a3071f8aedb8cd5699ea4e555267503c2f75ef3"
+    },
+    {
+      "stage": "Group",
+      "n_tx": 1800,
+      "n_labels": 76,
+      "label_sha": "88d01c484efcf941ac9f211ec6a3306e21c1193d7d00f3b0f74ea0b2a36f017f",
+      "partition_sha": "65410e49d2cec00c62fab8b05b3cc9065dd57a31b6644cba4e820af8a99eb853"
+    },
+    {
+      "stage": "Mid-QC",
+      "n_tx": 1800,
+      "n_labels": 71,
+      "label_sha": "0f11dde8681b1f6e3be4e85aa3e0e7667efa76510e40e360923fd0b94a43710c",
+      "partition_sha": "36bb6876341f7131312addbb862b1c435acfd8ca0a8fccd975bdecb5106d3ca0"
+    },
+    {
+      "stage": "Post-Group Rescue",
+      "n_tx": 1800,
+      "n_labels": 71,
+      "label_sha": "2ed723e8eb9a33a6c676c4ea68c9412b0b4a9fc20469a4abf1844b2ef3acfd8b",
+      "partition_sha": "bd78bd9eb6099f0c622e640816c250393e0eee500921da788a63d4bed29191c4"
+    },
+    {
+      "stage": "Stitch",
+      "n_tx": 1800,
+      "n_labels": 54,
+      "label_sha": "ee8a014215eb3b9c1463bbb575477c38f6d12721246b8b8e14e7c5156d0d40c9",
+      "partition_sha": "b9d295211b13f604f8c51eaf835b0bc9f9f96a32a1499b49a2a8fd75b1cf32b7"
+    },
+    {
+      "stage": "Demote",
+      "n_tx": 1800,
+      "n_labels": 37,
+      "label_sha": "1ef367b40e0499576fe9fb9b30c02d24e4705960eff0ed0b936a480f595e6fca",
+      "partition_sha": "ab3c3b6b1464812732e9071310a1673d79403352ed57ed9504a2e76bb01e3bd5"
+    },
+    {
+      "stage": "Final Rescue",
+      "n_tx": 1800,
+      "n_labels": 37,
+      "label_sha": "57b26b4e59214a3283f6ada5128e95a07a50314d322aed183a7d66ad4b0b38bb",
+      "partition_sha": "b6b13e140b79baf1ee54ac2a97afb7b48de29f3fe2cfd392fb52f1bec929daa4"
+    },
+    {
+      "stage": "Finalize",
+      "n_tx": 1800,
+      "n_labels": 37,
+      "label_sha": "64e9bb66f8b43a6807754d4efab1d4a67c19566feb121d72209683c03c5e0df0",
+      "partition_sha": "b97c2ecc66cd6c16156b6cb5b9ff773d72f1396b74ec9e14f76b3d5c125ed9b7"
+    }
+  ]
+}

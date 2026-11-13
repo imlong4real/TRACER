@@ -1,0 +1,77 @@
+{
+  "fixture": {
+    "n_cells": 30,
+    "voxels_per_cell_mean": 120,
+    "tx_per_cell": 60,
+    "n_genes": 24,
+    "n_types": 4,
+    "domain_z_um": 10.0,
+    "nuclear_layers": 2,
+    "seed": 7
+  },
+  "stages": [
+    {
+      "stage": "input (cell_id all -1)",
+      "n_tx": 1800,
+      "n_labels": 1,
+      "label_sha": "8cb8abe28378c576883ddc352bc6b1c5fe9bb850a4470473d9bfd789a098d5c4",
+      "partition_sha": "b3e39e1cf8e7e7e764fd14519fc83424651f9a6bcf10f96a28b06cedbcb8e49b"
+    },
+    {
+      "stage": "after init",
+      "n_tx": 1800,
+      "n_labels": 1,
+      "label_sha": "7bc0bba465667b17c7f243624e39bd1cd2b3784cdd5395324d6474ce4a8ee423",
+      "partition_sha": "fb364c1dc2bd700aaa66bd0b762eb4bff14373dfccd4f968596e92fd6990a378"
+    },
+    {
+      "stage": "Group",
+      "n_tx": 1800,
+      "n_labels": 16,
+      "label_sha": "152fb932e56b8d83d61edc90ebc5628361b4352df0a409d9df65581b762c3e80",
+      "partition_sha": "267f6d7fb9fa42fe2f8ff72e10518e007e6f45a4a3dcf07d1f9881897bf26267"
+    },
+    {
+      "stage": "Mid-QC",
+      "n_tx": 1800,
+      "n_labels": 16,
+      "label_sha": "152fb932e56b8d83d61edc90ebc5628361b4352df0a409d9df65581b762c3e80",
+      "partition_sha": "267f6d7fb9fa42fe2f8ff72e10518e007e6f45a4a3dcf07d1f9881897bf26267"
+    },
+    {
+      "stage": "Post-Group Rescue",
+      "n_tx": 1800,
+      "n_labels": 16,
+      "label_sha": "f4b7d8faa9bafb03cebebfbe6a855efba5503ffdcaa0387ec430ea2f37e1a603",
+      "partition_sha": "0ad0f26e3ec2839e9c57817dcf6bfa5516e7a6229f9f90955b3b4be7547f7e0c"
+    },
+    {
+      "stage": "Stitch",
+      "n_tx": 1800,
+      "n_labels": 13,
+      "label_sha": "9c66ebcc0706ce41dd96dc2439ac0337784973dedce4d92391a93a1879d5fb8d",
+      "partition_sha": "faf802efa31b2bf14fe41594b90f0f46a49f9d8ced09068791ae90de7681bc45"
+    },
+    {
+      "stage": "Demote",
+      "n_tx": 1800,
+      "n_labels": 13,
+      "label_sha": "9c66ebcc0706ce41dd96dc2439ac0337784973dedce4d92391a93a1879d5fb8d",
+      "partition_sha": "faf802efa31b2bf14fe41594b90f0f46a49f9d8ced09068791ae90de7681bc45"
+    },
+    {
+      "stage": "Final Rescue",
+      "n_tx": 1800,
+      "n_labels": 13,
+      "label_sha": "00504f42cd34cbec76d3e72ee63d63987c625ede63844fdae505a81255c354d1",
+      "partition_sha": "f5026c0c8033220e28099b1e9e9678e0ec8e74932bfabaffa1d6dadbc919f192"
+    },
+    {
+      "stage": "Finalize",
+      "n_tx": 1800,
+      "n_labels": 13,
+      "label_sha": "3511e6641ca4cc414e1889e114c4306aa0ce82a779df01f29316b36ddb9171be",
+      "partition_sha": "ff78fcc65989a9f6873fd2e8ca05bc042058dc976c275e3b8275714d988dfe8d"
+    }
+  ]
+}

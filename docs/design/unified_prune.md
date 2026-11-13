@@ -88,6 +88,7 @@ Nuclear-specific steps stay outside `prune_entity` as Phase-1 wrappers: the seed
 ## Migration plan (each step is its own PR)
 
 1. **Lock in current output.** Add bit-identical regression fixtures for Phase-1 and Group outputs on a small Xenium ROI, with the nucleus column, and on a NOSEG ROI.
+   *Done:* `tests/test_stage_label_regression.py` hashes every transcript's label at every recorded stage for three variants (SEG with nucleus, SEG whole-cell, NOSEG) on a 30-cell synthetic section with simulated DAPI segmentation. It uses synthetic data rather than a real ROI so the fixture can live in the repo. Checked: the hashes are stable across `PYTHONHASHSEED`; raising the Phase1-QC minimum first diverges at Phase1-QC; symmetrizing the cascade W first diverges at Group, with every Phase-1 stage unchanged.
 2. **One W contract.** Symmetrize at panel load. Audit every `aux["W"]` consumer: Stitch, Rescue, Final Rescue, Mid-QC, Reassign-1c, coherence scoring. Expected diff: the cascade changes; Stitch must stay bit-identical. This is the bug fix and can land on its own.
 3. **Extract `prune_entity` from the Phase-1 path, behaviour unchanged.** Phase-1 output must stay bit-identical.
 4. **Move the cascade onto `prune_entity` with `max_carves=0` and no admission.** Group output must stay bit-identical to step 2.
