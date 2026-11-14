@@ -388,8 +388,12 @@ def test_rerank_off_omits_stage_seg_smoke(monkeypatch, synthetic_inputs):
     """With PHASE1_RERANK_ENABLED=False, Phase1-Rerank is not recorded
     in the SEG progression. Default is now True (promoted 2026-05-13)
     so this test monkey-patches it off."""
+    # Patch tracer.pipeline itself, not the forwarding shim: pytest >= 9.2
+    # records the shim's (empty) own __dict__ as the old value, and undo()
+    # then deletes the constant from tracer.pipeline for every later test.
     import tests._pipeline_runner as runner
-    monkeypatch.setattr(runner, "PHASE1_RERANK_ENABLED", False)
+    import tracer.pipeline
+    monkeypatch.setattr(tracer.pipeline, "PHASE1_RERANK_ENABLED", False)
     df, panel, _gt = synthetic_inputs
     _df_out, progression = runner.run_segmented_pipeline(df, panel)
     stage_names = [p["stage"] for p in progression]
@@ -404,7 +408,8 @@ def test_rerank_on_records_stage_seg_smoke(monkeypatch, synthetic_inputs):
     ``overlaps_nucleus`` so the nuclear-seed prune path (and rerank) fires.
     """
     import tests._pipeline_runner as runner
-    monkeypatch.setattr(runner, "PHASE1_RERANK_ENABLED", True)
+    import tracer.pipeline
+    monkeypatch.setattr(tracer.pipeline, "PHASE1_RERANK_ENABLED", True)
     df, panel, _gt = synthetic_inputs
     # Expose the nuclear flag under the name the pipeline expects so that
     # the nuclear-seed prune path (and therefore Phase1-Rerank) is taken.
@@ -423,8 +428,9 @@ def test_rerank_composes_with_reassign_1c(monkeypatch, synthetic_inputs):
     Split-Phase1 and Phase1-QC. Confirms the order is exactly
     Prune → Phase1-Reassign-1c → Split-Phase1 → Phase1-Rerank → Phase1-QC."""
     import tests._pipeline_runner as runner
-    monkeypatch.setattr(runner, "PHASE1_REASSIGN_AFTER_1C", True)
-    monkeypatch.setattr(runner, "PHASE1_RERANK_ENABLED", True)
+    import tracer.pipeline
+    monkeypatch.setattr(tracer.pipeline, "PHASE1_REASSIGN_AFTER_1C", True)
+    monkeypatch.setattr(tracer.pipeline, "PHASE1_RERANK_ENABLED", True)
     df, panel, _gt = synthetic_inputs
     # Force the nuclear-seed path: rename `is_nuclear` -> `overlaps_nucleus`
     # so the column guard passes and both opt-in stages fire.

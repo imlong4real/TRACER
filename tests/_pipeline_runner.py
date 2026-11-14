@@ -12,6 +12,11 @@ correctly mutate ``tracer.pipeline.PHASE1_RERANK_ENABLED``, which is the
 global the pipeline reads from. New code should import from
 ``tracer.pipeline`` directly.
 
+Do not ``monkeypatch.setattr`` through this shim: since pytest 9.2,
+monkeypatch takes the old value from the target's own ``__dict__``, which
+here is empty, so ``undo()`` *deletes* the constant from
+``tracer.pipeline``. Patch ``tracer.pipeline`` itself.
+
 Why the forwarding (not a plain ``from tracer.pipeline import *``):
 plain re-export would let test/benchmark code mutate *this module's*
 attributes only; ``run_segmented_pipeline`` resolves its globals from
