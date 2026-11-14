@@ -1,14 +1,17 @@
-"""``_cy_prune.prune_entities``: the per-entity prune unit (unified-prune step 3).
+"""The shared prune pieces (unified-prune steps 3-4).
 
-Phase-1 Prune and the Group cascade both prune a set of transcripts down to
-a coherent program. Step 3 moved Phase-1's per-cell body (seed -> admission
--> one carve) into ``_prune_entity`` and exposed it as ``prune_entities``.
+* ``_seed_entity`` / ``seed_entity``: the seed core (count transcripts per
+  gene, tx-weighted greedy). Phase 1 builds its 1a seed and 1c sub-seed
+  with it; the Group cascade builds each window's seed with it.
+* ``_prune_entity`` / ``prune_entities``: Phase-1's per-entity unit (seed
+  -> admission -> one carve), on top of the seed core.
 
 These tests pin:
-* with Phase-1 settings it is the Phase-1 kernel, code for code;
-* with the cascade's settings (seed from every tx, no admission of
-  non-seed genes, no carve) it reproduces the cascade's current membership
-  rule, so step 4 can move the cascade onto it without a behaviour change.
+* ``prune_entities`` with Phase-1 settings is the Phase-1 kernel, code
+  for code;
+* ``seed_entity`` reproduces the cascade's original per-window rule
+  (np.unique counts -> greedy_prune_retained), and committing the seed
+  genes' transcripts gives the cascade's membership.
 """
 from __future__ import annotations
 
@@ -63,49 +66,51 @@ def test_phase1_settings_match_phase1_kernel(setup, veto_mode, nuclear_seed_only
         nuclear_seed_only=nuclear_seed_only, **common)
     got = _cy_prune.prune_entities(
         lists, gidx, nuc, ip, ix, dt, THR,
-        min_seed_genes=3, max_carves=1, admit_non_seed=1,
+        min_seed_genes=3, max_carves=1,
         seed_from_mask=nuclear_seed_only, admit_mask_only=nuclear_only_admit,
         **common)
     assert np.array_equal(ref, got)
     assert (got == 0).any() and (got == 1).any(), "fixture exercises no carve"
 
 
-def test_cascade_settings_reproduce_cascade_membership(setup):
-    """Seed from all tx, admit only seed genes, no carve == the cascade's
-    rule: retained = greedy_prune_retained(unique genes, tx counts);
-    committed = tx whose gene is retained."""
+def test_seed_entity_reproduces_cascade_rule(setup):
+    """The cascade's original rule: retained = greedy_prune_retained over
+    np.unique(genes, return_counts=True); committed = tx of retained genes."""
     lists, gidx, nuc, (ip, ix, dt) = setup
-    ones = np.ones_like(nuc)
-    got = _cy_prune.prune_entities(
-        lists, gidx, ones, ip, ix, dt, THR,
-        min_seed_genes=3, max_carves=0, admit_non_seed=0, seed_from_mask=0)
     n_changed = 0
     for rows in lists:
         g = gidx[rows]
-        g = g[g >= 0]
+        g = g[g >= 0].astype(np.int32)
         if g.size == 0:
-            assert (got[rows] == 2).all()
             continue
         ug, uc = np.unique(g, return_counts=True)
-        kept = set(_cy_prune.greedy_prune_retained(
+        ref = _cy_prune.greedy_prune_retained(
             ug.astype(np.int32), uc.astype(np.int32),
-            W_indptr=ip, W_indices=ix, W_data=dt, threshold=THR).tolist())
-        expect = np.where(np.isin(gidx[rows], list(kept)), 0, 2)
-        assert np.array_equal(got[rows], expect)
-        n_changed += int((expect == 2).sum())
+            W_indptr=ip, W_indices=ix, W_data=dt, threshold=THR)
+        got = _cy_prune.seed_entity(g, ip, ix, dt, THR)
+        assert np.array_equal(ref, got)
+        assert np.all(np.diff(got) > 0), "seed must be ascending"
+        n_changed += int((~np.isin(g, got)).sum())
     assert n_changed > 0, "no entity lost a gene; the comparison is vacuous"
-    assert not (got == 1).any()
 
 
-def test_no_admission_is_stricter_than_admission(setup):
+def test_phase1_whole_cell_main_is_seed_genes_plus_admitted(setup):
+    """With admission and carve off, Phase-1's whole-cell main is exactly
+    the transcripts of seed_entity's genes: Phase 1 and the cascade build
+    seeds with the same core."""
     lists, gidx, nuc, (ip, ix, dt) = setup
-    kw = dict(min_seed_genes=3, max_carves=0, seed_from_mask=0, veto_mode=2,
-              real_signal_threshold=0.2)
-    with_adm = _cy_prune.prune_entities(lists, gidx, nuc, ip, ix, dt, THR,
-                                        admit_non_seed=1, **kw)
-    without = _cy_prune.prune_entities(lists, gidx, nuc, ip, ix, dt, THR,
-                                       admit_non_seed=0, **kw)
-    assert ((without == 0) <= (with_adm == 0)).all()
+    codes = _cy_prune.prune_entities(
+        lists, gidx, nuc, ip, ix, dt, THR, min_seed_genes=3, max_carves=0,
+        seed_from_mask=0, veto_mode=0, neg_npmi_threshold=1e9)
+    for rows in lists:
+        g = gidx[rows]
+        ok = g >= 0
+        if not ok.any():
+            continue
+        seed = _cy_prune.seed_entity(g[ok].astype(np.int32), ip, ix, dt, THR)
+        main = codes[rows] == 0
+        # every seed-gene transcript is main ...
+        assert main[ok & np.isin(g, seed)].all()
 
 
 def test_max_carves_validated(setup):
@@ -134,12 +139,3 @@ def test_dense_w_conversion_matches_dense_kernel():
         sparse = _cy_prune.greedy_prune_retained(g, c, W_indptr=ip, W_indices=ix,
                                                  W_data=dt, threshold=THR)
         assert np.array_equal(dense, sparse)
-
-
-def test_update_counters_off_leaves_counters(setup):
-    lists, gidx, nuc, (ip, ix, dt) = setup
-    _cy_prune.reset_prune_counters()
-    _cy_prune.prune_entities(lists, gidx, nuc, ip, ix, dt, THR, update_counters=0)
-    assert all(v == 0 for v in _cy_prune.get_prune_counters().values())
-    _cy_prune.prune_entities(lists, gidx, nuc, ip, ix, dt, THR, update_counters=1)
-    assert _cy_prune.get_prune_counters()["cells"] == len(lists)

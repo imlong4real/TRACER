@@ -359,6 +359,56 @@ def prune_cells_retained(list g_lists, list tx_counts_lists, W, double threshold
     return out
 
 
+cdef cnp.ndarray _seed_entity(
+    cnp.ndarray gene_arr,
+    int tx_weighted,
+    cnp.float32_t[:, :] W_mv,
+    const int[::1] W_indptr,
+    const int[::1] W_indices,
+    const float[::1] W_data,
+    int use_sparse,
+    double threshold,
+):
+    """Shared seed core: the coherent gene program of a set of transcripts.
+
+    ``gene_arr`` holds one panel-gene index (>= 0) per transcript. Counts
+    transcripts per gene (one ``np.unique``, ascending) and runs the
+    tx-weighted greedy bad-edge prune (``tx_weighted=0``: all weights 1).
+    Returns the retained genes, ascending.
+
+    Used by Phase 1 for the 1a seed (nuclear or whole cell) and the 1c
+    sub-seed, and by the Group cascade for each seed window (via
+    :func:`seed_entity`), so both paths build seeds identically.
+    """
+    uniq, cnt = np.unique(gene_arr, return_counts=True)
+    uniq = np.ascontiguousarray(uniq, dtype=np.int32)
+    if tx_weighted:
+        counts = cnt.astype(np.int32)
+    else:
+        counts = np.ones(uniq.shape[0], dtype=np.int32)
+    return _greedy_prune_to_retained(
+        uniq, counts, W_mv, W_indptr, W_indices, W_data, use_sparse, threshold)
+
+
+def seed_entity(
+    cnp.ndarray[cnp.int32_t, ndim=1] gene_idx,
+    cnp.ndarray[cnp.int32_t, ndim=1] W_indptr,
+    cnp.ndarray[cnp.int32_t, ndim=1] W_indices,
+    cnp.ndarray[cnp.float32_t, ndim=1] W_data,
+    double threshold,
+    int tx_weighted=1,
+):
+    """Seed genes of one set of transcripts (sparse symmetric CSR W).
+
+    Python entry to :func:`_seed_entity` for the Group cascade: one call
+    per seed window. ``gene_idx`` = one panel-gene index (>= 0) per
+    transcript. Returns the retained genes as an ascending int32 array.
+    """
+    cdef cnp.ndarray[cnp.float32_t, ndim=2] _W = np.zeros((1, 1), dtype=np.float32)
+    return _seed_entity(gene_idx, tx_weighted, _W, W_indptr, W_indices,
+                        W_data, 1, threshold)
+
+
 cdef int _prune_entity(
     cnp.ndarray[cnp.int32_t, ndim=1] tx_inds_arr,
     cnp.int32_t[:] tx_gene_mv,
@@ -383,34 +433,25 @@ cdef int _prune_entity(
     double neg_npmi_threshold,
     int fallback_whole_cell_admit,
     int nuclear_seed_only,
-    int admit_non_seed,
-    int update_counters,
 ) except -1:
     """Prune ONE entity: seed (1a) -> admission (1b) -> one carve (1c).
 
-    The per-entity unit shared by Phase-1 Prune and (from unified-prune
-    step 4) the Group cascade. Writes this entity's per-tx codes into
+    Phase-1's per-entity unit. Writes this entity's per-tx codes into
     ``out_mv`` at the rows in ``tx_inds_arr``: 0 = main, 1 = carved
     partial; rows left untouched keep the caller's default (2 =
     unassigned). Updates the module prune counters.
 
     ``tx_nuc_mv`` is the SEED MASK: the transcripts the seed (1a, under
-    ``nuclear_seed_only``) and the carve (1c) are built from. Phase 1
-    passes the nuclear flag. ``admit_non_seed=0`` disables the
-    ``_admission_test`` for genes outside the seed, so only seed genes are
-    admitted (the cascade's current membership rule); ``skip_phase_1c=1``
-    disables the carve. ``update_counters=0`` leaves the Phase-1 prune
-    counters untouched (the cascade's seed windows are not cells). Body
-    moved verbatim from the former inline loop of
-    ``_prune_cells_nuclear_seed_core``; with ``admit_non_seed=1`` the
-    output is bit-identical.
+    ``nuclear_seed_only``) and the carve (1c) are built from; Phase 1
+    passes the nuclear flag. Every seed is built by ``_seed_entity``,
+    the core the Group cascade also uses. Body moved verbatim from the
+    former inline loop of ``_prune_cells_nuclear_seed_core``.
     """
     global _CNT_CELLS, _CNT_SEED_EMPTY, _CNT_FALLBACK, _CNT_THIN_NUCLEUS
     cdef cnp.int32_t[:] tx_inds_mv
-    cdef int n_cell_tx, ti, tx_row, g, n_unique_nuc, fitted, n_unique_all
+    cdef int n_cell_tx, ti, tx_row, g, n_unique_nuc, fitted
     cdef int is_fallback   # took the whole-cell fallback seed path
     cdef cnp.ndarray[cnp.int32_t, ndim=1] uniq_nuc
-    cdef cnp.ndarray[cnp.int32_t, ndim=1] uniq_all
     cdef cnp.ndarray[cnp.int32_t, ndim=1] seed
     cdef cnp.int32_t[:] seed_mv
     cdef int seed_len
@@ -422,8 +463,7 @@ cdef int _prune_entity(
     n_cell_tx = tx_inds_arr.shape[0]
     if n_cell_tx == 0:
         return 0
-    if update_counters:
-        _CNT_CELLS += 1
+    _CNT_CELLS += 1
 
     # Collect unique nuclear gene indices for this cell.
     # (Python-level numpy ops here are fine: per-cell, not per-tx.)
@@ -448,9 +488,8 @@ cdef int _prune_entity(
         # 1b/1c nuclear_only_admit exemption for thin nuclei.
         is_fallback = 1 if n_unique_nuc < min_nuclear_genes else 0
         if is_fallback:
-            if update_counters:
-                _CNT_THIN_NUCLEUS += 1
-            if nuclear_seed_only and update_counters:
+            _CNT_THIN_NUCLEUS += 1
+            if nuclear_seed_only:
                 # only a real FALLBACK when a nuclear seed was wanted
                 _CNT_FALLBACK += 1
         all_genes = []
@@ -460,36 +499,22 @@ cdef int _prune_entity(
             if g >= 0:
                 all_genes.append(g)
         uniq_all_arr = np.asarray(all_genes, dtype=np.int32)
-        # Whole-cell tx counts: all tx contribute (nuc + cyto). One
-        # np.unique pass (sorted, same order as before) instead of a
-        # np.sum(arr == g) scan per gene.
-        uniq_all, _cnt_all = np.unique(uniq_all_arr, return_counts=True)
-        n_unique_all = uniq_all.shape[0]
-        if n_unique_all == 0:
+        if uniq_all_arr.shape[0] == 0:
             return 0
-        tx_counts_all = _cnt_all.astype(np.int32)
-        if not tx_weighted:
-            tx_counts_all = np.ones(n_unique_all, dtype=np.int32)
-        seed = _greedy_prune_to_retained(
-            uniq_all, tx_counts_all, W_mv,
-            W_indptr, W_indices, W_data, use_sparse, threshold)
+        # Whole-cell seed: all tx contribute (nuc + cyto).
+        seed = _seed_entity(uniq_all_arr, tx_weighted, W_mv,
+                            W_indptr, W_indices, W_data, use_sparse, threshold)
     else:
         # ---- Phase 1a: nuclear seed (tx-weighted) ----
         is_fallback = 0
-        # Per-gene nuclear tx counts for the tx-weighted greedy.
         nuc_arr = np.asarray(nuc_genes, dtype=np.int32)
-        tx_counts_nuc = np.unique(nuc_arr, return_counts=True)[1].astype(np.int32)
-        if not tx_weighted:
-            tx_counts_nuc = np.ones(n_unique_nuc, dtype=np.int32)
-        seed = _greedy_prune_to_retained(
-            uniq_nuc, tx_counts_nuc, W_mv,
-            W_indptr, W_indices, W_data, use_sparse, threshold)
+        seed = _seed_entity(nuc_arr, tx_weighted, W_mv,
+                            W_indptr, W_indices, W_data, use_sparse, threshold)
     seed_mv = seed
     seed_len = seed.shape[0]
     if seed_len == 0:
         # No seed found; all tx → unassigned (code 2 already default)
-        if update_counters:
-            _CNT_SEED_EMPTY += 1
+        _CNT_SEED_EMPTY += 1
         return 0
 
     # ---- Phase 1b: per-tx admit by mean PMI to seed ----
@@ -520,7 +545,7 @@ cdef int _prune_entity(
             if seed_mv[j] == g:
                 fitted = 1
                 break
-        if fitted == 0 and admit_non_seed:
+        if fitted == 0:
             fitted = _admission_test(
                 g,
                 &seed_mv[0],
@@ -560,13 +585,8 @@ cdef int _prune_entity(
         return 0
 
     # Tx-weighted prune for sub-seed too.
-    n_uniq_rej = uniq_rej_nuc.shape[0]
-    tx_counts_rej = np.unique(rej_nuc_arr, return_counts=True)[1].astype(np.int32)
-    if not tx_weighted:
-        tx_counts_rej = np.ones(n_uniq_rej, dtype=np.int32)
-    sub_seed = _greedy_prune_to_retained(
-        uniq_rej_nuc, tx_counts_rej, W_mv,
-        W_indptr, W_indices, W_data, use_sparse, threshold)
+    sub_seed = _seed_entity(rej_nuc_arr, tx_weighted, W_mv,
+                            W_indptr, W_indices, W_data, use_sparse, threshold)
     sub_seed_mv = sub_seed
     sub_seed_len = sub_seed.shape[0]
     if sub_seed_len == 0:
@@ -593,7 +613,7 @@ cdef int _prune_entity(
             if sub_seed_mv[j] == g:
                 fitted = 1
                 break
-        if fitted == 0 and admit_non_seed:
+        if fitted == 0:
             fitted = _admission_test(
                 g,
                 &sub_seed_mv[0],
@@ -645,8 +665,6 @@ cdef cnp.ndarray _prune_cells_nuclear_seed_core(
                                           #     0 ⇒ seed from the WHOLE CELL, so a thin
                                           #     or incoherent nucleus cannot veto a cell
                                           #     whose cytoplasm is coherent
-    int admit_non_seed = 1,              # 0 ⇒ only seed genes are admitted (no 1b test)
-    int update_counters = 1,             # 0 ⇒ leave the Phase-1 prune counters alone
 ):
     """Shared orchestration for the dense and sparse nuclear-seed prune.
 
@@ -673,11 +691,8 @@ cdef cnp.ndarray _prune_cells_nuclear_seed_core(
         panel_n_genes = W_indptr.shape[0] - 1
     else:
         panel_n_genes = W_mv.shape[0]
-    # Only the admission test reads it: skip the G-sized allocation when
-    # admission is off (cascade seed windows call this once per window).
     cdef cnp.ndarray[cnp.float32_t, ndim=1] pmi_buf_arr = np.zeros(
-        panel_n_genes if (panel_n_genes > 0 and admit_non_seed) else 1,
-        dtype=np.float32,
+        panel_n_genes if panel_n_genes > 0 else 1, dtype=np.float32
     )
     cdef cnp.float32_t[:] pmi_buf_mv = pmi_buf_arr
 
@@ -693,8 +708,7 @@ cdef cnp.ndarray _prune_cells_nuclear_seed_core(
             nuclear_only_admit, tx_weighted,
             veto_mode, min_admit_threshold, mean_admit_threshold,
             aggregator_percentile, real_signal_threshold, neg_npmi_threshold,
-            fallback_whole_cell_admit, nuclear_seed_only, admit_non_seed,
-            update_counters,
+            fallback_whole_cell_admit, nuclear_seed_only,
         )
     return out
 
@@ -834,7 +848,6 @@ def prune_entities(
     *,
     int min_seed_genes=3,
     int max_carves=1,
-    int admit_non_seed=1,
     int seed_from_mask=1,
     int admit_mask_only=0,
     int tx_weighted=1,
@@ -845,7 +858,6 @@ def prune_entities(
     double real_signal_threshold=0.0,
     double neg_npmi_threshold=-0.2,
     int fallback_whole_cell_admit=0,
-    int update_counters=1,
 ):
     """Prune many entities with the shared per-entity unit (sparse W).
 
@@ -873,17 +885,11 @@ def prune_entities(
         Minimum distinct masked genes for a masked seed / a carve.
     max_carves : {0, 1}
         0 = no carve (rejected tx stay unassigned), 1 = one 1c carve.
-    admit_non_seed : {0, 1}
-        1 = transcripts of non-seed genes may join by ``_admission_test``
-        (Phase 1b); 0 = only seed genes join.
     seed_from_mask : {0, 1}
         1 = seed from masked tx (falling back to all tx below
         ``min_seed_genes``); 0 = seed from all tx.
     admit_mask_only : {0, 1}
         1 = only masked tx may be admitted (``nuclear_only_admit``).
-    update_counters : {0, 1}
-        1 = count these entities in ``get_prune_counters()`` (Phase 1);
-        0 = leave the counters alone (cascade seed windows).
 
     Returns
     -------
@@ -903,8 +909,6 @@ def prune_entities(
         aggregator_percentile, real_signal_threshold, neg_npmi_threshold,
         fallback_whole_cell_admit,
         seed_from_mask,
-        admit_non_seed,
-        update_counters,
     )
 
 

@@ -769,7 +769,6 @@ def prune_transcripts_nuclear_seed(
             float(threshold),
             min_seed_genes=int(min_nuclear_genes),
             max_carves=0 if skip_phase_1c else 1,
-            admit_non_seed=1,
             seed_from_mask=1 if nuclear_seed_only else 0,
             admit_mask_only=1 if nuclear_only_admit else 0,
             tx_weighted=1 if tx_weighted else 0,

@@ -63,7 +63,7 @@ def _greedy_prune_retained(uniq_g, uniq_c, W, threshold: float):
 
 
 def _csr_arrays_for_prune(W):
-    """(indptr, indices, data) of ``W`` for ``_cy_prune.prune_entities``.
+    """(indptr, indices, data) of ``W`` for ``_cy_prune.seed_entity``.
 
     Sparse ``W`` is used as stored (``aux["W"]`` is symmetric). A dense ``W``
     (already NaN->0 filled above) becomes a CSR that stores EVERY entry,
@@ -402,29 +402,19 @@ def density_cascade_phase1(
             if len(tentative) < min_anchor_tx:
                 continue
 
-            # Shared prune unit (unified-prune step 4): the window is one
-            # entity; seed from every tx (tx-weighted greedy), no admission
-            # of non-seed genes, no carve -> code 0 = committed, 2 = back
-            # to the pool. Every seed gene has >=1 tx in the window, so the
-            # seed size is the number of distinct committed genes.
+            # Shared seed core (same as Phase-1 1a/1c): tx-weighted greedy
+            # over the window's genes. One partial per window: transcripts
+            # of seed genes are committed, the rest go back to the pool.
             ten_genes = gene_idx[tentative].astype(np.int32)
-            n_ten = len(tentative)
-            codes = _cy_prune.prune_entities(
-                [np.arange(n_ten, dtype=np.int32)], ten_genes,
-                np.ones(n_ten, dtype=np.uint8), W_ip, W_ix, W_dt,
-                float(pmi_threshold),
-                max_carves=0, admit_non_seed=0, seed_from_mask=0,
-                update_counters=0,
-            )
-            keep = codes == 0
-            # Retained genes, ascending (the order greedy_prune_retained
-            # returned them in, since its input was np.unique-sorted).
-            seed_genes = np.unique(ten_genes[keep]).tolist()
+            seed_arr = _cy_prune.seed_entity(
+                ten_genes, W_ip, W_ix, W_dt, float(pmi_threshold))
+            seed_genes = seed_arr.tolist()
             if len(seed_genes) < 2:
                 continue
+            seed_set = set(seed_genes)
 
-            committed = [i for i, k in zip(tentative, keep) if k]
-            returned = [i for i, k in zip(tentative, keep) if not k]
+            committed = [i for i in tentative if int(gene_idx[i]) in seed_set]
+            returned = [i for i in tentative if int(gene_idx[i]) not in seed_set]
 
             if len(committed) < min_anchor_tx:
                 continue
