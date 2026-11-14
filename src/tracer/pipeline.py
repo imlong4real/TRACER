@@ -95,6 +95,16 @@ SPLIT_PHASE1_MIN_TX = 1     # min tx per sub-group during the split itself
                             #     handles the actual demotion).
 SPLIT_PHASE1_MIN_ENTITY = 2 # minimum entity size to consider (2 = bare
                             #     minimum to compute a diff).
+# Same z-split for the Group cascade's partials (unified-prune step 5):
+# a seed window is 3x3 bins in xy but spans all z, so stacked fragments
+# can fuse. Applied right after Group, to `cascade_` labels only.
+# None = off.
+CASCADE_SPLIT_DZ: float | None = SPLIT_PHASE1_DZ
+# Size QC right after that split (the cascade's Phase1-QC): any `cascade_`
+# partial with fewer tx goes back to unassigned. 5 = Demote's minimum, so
+# pieces too small to survive Demote leave before Mid-QC/Stitch instead
+# of after. Applies to every cascade partial, split or not. 0/None = off.
+CASCADE_QC_MIN_TX: int | None = 5
 PHASE1_QC_MIN_TX = 3        # post-split QC: any Phase 1 entity (main or
                             #     partial) with < this tx → unassigned.
                             #     Prevents 1- and 2-tx degenerate seeds
@@ -104,11 +114,14 @@ PHASE1_QC_MIN_TX = 3        # post-split QC: any Phase 1 entity (main or
 def _qc_demote_small_phase1_entities(df_in: pd.DataFrame, *,
                                        entity_col: str,
                                        min_size: int = PHASE1_QC_MIN_TX,
-                                       unassigned_id: str = "-1"
+                                       unassigned_id: str = "-1",
+                                       label_prefix: str | None = None,
                                        ) -> tuple[pd.DataFrame, dict]:
     """Demote any Phase 1 entity (main `{cell}` or partial) with < min_size tx
     to unassigned. Skips already-unassigned labels (`-1`, `UNASSIGNED`,
-    `UNASSIGNED_*`) — these are not seeded entities."""
+    `UNASSIGNED_*`) — these are not seeded entities. With ``label_prefix``,
+    only labels starting with it are considered (the Group cascade's
+    ``cascade_`` partials)."""
     df_out = df_in.copy()
     df_out[entity_col] = df_out[entity_col].astype(str)
     counts = df_out[entity_col].value_counts()
@@ -117,6 +130,8 @@ def _qc_demote_small_phase1_entities(df_in: pd.DataFrame, *,
         if n >= min_size:
             continue
         if ent == unassigned_id or ent == "UNASSIGNED" or ent.startswith("UNASSIGNED_"):
+            continue
+        if label_prefix is not None and not ent.startswith(label_prefix):
             continue
         bad.append(ent)
     n_demoted = 0
@@ -319,10 +334,15 @@ def _spatial_split_phase1_entities(df_in: pd.DataFrame, *,
                                      dz_threshold: float = SPLIT_PHASE1_DZ,
                                      min_size: int = SPLIT_PHASE1_MIN_TX,
                                      min_entity_size: int = SPLIT_PHASE1_MIN_ENTITY,
-                                     unassigned_id: str = "-1") -> tuple[pd.DataFrame, dict]:
+                                     unassigned_id: str = "-1",
+                                     label_prefix: str | None = None,
+                                     ) -> tuple[pd.DataFrame, dict]:
     """Sort tx by z within each entity; split where Δz > dz_threshold.
 
-    Applies to all main cells and partials (≥ min_entity_size tx).
+    Applies to all main cells and partials (≥ min_entity_size tx), or, with
+    ``label_prefix``, only to entities whose label starts with it (the
+    Group cascade's ``cascade_`` partials, so Phase-1 entities enlarged by
+    Rescue are not re-split).
     Largest sub-group keeps the original label; smaller groups get a
     fresh appended suffix; groups < min_size demoted to unassigned_id.
 
@@ -379,6 +399,8 @@ def _spatial_split_phase1_entities(df_in: pd.DataFrame, *,
 
     for ent, group in df_out.groupby(entity_col, sort=False):
         if ent == unassigned_id or ent == "UNASSIGNED" or ent.startswith("UNASSIGNED_"):
+            continue
+        if label_prefix is not None and not ent.startswith(label_prefix):
             continue
         if has_etype:
             if str(group["_etype"].iloc[0]) not in ("cell", "partial"):
@@ -1825,6 +1847,26 @@ def run_segmented_pipeline(df: pd.DataFrame,
         )
     _record_stage(progression, "Group", df_grouped, "tracer_id")
 
+    # z-split the cascade's partials with the same rule as Split-Phase1.
+    if PHASE1_SEG_RESIDUAL_CASCADE and CASCADE_SPLIT_DZ is not None:
+        df_grouped, _ = _spatial_split_phase1_entities(
+            df_grouped, entity_col="tracer_id",
+            coord_cols=("x", "y", "z"),
+            dz_threshold=float(CASCADE_SPLIT_DZ),
+            min_size=SPLIT_PHASE1_MIN_TX,
+            min_entity_size=SPLIT_PHASE1_MIN_ENTITY,
+            unassigned_id="-1",
+            label_prefix="cascade_",
+        )
+        _record_stage(progression, "Cascade-Split", df_grouped, "tracer_id")
+    if PHASE1_SEG_RESIDUAL_CASCADE and CASCADE_QC_MIN_TX:
+        df_grouped, _ = _qc_demote_small_phase1_entities(
+            df_grouped, entity_col="tracer_id",
+            min_size=int(CASCADE_QC_MIN_TX), unassigned_id="-1",
+            label_prefix="cascade_",
+        )
+        _record_stage(progression, "Cascade-QC", df_grouped, "tracer_id")
+
     # Mid-pipeline QC (after Group, before Stitch). Both stages are
     # opt-in via constants at the top of this module.
     mid_did_anything = False
@@ -2063,6 +2105,26 @@ def run_noseg_pipeline(df: pd.DataFrame, npmi_panel: pd.DataFrame,
             transcript_id_col="transcript_id", show_progress=False,
         )
     _record_stage(progression, "Group", df_grouped, "tracer_id")
+
+    # z-split the cascade's partials with the same rule as Split-Phase1.
+    if PHASE1_NOSEG_CASCADE and CASCADE_SPLIT_DZ is not None:
+        df_grouped, _ = _spatial_split_phase1_entities(
+            df_grouped, entity_col="tracer_id",
+            coord_cols=("x", "y", "z"),
+            dz_threshold=float(CASCADE_SPLIT_DZ),
+            min_size=SPLIT_PHASE1_MIN_TX,
+            min_entity_size=SPLIT_PHASE1_MIN_ENTITY,
+            unassigned_id="-1",
+            label_prefix="cascade_",
+        )
+        _record_stage(progression, "Cascade-Split", df_grouped, "tracer_id")
+    if PHASE1_NOSEG_CASCADE and CASCADE_QC_MIN_TX:
+        df_grouped, _ = _qc_demote_small_phase1_entities(
+            df_grouped, entity_col="tracer_id",
+            min_size=int(CASCADE_QC_MIN_TX), unassigned_id="-1",
+            label_prefix="cascade_",
+        )
+        _record_stage(progression, "Cascade-QC", df_grouped, "tracer_id")
 
     # Mid-pipeline QC (after Group, before Stitch). Same opt-in
     # knobs as the segmented path.

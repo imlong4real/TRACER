@@ -33,6 +33,20 @@
       "n_components": 0,
       "n_partials": 4,
       "n_unassigned_tx": 121,
+      "stage": "Cascade-Split"
+    },
+    {
+      "n_cells": 0,
+      "n_components": 0,
+      "n_partials": 4,
+      "n_unassigned_tx": 121,
+      "stage": "Cascade-QC"
+    },
+    {
+      "n_cells": 0,
+      "n_components": 0,
+      "n_partials": 4,
+      "n_unassigned_tx": 121,
       "stage": "Mid-QC"
     },
     {

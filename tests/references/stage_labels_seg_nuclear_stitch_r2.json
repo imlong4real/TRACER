@@ -74,46 +74,60 @@
       "partition_sha": "3ea4c74d44c366ef3a57e193b60b2d2384833fd85b764e10eb16d7fa2220f229"
     },
     {
+      "stage": "Cascade-Split",
+      "n_tx": 1800,
+      "n_labels": 56,
+      "label_sha": "1d7f8ceb6ba06cb745f4a7dfc06fe39be1256a9db45988ef31867d7ec5f4f1d8",
+      "partition_sha": "f50f1fc31cac7c2ba6a360d7651a5ac38177dd5356dea495d7876669817bfa94"
+    },
+    {
+      "stage": "Cascade-QC",
+      "n_tx": 1800,
+      "n_labels": 36,
+      "label_sha": "dee16d7ec67fe3e2d78e3c13ccad80eb7381913fbf1f8bbaad5abad212a4f5b8",
+      "partition_sha": "51d437d7b03464a884ab670c25debca8360b8310561d4d7efbd534690c403972"
+    },
+    {
       "stage": "Mid-QC",
       "n_tx": 1800,
-      "n_labels": 43,
-      "label_sha": "b68b9a1cce58bcd464ae006694484470fae0b2f835a74bfd3847349b6d8f503c",
-      "partition_sha": "3ea4c74d44c366ef3a57e193b60b2d2384833fd85b764e10eb16d7fa2220f229"
+      "n_labels": 36,
+      "label_sha": "dee16d7ec67fe3e2d78e3c13ccad80eb7381913fbf1f8bbaad5abad212a4f5b8",
+      "partition_sha": "51d437d7b03464a884ab670c25debca8360b8310561d4d7efbd534690c403972"
     },
     {
       "stage": "Post-Group Rescue",
       "n_tx": 1800,
-      "n_labels": 43,
-      "label_sha": "192030331543902d6daff534e420b795f26527ca126663bea18dedf13f25e744",
-      "partition_sha": "173d41e73e1355186310aac94fee6f4dad9a9f685aac4854b6a8f24115914292"
+      "n_labels": 36,
+      "label_sha": "ac4504424ee486c5e9cb360cba4ab9078e89ab06bbdd71d90b7a3611d0a5a48b",
+      "partition_sha": "b65a0637bb568aa578d5af42b62b46ea2e1fd37f932441329937e8b8cd066a50"
     },
     {
       "stage": "Stitch",
       "n_tx": 1800,
-      "n_labels": 32,
-      "label_sha": "9bda29708b08fae0bf5dcd5d4482993546e085a783362be2594ef95ab5975401",
-      "partition_sha": "a3caf9180b278fb56ee0c3d609a7e60a3743805a186f15f2bb9bd3992ae6e3cd"
+      "n_labels": 29,
+      "label_sha": "ccd9c45da836558289b89ae87bcb78a2d037431b57d65a52240f688682b50fc9",
+      "partition_sha": "b68d4810f111cf25565a0c2e015657c672210ddc711b5b6cd68769a04ffc7b28"
     },
     {
       "stage": "Demote",
       "n_tx": 1800,
       "n_labels": 28,
-      "label_sha": "6cd05d2443b781acf347d24300c568379eb284432441c55cdcc92e6a515a8335",
-      "partition_sha": "165c8aeecda15f5ca77ef6ebe3eff084fe4cf469b1253c1cb8bda40c7a70acee"
+      "label_sha": "3e277f8e5729c4bb93faabe5228da4701401b4320a8285871d89aab4df9e69fa",
+      "partition_sha": "6d1f277ccffcb9d6af1a069cd88ad8fa7488db4a7b5c82565822980071363230"
     },
     {
       "stage": "Final Rescue",
       "n_tx": 1800,
       "n_labels": 28,
-      "label_sha": "a2e71fab06a2361d2dd724e846dd652db913e5e9ad2efca659f79bd81a4a1e65",
-      "partition_sha": "dd7e8e72f87e0a8d197d9eb482272f068ec7ddff64c582418e53a8c7f1a12f53"
+      "label_sha": "3bae9825d5afa1780a1d578e6871a955bfecfbd16f3bb322f9805afce4f1c3e5",
+      "partition_sha": "15226e2392a46241ebab408461bcd27bd63ac3b94193a9f3587e1fcc03cececf"
     },
     {
       "stage": "Finalize",
       "n_tx": 1800,
       "n_labels": 28,
-      "label_sha": "a5a18d79f3a32160fd945bc19e49f152ff613e3133aaf179d5d182c7a349e94c",
-      "partition_sha": "f3410608f46af3823707cfee5a07970be8a42f5f1a0131ded8255c1e0d99bc8b"
+      "label_sha": "3e88097f6a62a92e95553fba52286104c129ee03677e1ca248aa3e4dc6ecf057",
+      "partition_sha": "9e0a1ccc5326683eac29e71b1737b42f70b23a61126f8366d45d8b11cf39b74f"
     }
   ]
 }
