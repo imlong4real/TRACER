@@ -95,16 +95,8 @@ SPLIT_PHASE1_MIN_TX = 1     # min tx per sub-group during the split itself
                             #     handles the actual demotion).
 SPLIT_PHASE1_MIN_ENTITY = 2 # minimum entity size to consider (2 = bare
                             #     minimum to compute a diff).
-# Same z-split for the Group cascade's partials (unified-prune step 5):
-# a seed window is 3x3 bins in xy but spans all z, so stacked fragments
-# can fuse. Applied right after Group, to `cascade_` labels only.
-# None = off.
-CASCADE_SPLIT_DZ: float | None = SPLIT_PHASE1_DZ
-# Size QC right after that split (the cascade's Phase1-QC): any `cascade_`
-# partial with fewer tx goes back to unassigned. 5 = Demote's minimum, so
-# pieces too small to survive Demote leave before Mid-QC/Stitch instead
-# of after. Applies to every cascade partial, split or not. 0/None = off.
-CASCADE_QC_MIN_TX: int | None = 5
+# The Group cascade's z-split and size QC (Cascade-Split / Cascade-QC) are
+# set in config only: `group.cascade_split_dz_um`, `group.cascade_qc_min_tx`.
 PHASE1_QC_MIN_TX = 3        # post-split QC: any Phase 1 entity (main or
                             #     partial) with < this tx → unassigned.
                             #     Prevents 1- and 2-tx degenerate seeds
@@ -1534,8 +1526,11 @@ def _resolve_pipeline_cfg(cfg):
         return cfg
     from tracer.config import (
         DemoteConfig,
+        GroupConfig,
+        Phase1QcConfig,
         PipelineConfig,
         RescueConfig,
+        SplitPhase1Config,
         StitchConfig,
     )
     rescue_kwargs = dict(
@@ -1576,12 +1571,93 @@ def _resolve_pipeline_cfg(cfg):
         min_local_tx_per_entity=STITCH_MIN_LOCAL_TX,
     )
     demote_cfg = DemoteConfig(min_size=5)
+    split_cfg = SplitPhase1Config(
+        dz_threshold_um=SPLIT_PHASE1_DZ,
+        min_tx=SPLIT_PHASE1_MIN_TX,
+        min_entity_size=SPLIT_PHASE1_MIN_ENTITY,
+    )
+    qc_cfg = Phase1QcConfig(min_tx=PHASE1_QC_MIN_TX)
+    group_cfg = GroupConfig(
+        seg_residual_cascade=PHASE1_SEG_RESIDUAL_CASCADE,
+        noseg_cascade=PHASE1_NOSEG_CASCADE,
+        seg_cascade_target_cov=PHASE1_SEG_RESIDUAL_CASCADE_TARGET_COV,
+        seg_cascade_hard_min=PHASE1_SEG_RESIDUAL_CASCADE_HARD_MIN,
+        noseg_cascade_target_cov=PHASE1_NOSEG_CASCADE_TARGET_COV,
+        noseg_cascade_hard_min=PHASE1_NOSEG_CASCADE_HARD_MIN,
+        cascade_pmi_threshold=PMI_THR,
+    )
     return PipelineConfig(
+        split_phase1=split_cfg,
+        phase1_qc=qc_cfg,
         rescue=rescue_cfg,
+        group=group_cfg,
         stitch=stitch_cfg,
         demote=demote_cfg,
         final_rescue=final_rescue_cfg,
     )
+
+
+def _group_stage(df_in: pd.DataFrame, aux: dict, cfg, progression: list, *,
+                 seg: bool) -> pd.DataFrame:
+    """Group, shared by the SEG (residual) and NOSEG (whole pool) runners.
+
+    Every setting comes from ``cfg.group``; the two runners differ only in
+    which backend switch and auto-floor fields they read. With the cascade
+    backend, its partials then get the post-steps, each switchable on its
+    own: Cascade-Split (z-split, same rule as Split-Phase1, sub-group
+    settings from ``cfg.split_phase1``) and Cascade-QC (size floor).
+    Records "Group" and, when they run, "Cascade-Split" / "Cascade-QC".
+    """
+    g = cfg.group
+    use_cascade = g.seg_residual_cascade if seg else g.noseg_cascade
+    if use_cascade:
+        df_out = cascade_as_residual_handler(
+            df_pruned=df_in, aux=aux,
+            entity_col="tracer_id",
+            G=g.cascade_bin_size_um, thresholds="auto",
+            territory_radius_bins=g.cascade_territory_radius_bins,
+            pmi_threshold=g.cascade_pmi_threshold,
+            min_anchor_tx=g.cascade_min_anchor_tx,
+            auto_target_cov=(g.seg_cascade_target_cov if seg
+                             else g.noseg_cascade_target_cov),
+            auto_hard_min=(g.seg_cascade_hard_min if seg
+                           else g.noseg_cascade_hard_min),
+        )
+    else:
+        # Legacy spatial-CC backend; retired in unified-prune step 7.
+        df_out = annotate_unassigned_components_fast(
+            df_pruned=df_in, aux=aux,
+            build_graph_fn=_grid_self_graph_fn, prune_fn=prune_genes_by_pmi_greedy,
+            coord_cols=("x", "y", "z"),
+            k=8, dist_threshold=1.5, min_comp_size=4 if seg else 5,
+            npmi_threshold=ANNOTATE_NEG_THR,
+            entity_col="tracer_id", out_col="tracer_id",
+            cell_id_col="cell_id", gene_col="feature_name",
+            transcript_id_col="transcript_id", show_progress=False,
+        )
+    _record_stage(progression, "Group", df_out, "tracer_id")
+    if not use_cascade:
+        return df_out
+
+    if g.cascade_split_dz_um:
+        df_out, _ = _spatial_split_phase1_entities(
+            df_out, entity_col="tracer_id",
+            coord_cols=("x", "y", "z"),
+            dz_threshold=float(g.cascade_split_dz_um),
+            min_size=cfg.split_phase1.min_tx,
+            min_entity_size=cfg.split_phase1.min_entity_size,
+            unassigned_id="-1",
+            label_prefix="cascade_",
+        )
+        _record_stage(progression, "Cascade-Split", df_out, "tracer_id")
+    if g.cascade_qc_min_tx:
+        df_out, _ = _qc_demote_small_phase1_entities(
+            df_out, entity_col="tracer_id",
+            min_size=int(g.cascade_qc_min_tx), unassigned_id="-1",
+            label_prefix="cascade_",
+        )
+        _record_stage(progression, "Cascade-QC", df_out, "tracer_id")
+    return df_out
 
 
 def run_segmented_pipeline(df: pd.DataFrame,
@@ -1717,9 +1793,9 @@ def run_segmented_pipeline(df: pd.DataFrame,
     df_pruned, _split_stats = _spatial_split_phase1_entities(
         df_pruned, entity_col="tracer_id",
         coord_cols=("x", "y", "z"),
-        dz_threshold=SPLIT_PHASE1_DZ,
-        min_size=SPLIT_PHASE1_MIN_TX,
-        min_entity_size=SPLIT_PHASE1_MIN_ENTITY,
+        dz_threshold=cfg.split_phase1.dz_threshold_um,
+        min_size=cfg.split_phase1.min_tx,
+        min_entity_size=cfg.split_phase1.min_entity_size,
         unassigned_id="-1",
     )
     _record_stage(progression, "Split-Phase1", df_pruned, "tracer_id")
@@ -1741,7 +1817,7 @@ def run_segmented_pipeline(df: pd.DataFrame,
     # don't act as degenerate routing anchors in Rescue.
     df_pruned, _qc_stats = _qc_demote_small_phase1_entities(
         df_pruned, entity_col="tracer_id",
-        min_size=PHASE1_QC_MIN_TX,
+        min_size=cfg.phase1_qc.min_tx,
         unassigned_id="-1",
     )
     _record_stage(progression, "Phase1-QC", df_pruned, "tracer_id")
@@ -1823,49 +1899,7 @@ def run_segmented_pipeline(df: pd.DataFrame,
     _set_admit_independent(True)
     _record_stage(progression, "Rescue", df_rescued, "tracer_id")
 
-    if PHASE1_SEG_RESIDUAL_CASCADE:
-        df_grouped = cascade_as_residual_handler(
-            df_pruned=df_rescued, aux=aux,
-            entity_col="tracer_id",
-            G=2.0, thresholds="auto",
-            territory_radius_bins=1,
-            pmi_threshold=PMI_THR,
-            min_anchor_tx=3,
-            auto_target_cov=PHASE1_SEG_RESIDUAL_CASCADE_TARGET_COV,
-            auto_hard_min=PHASE1_SEG_RESIDUAL_CASCADE_HARD_MIN,
-        )
-    else:
-        df_grouped = annotate_unassigned_components_fast(
-            df_pruned=df_rescued, aux=aux,
-            build_graph_fn=_grid_self_graph_fn, prune_fn=prune_genes_by_pmi_greedy,
-            coord_cols=("x", "y", "z"),
-            k=8, dist_threshold=1.5, min_comp_size=4,
-            npmi_threshold=ANNOTATE_NEG_THR,
-            entity_col="tracer_id", out_col="tracer_id",
-            cell_id_col="cell_id", gene_col="feature_name",
-            transcript_id_col="transcript_id", show_progress=False,
-        )
-    _record_stage(progression, "Group", df_grouped, "tracer_id")
-
-    # z-split the cascade's partials with the same rule as Split-Phase1.
-    if PHASE1_SEG_RESIDUAL_CASCADE and CASCADE_SPLIT_DZ is not None:
-        df_grouped, _ = _spatial_split_phase1_entities(
-            df_grouped, entity_col="tracer_id",
-            coord_cols=("x", "y", "z"),
-            dz_threshold=float(CASCADE_SPLIT_DZ),
-            min_size=SPLIT_PHASE1_MIN_TX,
-            min_entity_size=SPLIT_PHASE1_MIN_ENTITY,
-            unassigned_id="-1",
-            label_prefix="cascade_",
-        )
-        _record_stage(progression, "Cascade-Split", df_grouped, "tracer_id")
-    if PHASE1_SEG_RESIDUAL_CASCADE and CASCADE_QC_MIN_TX:
-        df_grouped, _ = _qc_demote_small_phase1_entities(
-            df_grouped, entity_col="tracer_id",
-            min_size=int(CASCADE_QC_MIN_TX), unassigned_id="-1",
-            label_prefix="cascade_",
-        )
-        _record_stage(progression, "Cascade-QC", df_grouped, "tracer_id")
+    df_grouped = _group_stage(df_rescued, aux, cfg, progression, seg=True)
 
     # Mid-pipeline QC (after Group, before Stitch). Both stages are
     # opt-in via constants at the top of this module.
@@ -2075,56 +2109,7 @@ def run_noseg_pipeline(df: pd.DataFrame, npmi_panel: pd.DataFrame,
     _record_stage(progression, "after init", df, "tracer_id")
 
     # Group (or cascade replacement for cell-finding in NOSEG).
-    # Cascade grid/threshold params come from cfg.group when present
-    # (so the grouping grid can scale to the input bin pitch — e.g. 8 um
-    # VisiumHD bins need an 8 um grid, not the 2 um default). The cfg
-    # defaults equal the historical literals below, so the cfg=None /
-    # bundled-defaults path is byte-for-byte unchanged.
-    grp = getattr(cfg, "group", None)
-    if PHASE1_NOSEG_CASCADE:
-        df_grouped = cascade_as_residual_handler(
-            df_pruned=df, aux=aux,
-            entity_col="tracer_id",
-            G=(grp.cascade_bin_size_um if grp is not None else 2.0),
-            thresholds="auto",
-            territory_radius_bins=(grp.cascade_territory_radius_bins if grp is not None else 1),
-            pmi_threshold=(grp.cascade_pmi_threshold if grp is not None else PMI_THR),
-            min_anchor_tx=(grp.cascade_min_anchor_tx if grp is not None else 3),
-            auto_target_cov=(grp.noseg_cascade_target_cov if grp is not None else PHASE1_NOSEG_CASCADE_TARGET_COV),
-            auto_hard_min=(grp.noseg_cascade_hard_min if grp is not None else PHASE1_NOSEG_CASCADE_HARD_MIN),
-        )
-    else:
-        df_grouped = annotate_unassigned_components_fast(
-            df_pruned=df, aux=aux,
-            build_graph_fn=_grid_self_graph_fn, prune_fn=prune_genes_by_pmi_greedy,
-            coord_cols=("x", "y", "z"),
-            k=8, dist_threshold=1.5, min_comp_size=5,
-            npmi_threshold=ANNOTATE_NEG_THR,
-            entity_col="tracer_id", out_col="tracer_id",
-            cell_id_col="cell_id", gene_col="feature_name",
-            transcript_id_col="transcript_id", show_progress=False,
-        )
-    _record_stage(progression, "Group", df_grouped, "tracer_id")
-
-    # z-split the cascade's partials with the same rule as Split-Phase1.
-    if PHASE1_NOSEG_CASCADE and CASCADE_SPLIT_DZ is not None:
-        df_grouped, _ = _spatial_split_phase1_entities(
-            df_grouped, entity_col="tracer_id",
-            coord_cols=("x", "y", "z"),
-            dz_threshold=float(CASCADE_SPLIT_DZ),
-            min_size=SPLIT_PHASE1_MIN_TX,
-            min_entity_size=SPLIT_PHASE1_MIN_ENTITY,
-            unassigned_id="-1",
-            label_prefix="cascade_",
-        )
-        _record_stage(progression, "Cascade-Split", df_grouped, "tracer_id")
-    if PHASE1_NOSEG_CASCADE and CASCADE_QC_MIN_TX:
-        df_grouped, _ = _qc_demote_small_phase1_entities(
-            df_grouped, entity_col="tracer_id",
-            min_size=int(CASCADE_QC_MIN_TX), unassigned_id="-1",
-            label_prefix="cascade_",
-        )
-        _record_stage(progression, "Cascade-QC", df_grouped, "tracer_id")
+    df_grouped = _group_stage(df, aux, cfg, progression, seg=False)
 
     # Mid-pipeline QC (after Group, before Stitch). Same opt-in
     # knobs as the segmented path.

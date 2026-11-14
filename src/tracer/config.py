@@ -497,6 +497,14 @@ class GroupConfig:
     cascade_pmi_threshold: float = 0.2          # mirrors phase1.pmi_threshold
     cascade_min_anchor_tx: int = 3
 
+    # Post-steps on the cascade's partials, right after Group (each one
+    # separately switchable; 0 or None = off, 0 being the TOML spelling).
+    # Only `cascade_` labels are touched.
+    # z-split: same rule as Split-Phase1 (a window spans all z, so stacked
+    # fragments can fuse); size QC: like Phase1-QC, at Demote's minimum.
+    cascade_split_dz_um: float | None = 2.0
+    cascade_qc_min_tx: int | None = 5
+
     # Legacy spatial-CC fallback — used when *_cascade=False
     legacy_bin_size_um: float = 8.0             # G in build_grid_graph_xy
     legacy_neighborhood: Literal["self", "moore"] = "self"
@@ -538,6 +546,14 @@ class GroupConfig:
         if self.cascade_min_anchor_tx < 1:
             raise ValueError(
                 f"group.cascade_min_anchor_tx must be >= 1; got {self.cascade_min_anchor_tx}"
+            )
+        if self.cascade_split_dz_um is not None and self.cascade_split_dz_um < 0:
+            raise ValueError(
+                f"group.cascade_split_dz_um must be >= 0 (0 = off); got {self.cascade_split_dz_um}"
+            )
+        if self.cascade_qc_min_tx is not None and self.cascade_qc_min_tx < 0:
+            raise ValueError(
+                f"group.cascade_qc_min_tx must be >= 0 (0 = off); got {self.cascade_qc_min_tx}"
             )
         # Legacy params
         if self.legacy_bin_size_um <= 0:

@@ -268,6 +268,12 @@ cascade_territory_radius_bins = 1    # Moore radius (3×3 = 9 bins)
 cascade_pmi_threshold = 0.2          # mirrors phase1.pmi_threshold
 cascade_min_anchor_tx = 3
 
+# Post-steps on the cascade's partials, right after Group; 0 = off.
+# z-split at a gap > this (µm), same rule as [split_phase1]:
+cascade_split_dz_um = 2.0
+# then send any cascade partial with fewer tx back to unassigned:
+cascade_qc_min_tx = 5
+
 # Legacy spatial-CC fallback — used when *_cascade=false
 legacy_bin_size_um = 8.0             # G in build_grid_graph_xy
 legacy_neighborhood = "self"
