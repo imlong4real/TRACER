@@ -20,7 +20,7 @@ from tqdm.auto import tqdm  # noqa: F401 — used by prune_transcripts_fast
 from . import _cy_prune
 from ._etype import etype_from_codes
 from ._repro import _ensure_reproducibility_seed
-from ._utils import prepare_transcript_df
+from ._utils import deprecated_legacy_group, prepare_transcript_df
 
 
 # ---------- Phase 1/2: Conservative NPMI pruning ----------
@@ -204,6 +204,7 @@ def _symmetric_csr_arrays(W_upper):
     )
 
 
+@deprecated_legacy_group
 def prune_genes_by_pmi_greedy(
     gene_ids: np.ndarray,
     W: np.ndarray,

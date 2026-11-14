@@ -9,7 +9,8 @@ config value for ``split_phase1``, ``phase1_qc`` or (on the SEG path)
   both give the same labels at every stage;
 * Cascade-Split and Cascade-QC switch on and off separately (0 = off, the
   TOML spelling);
-* every setting reaches the stage that uses it.
+* every setting reaches the stage that uses it;
+* the retired spatial-CC backend is never reached and its exports warn.
 """
 from __future__ import annotations
 
@@ -135,17 +136,32 @@ def test_settings_reach_their_stages(monkeypatch, inputs, mode):
         assert [k["min_size"] for k in p1_qc] == [4]
 
 
-@pytest.mark.parametrize("mode", ["seg", "noseg"])
-def test_backend_switch_from_cfg(monkeypatch, inputs, mode):
-    """group.{seg_residual,noseg}_cascade picks the backend on both paths."""
+@pytest.mark.parametrize("name", ["annotate_unassigned_components",
+                                  "annotate_unassigned_components_fast",
+                                  "prune_genes_by_pmi_greedy"])
+def test_legacy_group_functions_warn(name):
+    """Still exported for one release, but deprecated (step 7)."""
+    import numpy as np
+    import tracer
+    fn = getattr(tracer, name)
+    with pytest.warns(DeprecationWarning, match="retired spatial-CC Group"):
+        try:
+            if name == "prune_genes_by_pmi_greedy":
+                fn(np.array([0, 1]), np.zeros((2, 2)))
+            else:
+                fn(None, None, build_graph_fn=None, prune_fn=None)
+        except Exception:
+            pass  # the warning fires before the body runs
+
+
+def test_pipeline_never_calls_legacy_group(monkeypatch, inputs):
+    """Neither runner reaches the retired backend; Group is the cascade."""
+    import warnings
     df, panel = inputs
-    key = "seg_residual_cascade" if mode == "seg" else "noseg_cascade"
-    cfg = _replace(load_config(), group={key: False})
-    called = []
-    monkeypatch.setattr(P, "cascade_as_residual_handler",
-                        lambda *a, **k: called.append(1))
-    stages, raw = _run(monkeypatch, RUNNERS[mode], df, panel, cfg)
-    assert not called
-    names = [s["stage"] for s in stages]
-    assert "Cascade-Split" not in names and "Cascade-QC" not in names
-    assert not any(l.startswith("cascade_") for l in raw["Group"])
+    for mode, runner in RUNNERS.items():
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            stages, raw = _run(monkeypatch, runner, df, panel)
+        monkeypatch.undo()
+        assert any(l.startswith("cascade_") for l in raw["Group"]), mode
+        assert not any(l.startswith("UNASSIGNED_") for l in raw["Group"]), mode

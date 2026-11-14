@@ -120,6 +120,29 @@ def relu_symmetric(x, tau):
     return out
 
 
+def deprecated_legacy_group(fn):
+    """Mark a function of the retired spatial-CC Group backend.
+
+    Unified-prune step 7 removed that backend from the pipeline (Group is
+    always the density cascade). The function still works, for one
+    release, and warns on every call.
+    """
+    import functools
+    import warnings
+
+    msg = (f"tracer.{fn.__name__} belongs to the retired spatial-CC Group "
+           "backend (unified-prune step 7) and will be removed in a future "
+           "release; the pipeline's Group is the density cascade "
+           "(tracer.density_cascade.cascade_as_residual_handler).")
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        warnings.warn(msg, DeprecationWarning, stacklevel=2)
+        return fn(*args, **kwargs)
+
+    return wrapper
+
+
 def symmetric_csr(W):
     """Return ``W`` as a symmetric CSR PMI matrix. Idempotent.
 

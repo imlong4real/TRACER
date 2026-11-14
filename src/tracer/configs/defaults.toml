@@ -233,17 +233,10 @@ admit_independent = true
 
 
 # ---------------------------------------------------------------------
-# Group — entity grouping. Two backends, selected per-pipeline by
-# `seg_residual_cascade` / `noseg_cascade`:
-#
-#   Cascade (default since 2026-05-07/2026-05-09): density-anchor +
-#   Phase-1a/b purity prune. Auto-floor selects density-threshold floor
-#   from runtime tx-coverage. Emits `cascade_<n>-1` partials.
-#
-#   Legacy spatial-CC (when *_cascade=false): annotate_unassigned_
-#   components_fast with G=8 µm self-bin connectivity. Emits
-#   UNASSIGNED_<n> components. Retained as fallback for parity with
-#   pre-cascade pipeline state.
+# Group — entity grouping: the density cascade. Density-anchor +
+# shared seed core; auto-floor selects the density-threshold floor
+# from runtime tx-coverage. Emits `cascade_<n>-1` partials. (The
+# legacy spatial-CC backend was retired in unified-prune step 7.)
 #
 # Cascade internals (bin size, territory radius, PMI threshold,
 # min anchor tx) are shared between SEG and NOSEG paths. Auto-floor
@@ -252,10 +245,6 @@ admit_independent = true
 # floors in those regimes.
 # ---------------------------------------------------------------------
 [group]
-# Backend selection (per pipeline)
-seg_residual_cascade = true
-noseg_cascade = true
-
 # Cascade auto-floor — per pipeline (different residual density regimes)
 seg_cascade_target_cov = 0.65
 seg_cascade_hard_min = 2
@@ -273,14 +262,6 @@ cascade_min_anchor_tx = 3
 cascade_split_dz_um = 2.0
 # then send any cascade partial with fewer tx back to unassigned:
 cascade_qc_min_tx = 5
-
-# Legacy spatial-CC fallback — used when *_cascade=false
-legacy_bin_size_um = 8.0             # G in build_grid_graph_xy
-legacy_neighborhood = "self"
-legacy_k = 8
-legacy_dist_threshold = 1.5
-legacy_min_comp_size = 5
-legacy_npmi_threshold = -0.1         # post-prune negative cutoff
 
 
 # ---------------------------------------------------------------------

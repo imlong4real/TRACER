@@ -457,34 +457,24 @@ class RescueConfig:
 
 @dataclass(frozen=True)
 class GroupConfig:
-    """Phase 2 — entity grouping.
+    """Phase 2 — entity grouping: the density cascade.
 
-    Two backends, selected per-pipeline by ``seg_residual_cascade`` /
-    ``noseg_cascade``:
+    Density-anchor + shared seed core: each window's densest 3x3 bins of
+    unassigned tx give one partial, the rest go back to the pool. Emits
+    ``cascade_<n>-1`` partial labels. Auto-floor selects the
+    density-threshold floor at runtime by walking down candidate
+    thresholds until ``target_cov`` of residual tx is captured (with a
+    ``hard_min`` lower bound).
 
-    * **Cascade** (default since 2026-05-07 for SEG-residual,
-      2026-05-09 for NOSEG): density-anchor + Phase-1a/b purity prune.
-      Emits ``cascade_<n>-1`` partial labels. Auto-floor selects the
-      density-threshold floor at runtime by walking down candidate
-      thresholds until ``target_cov`` of residual tx is captured (with
-      a ``hard_min`` lower bound).
+    The cascade's internal params (bin size, territory radius, per-pair
+    PMI threshold, min anchor tx) are shared between the SEG and NOSEG
+    paths; the auto-floor params (target_cov, hard_min) are per-pipeline
+    because SEG-residual is sparser than the full NOSEG pool.
 
-    * **Legacy spatial-CC** (when ``*_cascade=False``): the original
-      ``annotate_unassigned_components_fast`` with G=8 µm self-bin
-      connectivity + post-hoc gene-set prune. Emits ``UNASSIGNED_<n>``
-      component labels. Retained as a fallback for parity with
-      pre-cascade pipeline state.
-
-    The cascade backend's internal params (bin size, territory radius,
-    per-pair PMI threshold, min anchor tx) are shared between the SEG
-    and NOSEG paths; the auto-floor params (target_cov, hard_min) are
-    per-pipeline because SEG-residual is sparser than the full NOSEG
-    pool — auto-floor selects different floors in those regimes.
+    The legacy spatial-CC backend (``annotate_unassigned_components_fast``,
+    ``UNASSIGNED_<n>`` components) and its switches were retired in
+    unified-prune step 7; see ``_RETIRED_KEYS``.
     """
-    # Backend selection (per pipeline)
-    seg_residual_cascade: bool = True
-    noseg_cascade: bool = True
-
     # Cascade auto-floor — per pipeline (different residual density regimes)
     seg_cascade_target_cov: float = 0.65
     seg_cascade_hard_min: int = 2
@@ -504,14 +494,6 @@ class GroupConfig:
     # fragments can fuse); size QC: like Phase1-QC, at Demote's minimum.
     cascade_split_dz_um: float | None = 2.0
     cascade_qc_min_tx: int | None = 5
-
-    # Legacy spatial-CC fallback — used when *_cascade=False
-    legacy_bin_size_um: float = 8.0             # G in build_grid_graph_xy
-    legacy_neighborhood: Literal["self", "moore"] = "self"
-    legacy_k: int = 8
-    legacy_dist_threshold: float = 1.5
-    legacy_min_comp_size: int = 5
-    legacy_npmi_threshold: float = -0.1         # post-prune negative cutoff
 
     def __post_init__(self) -> None:
         # Cascade params
@@ -554,19 +536,6 @@ class GroupConfig:
         if self.cascade_qc_min_tx is not None and self.cascade_qc_min_tx < 0:
             raise ValueError(
                 f"group.cascade_qc_min_tx must be >= 0 (0 = off); got {self.cascade_qc_min_tx}"
-            )
-        # Legacy params
-        if self.legacy_bin_size_um <= 0:
-            raise ValueError(
-                f"group.legacy_bin_size_um must be > 0; got {self.legacy_bin_size_um}"
-            )
-        if self.legacy_neighborhood not in ("self", "moore"):
-            raise ValueError(
-                f"group.legacy_neighborhood must be 'self' or 'moore'; got {self.legacy_neighborhood!r}"
-            )
-        if self.legacy_min_comp_size < 1:
-            raise ValueError(
-                f"group.legacy_min_comp_size must be >= 1; got {self.legacy_min_comp_size}"
             )
 
 
@@ -1064,6 +1033,46 @@ _RETIRED_KEYS: dict[tuple[str, str], Any] = {
         'removed -- it was never wired (the pipeline used a module constant) '
         'and fired 0-1 times per ROI. Coherence is gated at Mid-QC instead; '
         'delete this key'
+    ),
+    ("group", "seg_residual_cascade"): lambda v: (
+        'removed -- the legacy spatial-CC Group backend was retired '
+        '(unified-prune step 7); Group is always the density cascade. '
+        'Delete this key'
+    ),
+    ("group", "noseg_cascade"): lambda v: (
+        'removed -- the legacy spatial-CC Group backend was retired '
+        '(unified-prune step 7); Group is always the density cascade. '
+        'Delete this key'
+    ),
+    ("group", "legacy_bin_size_um"): lambda v: (
+        'removed -- the legacy spatial-CC Group backend was retired '
+        '(unified-prune step 7); Group is always the density cascade. '
+        'Delete this key'
+    ),
+    ("group", "legacy_neighborhood"): lambda v: (
+        'removed -- the legacy spatial-CC Group backend was retired '
+        '(unified-prune step 7); Group is always the density cascade. '
+        'Delete this key'
+    ),
+    ("group", "legacy_k"): lambda v: (
+        'removed -- the legacy spatial-CC Group backend was retired '
+        '(unified-prune step 7); Group is always the density cascade. '
+        'Delete this key'
+    ),
+    ("group", "legacy_dist_threshold"): lambda v: (
+        'removed -- the legacy spatial-CC Group backend was retired '
+        '(unified-prune step 7); Group is always the density cascade. '
+        'Delete this key'
+    ),
+    ("group", "legacy_min_comp_size"): lambda v: (
+        'removed -- the legacy spatial-CC Group backend was retired '
+        '(unified-prune step 7); Group is always the density cascade. '
+        'Delete this key'
+    ),
+    ("group", "legacy_npmi_threshold"): lambda v: (
+        'removed -- the legacy spatial-CC Group backend was retired '
+        '(unified-prune step 7); Group is always the density cascade. '
+        'Delete this key'
     ),
 }
 
