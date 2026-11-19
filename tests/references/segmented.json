@@ -1,11 +1,11 @@
 {
-  "ami_vs_truth": 0.9871,
-  "ari_vs_truth": 0.9859,
-  "coverage_pct": 82.0,
+  "ami_vs_truth": 0.9662,
+  "ari_vs_truth": 0.9587,
+  "coverage_pct": 83.0,
   "n_cells": 8,
   "n_components": 0,
   "n_partials": 0,
-  "n_unassigned_tx": 36,
+  "n_unassigned_tx": 34,
   "stage_progression": [
     {
       "n_cells": 8,
@@ -94,7 +94,7 @@
     {
       "n_cells": 8,
       "n_components": 0,
-      "n_partials": 6,
+      "n_partials": 5,
       "n_unassigned_tx": 18,
       "stage": "Stitch"
     },
@@ -102,21 +102,21 @@
       "n_cells": 8,
       "n_components": 0,
       "n_partials": 0,
-      "n_unassigned_tx": 36,
+      "n_unassigned_tx": 34,
       "stage": "Demote"
     },
     {
       "n_cells": 8,
       "n_components": 0,
       "n_partials": 0,
-      "n_unassigned_tx": 36,
+      "n_unassigned_tx": 34,
       "stage": "Final Rescue"
     },
     {
       "n_cells": 8,
       "n_components": 0,
       "n_partials": 0,
-      "n_unassigned_tx": 36,
+      "n_unassigned_tx": 34,
       "stage": "Finalize"
     }
   ]

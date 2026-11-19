@@ -295,8 +295,21 @@ metric = "pmi"
 penalize_simplicity = true
 
 # Primary acceptance gate. 2026-05-09: raised 0.0 → 0.03 to prevent
-# NOSEG supercell formation; SEG insensitive.
-deltaC_min = 0.03
+# NOSEG supercell formation (the noseg preset keeps 0.03). 2026-11-19:
+# SEG loosened to -0.3, paired with the merge-time guards below.
+deltaC_min = -0.3
+
+# Merge-time guards, checked on every merge Stitch is about to make
+# (-inf = off; the noseg preset turns all three off):
+# merged coherence C(union) must be >= this
+merged_c_min = 0.0
+# a merge involving a whole cell needs ΔC >= this ("defends against
+# catastrophes": stricter than deltaC_min for cells)
+cell_delta_c_min = -0.1
+# ΔC summed over a group's whole merge tree must stay >= this
+cumulative_delta_c_min = -0.3
+# re-score a new group against its neighbours after each merge
+requeue_neighbours = true
 
 # C(union) bypass for ΔC-failing pairs. 0.9 is the recommended setting
 # from the 2026-05-14 stitch-dist-threshold-fix bench. Use null to
@@ -310,7 +323,7 @@ c_union_bypass_max_n_tx = 50
 
 # Post-acceptance merger-tree depth cap. Blocks chain-style growth.
 # Set to null to disable.
-max_merger_depth = 3
+max_merger_depth = 5
 
 # Spatial gate — candidate pair enumeration.
 candidate_source = "grid"
@@ -322,7 +335,7 @@ bin_size_um = 2.0
 # fall back to the legacy within-cell auto_Gz estimator.
 g_z_um = 1.0
 z_neighbor_depth = 1
-neighborhood = "8"
+neighborhood = "R2"
 dist_threshold_um = 5.0
 
 # Per-entity witness floor in the shared bin neighborhood (capped at

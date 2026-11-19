@@ -104,6 +104,19 @@ Nuclear-specific steps stay outside `prune_entity` as Phase-1 wrappers: the seed
 7. **Retire the legacy Group path** (`annotate_unassigned_components_fast` with `prune_genes_by_pmi_greedy`), or route it through `prune_entity`.
    *Done (2026-11-14): retired.* Group is always the density cascade. Removed from the pipeline: the spatial-CC branch of `_group_stage`, its graph helper `_grid_self_graph_fn`, `ANNOTATE_NEG_THR`, the backend constants `PHASE1_SEG_RESIDUAL_CASCADE` / `PHASE1_NOSEG_CASCADE`, and Mid-QC's `_split_unassigned_components` with `MID_SPLIT_UNASSIGNED_DZ` (it matched only `UNASSIGNED_<n>` components, so it was a no-op on the cascade path; Mid-QC is now the coherence floor only). Removed from config: `group.seg_residual_cascade`, `group.noseg_cascade` and the six `group.legacy_*` fields; a config that still sets one fails with a migration hint (`_RETIRED_KEYS`). Kept for one release with a `DeprecationWarning`: the exported `annotate_unassigned_components`, `annotate_unassigned_components_fast` and `prune_genes_by_pmi_greedy`. Not touched: `UNASSIGNED` handling elsewhere (`_etype`, QC skip lists, plotting, metrics), since `UNASSIGNED` is also the Finalize sentinel and old outputs carry `UNASSIGNED_<n>` labels. Labels identical at every stage on the fixtures and on the internal ROIs.
 
+## Stitch defaults (2026-11-19, outside the prune plan)
+
+SEG Stitch now defaults to the settings chosen on GBM: `deltaC_min` −0.3 (was 0.03), `neighborhood` "R2" (was "8"), `max_merger_depth` 5 (was 3), `rescue_delta_c_floor` −0.2 (unchanged). Four prototype features were ported into `stitch_entities_hierarchical` to go with the looser gate, each a `StitchConfig` field and on by default for SEG:
+
+- `merged_c_min` = 0: the merged coherence C(union) must be ≥ 0;
+- `cell_delta_c_min` = −0.1: a merge involving a whole cell needs ΔC ≥ −0.1 (stricter than `deltaC_min` for cells);
+- `cumulative_delta_c_min` = −0.3: ΔC summed over a group's whole merge tree must stay ≥ −0.3;
+- `requeue_neighbours` = true: after each merge, re-score the new group against its neighbours (grid candidates only).
+
+Off is `None` in Python and `-inf` in TOML. NOSEG keeps the previous settings (ΔC 0.03, "8", depth 3, guards and re-queueing off): `deltaC_min` 0.03 was set to stop NOSEG supercells, and the new set has not been measured there. They live in the bundled noseg preset and in `NOSEG_STITCH_OVERRIDES`, which `run_noseg_pipeline(cfg=None)` applies. Side effect: with `deltaC_min` below `rescue_delta_c_floor`, every pair in the Mahalanobis rescue band already passes ΔC, so the rescue no longer fires on SEG.
+
+Verification: the port reproduces the prototype exactly (the recovered prototype patches re-applied to the pre-port `stitching.py`; identical labels at every stage and the same number of merges on an internal ROI). The synthetic fixtures do not reach the guards (their labels are the same with and without them), so `tests/test_stitch_guards.py` pins each guard on hand-built entity pairs. The `seg_nuclear_stitch_r2` stage-label variant became `seg_nuclear_stitch_prev` (the previous settings), whose reference equals the old default's. On internal ROIs the new defaults roughly halve the number of partials, move transcripts into whole cells, and lower unassigned slightly; on Visium HD the largest partial grows several-fold, which needs a look before relying on it there.
+
 ## Open questions
 
 - Should the cascade use Phase-1's admission settings (`veto_mode`, `mean_admit_threshold`, `aggregator_percentile`)? The cascade has no nucleus to anchor identity, so a stricter admission may be warranted.
@@ -115,7 +128,7 @@ Nuclear-specific steps stay outside `prune_entity` as Phase-1 wrappers: the seed
 
 Prototype runs on an internal dataset compared cell-style carving, cell-style carving with a sibling size minimum, and the repo's window mode. Cell-style carving gave more partials with higher coherence and fewer unassigned transcripts, and left whole-cell coherence unchanged. The numbers are kept outside this repository because the dataset is unpublished.
 
-The prototype patches are environment flags in a scratch copy of TRACER; none are in the repo. The flags are:
+The prototype patches were environment flags in a scratch copy of TRACER. The four Stitch flags are now ported (see Stitch defaults above); the cascade flags are not. The flags were:
 
 - `TRACER_CASCADE_SYM`
 - `TRACER_CASCADE_PRUNE`

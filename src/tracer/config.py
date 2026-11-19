@@ -570,14 +570,30 @@ class StitchConfig:
     mode: Literal["count", "primitives"] = "count"
     metric: Literal["pmi", "npmi"] = "pmi"
     penalize_simplicity: bool = True
-    deltaC_min: float = 0.03
+    # 2026-11-19: SEG default loosened 0.03 -> -0.3 together with the
+    # merge-time guards below (whole-cell guard, merged-C floor, cumulative
+    # ΔC budget), as chosen on GBM. NOSEG keeps 0.03 (platform preset), the
+    # value that stopped supercells there.
+    deltaC_min: float = -0.3
 
     # C(union) bypass for ΔC-failing pairs
     c_union_bypass: float | None = 0.9
     c_union_bypass_max_n_tx: int | None = 50
 
-    # Merger-tree depth cap
-    max_merger_depth: int | None = 3
+    # Merger-tree depth cap (NOSEG preset keeps 3)
+    max_merger_depth: int | None = 5
+
+    # Merge-time guards, checked on every merge Stitch is about to make.
+    # None (Python) or -inf (TOML) = off. NOSEG preset turns all three off.
+    #   merged_c_min           C(union) >= this.
+    #   cell_delta_c_min       a merge involving a whole cell needs ΔC >= this.
+    #   cumulative_delta_c_min ΔC summed over a group's merge tree >= this.
+    merged_c_min: float | None = 0.0
+    cell_delta_c_min: float | None = -0.1
+    cumulative_delta_c_min: float | None = -0.3
+    # After each merge, re-score the new group against its neighbours
+    # (grid candidates only). NOSEG preset: off.
+    requeue_neighbours: bool = True
 
     # Spatial gate
     candidate_source: Literal["grid", "delaunay"] = "grid"
@@ -591,7 +607,9 @@ class StitchConfig:
     # Platform presets set this (cosmx=0.8, merfish=1.5); Xenium/Atera keep 1.0.
     g_z_um: float | str | None = 1.0
     z_neighbor_depth: int = 1                   # ±depth z bins
-    neighborhood: Literal["4", "8"] = "8"       # xy Moore reach
+    # xy reach between bins: "4", "8" (Moore-1) or "R<N>" (Moore-N).
+    # SEG default R2; NOSEG preset keeps "8".
+    neighborhood: str = "R2"
     dist_threshold_um: float = 5.0              # max 3D distance for candidate pairs
 
     # Witness floor (per-entity tx count in shared bin neighborhood)
@@ -624,6 +642,22 @@ class StitchConfig:
             raise ValueError(
                 f"stitch.deltaC_min out of range: {self.deltaC_min}"
             )
+        nb = str(self.neighborhood)
+        if not (nb in ("0", "4", "8")
+                or (nb.startswith("R") and nb[1:].isdigit() and int(nb[1:]) >= 1)):
+            raise ValueError(
+                f"stitch.neighborhood must be '0', '4', '8' or 'R<N>' (N >= 1); "
+                f"got {self.neighborhood!r}"
+            )
+        for _name in ("merged_c_min", "cell_delta_c_min", "cumulative_delta_c_min"):
+            _v = getattr(self, _name)
+            if _v is not None and _v == float("-inf"):
+                # TOML has no null; -inf (no floor) is its spelling of off.
+                object.__setattr__(self, _name, None)
+            elif _v is not None and not (-1.0 <= _v <= 1.0):
+                raise ValueError(
+                    f"stitch.{_name} must be in [-1, 1], -inf (off) or None; got {_v}"
+                )
         if self.c_union_bypass is not None and not (0.0 <= self.c_union_bypass <= 1.0):
             raise ValueError(
                 f"stitch.c_union_bypass out of range: {self.c_union_bypass}"

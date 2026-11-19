@@ -21,10 +21,10 @@ Variants
                   path whose ``aux["W"]`` is upper-triangle only.
 ``seg_wholecell`` SEG without a nucleus column -> ``prune_transcripts_fast``.
 ``noseg``         NOSEG -> cascade driven by ``cfg.group``.
-``seg_nuclear_stitch_r2``  ``seg_nuclear`` with the Stitch settings used for
-                  analysis (ΔC_min -0.3, rescue ΔC floor -0.2, R2 reach,
-                  depth cap 5): looser merging puts more pairs near the
-                  thresholds that W fixes move.
+``seg_nuclear_stitch_prev``  ``seg_nuclear`` with the Stitch settings SEG
+                  used before 2026-11-19 and NOSEG still uses (ΔC_min 0.03,
+                  Moore-1 reach, depth cap 3, no merge-time guards, no
+                  re-queueing). Keeps the old Stitch behaviour pinned.
 ``seg_nuclear_scope_nuclear``  ``seg_nuclear`` with ``prune_scope="nuclear"``
                   (nuclear seed + nuclear admission), the non-default scope.
 
@@ -204,15 +204,15 @@ def _cfg(**sections):
     return cfg
 
 
-STITCH_R2 = dict(deltaC_min=-0.3, rescue_delta_c_floor=-0.2,
-                 neighborhood="R2", max_merger_depth=5)
+# Pre-2026-11-19 SEG Stitch = today's NOSEG Stitch.
+STITCH_PREV = dict(P.NOSEG_STITCH_OVERRIDES)
 
 
-def test_stage_labels_seg_nuclear_stitch_r2(monkeypatch, inputs):
+def test_stage_labels_seg_nuclear_stitch_prev(monkeypatch, inputs):
     df, panel = inputs
     stages, _ = _run(monkeypatch, P.run_segmented_pipeline, df, panel,
-                     _cfg(stitch=STITCH_R2))
-    _assert_stages("seg_nuclear_stitch_r2", stages)
+                     _cfg(stitch=STITCH_PREV))
+    _assert_stages("seg_nuclear_stitch_prev", stages)
 
 
 def test_stage_labels_seg_nuclear_scope_nuclear(monkeypatch, inputs):
@@ -227,7 +227,7 @@ def test_variants_differ_from_default(monkeypatch, inputs):
     pins nothing the default fixture does not already pin."""
     df, panel = inputs
     base, _ = _run(monkeypatch, P.run_segmented_pipeline, df, panel)
-    r2, _ = _run(monkeypatch, P.run_segmented_pipeline, df, panel, _cfg(stitch=STITCH_R2))
+    r2, _ = _run(monkeypatch, P.run_segmented_pipeline, df, panel, _cfg(stitch=STITCH_PREV))
     nuc, _ = _run(monkeypatch, P.run_segmented_pipeline, df, panel,
                   _cfg(phase1=dict(prune_scope="nuclear")))
 

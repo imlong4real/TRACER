@@ -16,6 +16,8 @@ import logging
 import math
 from typing import Any
 
+import dataclasses
+
 import numpy as np
 import pandas as pd
 
@@ -1133,8 +1135,18 @@ STITCH_C_UNION_BYPASS_MAX_N_TX: int | None = 50
 # already reached the cap. Balanced N-entity merges cost log2(N) depth;
 # chain merges cost N-1 — so the cap rewards balanced consolidations
 # and penalises chain growth (one component repeatedly absorbing
-# neighbours, the over-merge failure mode). None = off. Recommended 3.
-STITCH_MAX_MERGER_DEPTH: int | None = 3
+# neighbours, the over-merge failure mode). None = off.
+STITCH_MAX_MERGER_DEPTH: int | None = 5   # 2026-11-19: 3 -> 5 (SEG); NOSEG keeps 3
+
+# NOSEG keeps the pre-2026-11-19 Stitch settings (same values as the bundled
+# noseg platform preset): ΔC 0.03 is what stopped NOSEG supercells, and the
+# looser SEG defaults (ΔC -0.3, R2, depth 5, merge-time guards, re-queueing)
+# have not been measured there. Applied by run_noseg_pipeline when cfg=None.
+NOSEG_STITCH_OVERRIDES: dict = dict(
+    deltaC_min=0.03, neighborhood="8", max_merger_depth=3,
+    merged_c_min=None, cell_delta_c_min=None, cumulative_delta_c_min=None,
+    requeue_neighbours=False,
+)
 
 # Mid-pipeline QC (after Group, before Stitch).
 #   MID_QC_C_FLOOR  0.0 = off. Float (e.g. 0.05) demotes any entity
@@ -1342,7 +1354,7 @@ def _grid_3d_graph_fn(df_in, *, k=None, dist_threshold=None,
     )
 
 
-def _resolve_pipeline_cfg(cfg):
+def _resolve_pipeline_cfg(cfg, *, noseg: bool = False):
     """Resolve a `PipelineConfig` for the runner — Phase B of config
     migration.
 
@@ -1397,7 +1409,8 @@ def _resolve_pipeline_cfg(cfg):
     final_rescue_cfg = RescueConfig(**final_rescue_kwargs)
     stitch_cfg = StitchConfig(
         mode="count", metric="pmi", penalize_simplicity=True,
-        deltaC_min=0.03,
+        # deltaC_min, neighborhood and the merge-time guards: StitchConfig
+        # defaults (the SEG values); NOSEG_STITCH_OVERRIDES for NOSEG.
         c_union_bypass=STITCH_C_UNION_BYPASS,
         c_union_bypass_max_n_tx=STITCH_C_UNION_BYPASS_MAX_N_TX,
         max_merger_depth=STITCH_MAX_MERGER_DEPTH,
@@ -1405,7 +1418,6 @@ def _resolve_pipeline_cfg(cfg):
         bin_size_um=2.0,
         g_z_um=STITCH_GZ_UM,
         z_neighbor_depth=1,
-        neighborhood="8",
         dist_threshold_um=5.0,
         min_local_tx_per_entity=STITCH_MIN_LOCAL_TX,
     )
@@ -1423,6 +1435,8 @@ def _resolve_pipeline_cfg(cfg):
         noseg_cascade_hard_min=PHASE1_NOSEG_CASCADE_HARD_MIN,
         cascade_pmi_threshold=PMI_THR,
     )
+    if noseg:
+        stitch_cfg = dataclasses.replace(stitch_cfg, **NOSEG_STITCH_OVERRIDES)
     return PipelineConfig(
         split_phase1=split_cfg,
         phase1_qc=qc_cfg,
@@ -1801,6 +1815,10 @@ def run_segmented_pipeline(df: pd.DataFrame,
         min_local_tx_per_entity=cfg.stitch.min_local_tx_per_entity,
         mahalanobis_d_rescue=cfg.stitch.mahalanobis_d_rescue,
         rescue_delta_c_floor=cfg.stitch.rescue_delta_c_floor,
+        merged_c_min=cfg.stitch.merged_c_min,
+        cell_delta_c_min=cfg.stitch.cell_delta_c_min,
+        cumulative_delta_c_min=cfg.stitch.cumulative_delta_c_min,
+        requeue_neighbours=cfg.stitch.requeue_neighbours,
     )
     _record_stage(progression, "Stitch", df_stitched, "stitched")
 
@@ -1891,7 +1909,7 @@ def run_noseg_pipeline(df: pd.DataFrame, npmi_panel: pd.DataFrame,
         when ``None`` (default) a config is built from module globals
         to preserve today's behavior bit-exactly.
     """
-    cfg = _resolve_pipeline_cfg(cfg)
+    cfg = _resolve_pipeline_cfg(cfg, noseg=True)
     _set_admit_independent(True)  # reset toggle at entry: never inherit a leaked flag from a prior failed run (Copilot review)
     df = df.copy()
     _input_cell_id = pd.Series(
@@ -1997,6 +2015,10 @@ def run_noseg_pipeline(df: pd.DataFrame, npmi_panel: pd.DataFrame,
         min_local_tx_per_entity=cfg.stitch.min_local_tx_per_entity,
         mahalanobis_d_rescue=cfg.stitch.mahalanobis_d_rescue,
         rescue_delta_c_floor=cfg.stitch.rescue_delta_c_floor,
+        merged_c_min=cfg.stitch.merged_c_min,
+        cell_delta_c_min=cfg.stitch.cell_delta_c_min,
+        cumulative_delta_c_min=cfg.stitch.cumulative_delta_c_min,
+        requeue_neighbours=cfg.stitch.requeue_neighbours,
     )
     _record_stage(progression, "Stitch", df_stitched, "stitched")
 

@@ -930,6 +930,21 @@ def stitch_entities_hierarchical(
     # (or the function will silently disable). See module docstring.
     mahalanobis_d_rescue: float | None = None,
     rescue_delta_c_floor: float = -0.2,
+    # Merge-time guards, checked on every pop that would otherwise merge
+    # (after the ΔC / bypass / Mahalanobis decision). None or -inf = off.
+    #   merged_c_min           C(union) must be >= this.
+    #   cell_delta_c_min       if either side contains a whole cell, ΔC
+    #                          must be >= this (stricter than deltaC_min).
+    #   cumulative_delta_c_min the ΔC summed over the merged group's whole
+    #                          merge tree must stay >= this.
+    merged_c_min: float | None = None,
+    cell_delta_c_min: float | None = None,
+    cumulative_delta_c_min: float | None = None,
+    # Grid mode only: after each merge, re-score the new group against
+    # every group adjacent to either side and push the pairs that pass
+    # (or sit in the Mahalanobis rescue band). Without it a pair that
+    # failed at heap-init is never revisited, even after one side grows.
+    requeue_neighbours: bool = False,
 ):
     """Hierarchical entity stitching driven by ΔC.
 
@@ -1550,6 +1565,14 @@ def stitch_entities_hierarchical(
     # mode that produces multi-cell stromal-compartment blobs).
     merger_depth = np.zeros(N, dtype=np.int32)
 
+    # Per-root ΔC summed over the root's merge tree (cumulative_delta_c_min).
+    def _on(x):
+        return x is not None and np.isfinite(x)
+    _merged_c_on = _on(merged_c_min)
+    _cell_guard_on = _on(cell_delta_c_min)
+    _cum_on = _on(cumulative_delta_c_min)
+    cum_dc = np.zeros(N, dtype=np.float64)
+
     # For label preference
     # store lists of member entity_ids by type at roots (kept as python sets for simplicity)
     cell_ids = [set([entity_ids[i]]) if etypes[i] == "cell" else set() for i in range(N)]
@@ -1599,6 +1622,10 @@ def stitch_entities_hierarchical(
         "merges_total": 0,        # all unions
         "mahalanobis_rescue_checks": 0,  # ΔC-borderline pairs evaluated for rescue
         "mahalanobis_rescues": 0,        # actual ΔC rejects overridden by Maha rescue
+        "blocked_merged_c": 0,           # merges stopped by merged_c_min
+        "blocked_cell_guard": 0,         # merges stopped by cell_delta_c_min
+        "blocked_cumulative_dc": 0,      # merges stopped by cumulative_delta_c_min
+        "requeued_pairs": 0,             # pairs pushed by requeue_neighbours
     })
 
     # ----------------------------------------------------------------
@@ -2038,6 +2065,15 @@ def stitch_entities_hierarchical(
             # Maha distance before admitting.
             heapq.heappush(heap, _heap_item(di, i, j))
 
+    # Neighbour sets per root (requeue_neighbours, grid mode): the original
+    # candidate edges, unioned on every merge.
+    _requeue = bool(requeue_neighbours) and candidate_source == "grid"
+    root_nbrs: dict[int, set] = {}
+    if _requeue:
+        for (_i, _j) in edges:
+            root_nbrs.setdefault(int(_i), set()).add(int(_j))
+            root_nbrs.setdefault(int(_j), set()).add(int(_i))
+
     _phase("heap_init")
     # greedy merging
     while heap:
@@ -2080,6 +2116,20 @@ def stitch_entities_hierarchical(
             else:
                 continue
 
+        # Merge-time guards (all off by default).
+        if _merged_c_on and not (np.isfinite(cu_now) and cu_now >= merged_c_min):
+            _LAST_GATE_STATS["blocked_merged_c"] += 1
+            continue
+        if (_cell_guard_on and (has_cell[ra] or has_cell[rb])
+                and not (np.isfinite(dc_now) and dc_now >= cell_delta_c_min)):
+            _LAST_GATE_STATS["blocked_cell_guard"] += 1
+            continue
+        _dc_real = (dc_now if np.isfinite(dc_now)
+                    and dc_now < _SPATIAL_OVERLAP_DC * 0.5 else 0.0)
+        if _cum_on and (cum_dc[ra] + cum_dc[rb] + _dc_real) < cumulative_delta_c_min:
+            _LAST_GATE_STATS["blocked_cumulative_dc"] += 1
+            continue
+
         # merge (choose new root)
         rnew = dsu.union(ra, rb)
         rold = rb if rnew == ra else ra
@@ -2087,6 +2137,7 @@ def stitch_entities_hierarchical(
         # Update merger-tree depth: new root carries 1 + max of children.
         merger_depth[rnew] = max(int(merger_depth[ra]),
                                   int(merger_depth[rb])) + 1
+        cum_dc[rnew] = cum_dc[ra] + cum_dc[rb] + _dc_real
         # Track which gate drove the merge:
         #   pre-mode bypass → dc_now == 1e9 sentinel
         #   post-mode override → ΔC failed but spatial said merge
@@ -2196,7 +2247,26 @@ def stitch_entities_hierarchical(
             # lazy DSU revalidation at pop handles merges. Skipping
             # expansion + index maintenance is both correct and avoids
             # an O(|bins(rnew)| * 9) scan per merge.
-            pass
+            # `requeue_neighbours` adds that revisit: re-score the new group
+            # against the groups adjacent to either side.
+            if _requeue:
+                rr = dsu.find(rnew)
+                root_nbrs[rr] = root_nbrs.get(ra, set()) | root_nbrs.get(rb, set())
+                seen = set()
+                for nbr in list(root_nbrs[rr]):
+                    rn = dsu.find(nbr)
+                    if rn == rr or rn in seen:
+                        continue
+                    seen.add(rn)
+                    if not can_merge(rr, rn):
+                        continue
+                    dtry, ctry = compute_deltaC_roots(rr, rn)
+                    if _pair_passes_gate(dtry, ctry, rr, rn) or (
+                        mahalanobis_d_rescue is not None and np.isfinite(dtry)
+                        and rescue_delta_c_floor < dtry < 0.0
+                    ):
+                        heapq.heappush(heap, _heap_item(dtry, rr, rn))
+                        _LAST_GATE_STATS["requeued_pairs"] += 1
 
     # ----------------------------------------------------------------
     # Choose stitched label per final root.
@@ -2569,6 +2639,12 @@ def apply_stitching_to_transcripts_memory_efficient(
     # entity's per-axis tx-coord range (axis-aligned bbox). Default
     # False (no spatial constraint beyond Stitch's existing
     # `dist_threshold` Delaunay-edge filter at candidate-build time).
+    # Merge-time guards and neighbour re-queueing; see
+    # `stitch_entities_hierarchical`. None / False = off.
+    merged_c_min: float | None = None,
+    cell_delta_c_min: float | None = None,
+    cumulative_delta_c_min: float | None = None,
+    requeue_neighbours: bool = False,
     spatial_centroid_gate: bool = False,
     # Tightness of the spatial-overlap test. K=1 → bbox check (at
     # least 1 tx of larger entity above AND 1 below smaller's centroid
@@ -2756,6 +2832,10 @@ def apply_stitching_to_transcripts_memory_efficient(
         spatial_gate_flipped=spatial_gate_flipped,
         mahalanobis_d_rescue=mahalanobis_d_rescue,
         rescue_delta_c_floor=rescue_delta_c_floor,
+        merged_c_min=merged_c_min,
+        cell_delta_c_min=cell_delta_c_min,
+        cumulative_delta_c_min=cumulative_delta_c_min,
+        requeue_neighbours=requeue_neighbours,
         **legacy_kwargs,
     )
 

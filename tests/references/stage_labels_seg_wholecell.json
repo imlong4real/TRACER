@@ -97,30 +97,30 @@
     {
       "stage": "Stitch",
       "n_tx": 1800,
-      "n_labels": 43,
-      "label_sha": "25ff86541aefae9bba9cb47bb999f7448811d69972c7ada8afb176a574cbe0a0",
-      "partition_sha": "1e95629fe0256613683f7689b3f3574fabcdbfc0694055cdfd3b48a9cc97eed9"
+      "n_labels": 38,
+      "label_sha": "db0b54a772f676f97d192f6dc42f135c6999d45d71d635decfdfee0062b428e1",
+      "partition_sha": "14850729f04649a7aef2330bb8cf8c4fe4edd20963568f5307d3948088ddfc6d"
     },
     {
       "stage": "Demote",
       "n_tx": 1800,
-      "n_labels": 34,
-      "label_sha": "49d03f0e5b724d2d6e1a2ea6a6266de8988d0c35ba48c2d3db66e48d654a1e14",
-      "partition_sha": "7be3aa125d905ba04acd98cc5dc6592f586c80d5e0d0166af426bcc6ab89f53b"
+      "n_labels": 31,
+      "label_sha": "9d8dfa42f4003cbd8ad546be4b3b527687320c24f6d2abd39cd36eb333032fed",
+      "partition_sha": "ee4796e7cc2f1616a7f88716b819ade6b51f94fc828951652c21e0678ac05e99"
     },
     {
       "stage": "Final Rescue",
       "n_tx": 1800,
-      "n_labels": 34,
-      "label_sha": "d4c0cfc32dcfe59c5b8faa6bd6dc2cbf6e32febab3e4968247f3940f4e991135",
-      "partition_sha": "9bf17a3cd32931933433d87231c7590ef1549def111725166dae627467d03600"
+      "n_labels": 31,
+      "label_sha": "9a614dd91a33d0da517655d9c341887fa1f4eca44dcd7a714a228f225f4e4405",
+      "partition_sha": "c5729442972bb5249742da5cebb05935d3aee5607c6c8779c7b352eff57f1591"
     },
     {
       "stage": "Finalize",
       "n_tx": 1800,
-      "n_labels": 34,
-      "label_sha": "8975367e7a657188f10cc0619bee083ca1b6c6c022b026ca1be7d08e5f9f1626",
-      "partition_sha": "0c12b16273f709d0c68d3ff7ac9187ed648cf1f412c0a212000eb8f6f40e44f5"
+      "n_labels": 31,
+      "label_sha": "0906823a63a3674134cfced4e30d98ffe169f14cc91d8c9728ead4eb20fab6b7",
+      "partition_sha": "da2b6bfcb2a4e355a6a060d820e5d91885301471b848fd950839b75a515fc585"
     }
   ]
 }

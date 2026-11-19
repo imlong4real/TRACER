@@ -39,12 +39,24 @@ def test_cfg_none_resolves_to_bundled_defaults():
         assert getattr(resolved, name) == getattr(loaded, name), name
 
 
+def test_noseg_cfg_none_keeps_previous_stitch():
+    """NOSEG with cfg=None uses the noseg preset's Stitch, not the SEG one."""
+    assert (P._resolve_pipeline_cfg(None, noseg=True).stitch
+            == load_config(platform="noseg").stitch)
+    assert P._resolve_pipeline_cfg(None).stitch == load_config().stitch
+    assert load_config().stitch != load_config(platform="noseg").stitch
+
+
 @pytest.mark.parametrize("mode", ["seg", "noseg"])
 def test_cfg_none_and_bundled_defaults_give_same_labels(monkeypatch, inputs, mode):
     df, panel = inputs
     a, _ = _run(monkeypatch, RUNNERS[mode], df, panel)
     monkeypatch.undo()  # else the second capture wraps the first
-    b, _ = _run(monkeypatch, RUNNERS[mode], df, panel, load_config())
+    cfg = load_config()
+    if mode == "noseg":
+        # NOSEG keeps its own Stitch settings (noseg platform preset).
+        cfg = dataclasses.replace(cfg, stitch=load_config(platform="noseg").stitch)
+    b, _ = _run(monkeypatch, RUNNERS[mode], df, panel, cfg)
     assert a == b
 
 
