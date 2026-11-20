@@ -1527,7 +1527,13 @@ def _resolve_pipeline_cfg(cfg):
         DemoteConfig,
         PipelineConfig,
         RescueConfig,
+        SplitPhase1Config,
         StitchConfig,
+    )
+    split_phase1_cfg = SplitPhase1Config(
+        dz_threshold_um=SPLIT_PHASE1_DZ,
+        min_tx=SPLIT_PHASE1_MIN_TX,
+        min_entity_size=SPLIT_PHASE1_MIN_ENTITY,
     )
     rescue_kwargs = dict(
         veto_mode=RESCUE_VETO_MODE,
@@ -1568,6 +1574,7 @@ def _resolve_pipeline_cfg(cfg):
     )
     demote_cfg = DemoteConfig(min_size=5)
     return PipelineConfig(
+        split_phase1=split_phase1_cfg,
         rescue=rescue_cfg,
         stitch=stitch_cfg,
         demote=demote_cfg,
@@ -1589,8 +1596,8 @@ def run_segmented_pipeline(df: pd.DataFrame,
         Phase-B config. When ``None`` (default), a `PipelineConfig` is
         built from the current module-global constants so today's
         production behavior is preserved bit-exactly (see
-        `_resolve_pipeline_cfg`). When provided, drives the Rescue,
-        Stitch, Demote, and Final Rescue call sites. Knobs not yet in
+        `_resolve_pipeline_cfg`). When provided, drives the Split-Phase1,
+        Rescue, Stitch, Demote, and Final Rescue call sites. Knobs not yet in
         `PipelineConfig` (Phase-1 prune, Group, post-group-pass-count)
         continue to read from module globals.
 
@@ -1708,9 +1715,9 @@ def run_segmented_pipeline(df: pd.DataFrame,
     df_pruned, _split_stats = _spatial_split_phase1_entities(
         df_pruned, entity_col="tracer_id",
         coord_cols=("x", "y", "z"),
-        dz_threshold=SPLIT_PHASE1_DZ,
-        min_size=SPLIT_PHASE1_MIN_TX,
-        min_entity_size=SPLIT_PHASE1_MIN_ENTITY,
+        dz_threshold=cfg.split_phase1.dz_threshold_um,
+        min_size=cfg.split_phase1.min_tx,
+        min_entity_size=cfg.split_phase1.min_entity_size,
         unassigned_id="-1",
     )
     _record_stage(progression, "Split-Phase1", df_pruned, "tracer_id")
@@ -1792,6 +1799,7 @@ def run_segmented_pipeline(df: pd.DataFrame,
             entity_col="tracer_id", gene_col="feature_name",
             coord_cols=("x", "y", "z"), out_col="tracer_id",
             G=cfg.rescue.bin_size_um,
+            z_bound=cfg.rescue.z_bound_um,
             pos_npmi_threshold=PMI_THR,
             neg_npmi_threshold=cfg.rescue.neg_threshold,
             cluster_guard_n=cfg.rescue.cluster_guard_n,
@@ -1872,6 +1880,7 @@ def run_segmented_pipeline(df: pd.DataFrame,
                 entity_col="tracer_id", gene_col="feature_name",
                 coord_cols=("x", "y", "z"), out_col="tracer_id",
                 G=cfg.rescue.bin_size_um,
+                z_bound=cfg.rescue.z_bound_um,
                 pos_npmi_threshold=PMI_THR,
                 neg_npmi_threshold=cfg.rescue.neg_threshold,
                 cluster_guard_n=cfg.rescue.cluster_guard_n,
@@ -1944,6 +1953,7 @@ def run_segmented_pipeline(df: pd.DataFrame,
             entity_col="stitched", gene_col="feature_name",
             coord_cols=("x", "y", "z"), out_col="stitched",
             G=cfg.final_rescue.bin_size_um,
+            z_bound=cfg.final_rescue.z_bound_um,
             pos_npmi_threshold=PMI_THR,
             neg_npmi_threshold=cfg.final_rescue.neg_threshold,
             only_partial_component=False,
@@ -2109,6 +2119,7 @@ def run_noseg_pipeline(df: pd.DataFrame, npmi_panel: pd.DataFrame,
                 entity_col="tracer_id", gene_col="feature_name",
                 coord_cols=("x", "y", "z"), out_col="tracer_id",
                 G=cfg.rescue.bin_size_um,
+                z_bound=cfg.rescue.z_bound_um,
                 pos_npmi_threshold=PMI_THR,
                 neg_npmi_threshold=cfg.rescue.neg_threshold,
                 cluster_guard_n=cfg.rescue.cluster_guard_n,
@@ -2177,6 +2188,7 @@ def run_noseg_pipeline(df: pd.DataFrame, npmi_panel: pd.DataFrame,
             entity_col="stitched", gene_col="feature_name",
             coord_cols=("x", "y", "z"), out_col="stitched",
             G=cfg.final_rescue.bin_size_um,
+            z_bound=cfg.final_rescue.z_bound_um,
             pos_npmi_threshold=PMI_THR,
             neg_npmi_threshold=cfg.final_rescue.neg_threshold,
             only_partial_component=False,
