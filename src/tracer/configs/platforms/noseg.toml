@@ -27,7 +27,7 @@ post_group_passes = 5
 max_passes = 5
 
 # Stitch: NOSEG keeps the pre-2026-11-19 settings. deltaC_min 0.03 is what
-# stopped supercells here; the looser SEG defaults (ΔC -0.3, R2, depth 5,
+# stopped supercells here; the looser SEG defaults (ΔC -0.3, depth 5,
 # merge-time guards, re-queueing) have not been measured on NOSEG.
 [stitch]
 deltaC_min = 0.03

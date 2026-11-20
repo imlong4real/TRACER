@@ -608,8 +608,9 @@ class StitchConfig:
     g_z_um: float | str | None = 1.0
     z_neighbor_depth: int = 1                   # ±depth z bins
     # xy reach between bins: "4", "8" (Moore-1) or "R<N>" (Moore-N).
-    # SEG default R2; NOSEG preset keeps "8".
-    neighborhood: str = "R2"
+    # Default "8" for SEG and NOSEG. Moore-2 ("R2") lets partials attach across
+    # an empty bin and, with deltaC_min -0.3, chain into long thin entities.
+    neighborhood: str = "8"
     dist_threshold_um: float = 5.0              # max 3D distance for candidate pairs
 
     # Witness floor (per-entity tx count in shared bin neighborhood)

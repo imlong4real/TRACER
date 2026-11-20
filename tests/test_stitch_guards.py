@@ -1,7 +1,7 @@
 """Stitch merge-time guards and neighbour re-queueing (2026-11-19).
 
 Ported from the GBM Stitch prototype and made the SEG defaults together
-with the looser ΔC_min (-0.3), Moore-2 reach and depth cap 5:
+with the looser ΔC_min (-0.3) and depth cap 5:
 
 * ``merged_c_min``           merged coherence C(union) must be >= this;
 * ``cell_delta_c_min``       a merge involving a whole cell needs ΔC >= this;
@@ -153,7 +153,7 @@ def test_requeue_is_grid_only():
 # --------------------------------------------------------------------------
 def test_seg_defaults_are_the_chosen_set():
     s = load_config().stitch
-    assert (s.deltaC_min, s.neighborhood, s.max_merger_depth) == (-0.3, "R2", 5)
+    assert (s.deltaC_min, s.neighborhood, s.max_merger_depth) == (-0.3, "8", 5)
     assert (s.merged_c_min, s.cell_delta_c_min, s.cumulative_delta_c_min) == (0.0, -0.1, -0.3)
     assert s.requeue_neighbours is True
     assert s.rescue_delta_c_floor == -0.2

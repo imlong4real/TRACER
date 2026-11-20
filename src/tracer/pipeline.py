@@ -1140,7 +1140,7 @@ STITCH_MAX_MERGER_DEPTH: int | None = 5   # 2026-11-19: 3 -> 5 (SEG); NOSEG keep
 
 # NOSEG keeps the pre-2026-11-19 Stitch settings (same values as the bundled
 # noseg platform preset): ΔC 0.03 is what stopped NOSEG supercells, and the
-# looser SEG defaults (ΔC -0.3, R2, depth 5, merge-time guards, re-queueing)
+# looser SEG defaults (ΔC -0.3, depth 5, merge-time guards, re-queueing)
 # have not been measured there. Applied by run_noseg_pipeline when cfg=None.
 NOSEG_STITCH_OVERRIDES: dict = dict(
     deltaC_min=0.03, neighborhood="8", max_merger_depth=3,

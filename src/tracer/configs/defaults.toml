@@ -335,7 +335,9 @@ bin_size_um = 2.0
 # fall back to the legacy within-cell auto_Gz estimator.
 g_z_um = 1.0
 z_neighbor_depth = 1
-neighborhood = "R2"
+# "8" = Moore-1. "R2" (Moore-2) lets partials attach across an empty bin and,
+# with deltaC_min -0.3, chain into long thin entities.
+neighborhood = "8"
 dist_threshold_um = 5.0
 
 # Per-entity witness floor in the shared bin neighborhood (capped at
