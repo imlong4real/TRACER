@@ -30,12 +30,20 @@ jobs:
           images: ghcr.io/imlong4real/tracer
           # Tag every build with its (slash-sanitized) branch name,
           # e.g. tracer:insitucnv-tracer-degradation
+          #
+          # :latest must be stated explicitly. `flavor: latest=auto` does NOT
+          # apply it on the default branch -- it only fires for semver/match
+          # tag patterns (type=semver, type=match), and this workflow has
+          # none. With latest=auto alone, main pushes tagged :main and :latest
+          # was never updated, so it silently froze at the last pre-e13aaa0
+          # build and then took whatever a branch dispatch running older YAML
+          # happened to push.
           tags: |
             type=ref,event=branch
-          # latest=auto -> the :latest tag is applied ONLY on the default
-          # branch (main), so branch builds never clobber :latest.
+            type=raw,value=latest,enable={{is_default_branch}}
+          # Belt and braces: nothing should infer :latest implicitly.
           flavor: |
-            latest=auto
+            latest=false
 
       - name: Build and push image
         uses: docker/build-push-action@v7
