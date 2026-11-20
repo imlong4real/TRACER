@@ -14,7 +14,7 @@ from sklearn.neighbors import NearestNeighbors
 
 from . import _cy_prune, _cy_spatial
 from ._repro import _ensure_reproducibility_seed
-from ._utils import prepare_transcript_df
+from ._utils import deprecated_legacy_group, prepare_transcript_df
 from .graph import build_graph, to_networkx  # noqa: F401 — used internally/callers
 
 
@@ -162,6 +162,7 @@ def finalize_unassigned(
 
 
 #
+@deprecated_legacy_group
 def annotate_unassigned_components(
     df_pruned: pd.DataFrame,
     aux: dict,
@@ -319,6 +320,7 @@ def annotate_unassigned_components(
     return df
 
 
+@deprecated_legacy_group
 def annotate_unassigned_components_fast(
     df_pruned: pd.DataFrame,
     aux: dict,

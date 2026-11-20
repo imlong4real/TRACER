@@ -44,6 +44,24 @@ def test_retired_key_error_names_the_replacement(key, value, must_mention):
         f"({must_mention!r}); got: {msg}")
 
 
+@pytest.mark.parametrize("key,value", [
+    ("seg_residual_cascade", "true"),
+    ("noseg_cascade", "false"),
+    ("legacy_bin_size_um", "8.0"),
+    ("legacy_neighborhood", '"self"'),
+    ("legacy_k", "8"),
+    ("legacy_dist_threshold", "1.5"),
+    ("legacy_min_comp_size", "5"),
+    ("legacy_npmi_threshold", "-0.1"),
+])
+def test_retired_group_backend_keys(key, value):
+    """The spatial-CC Group backend is gone (unified-prune step 7)."""
+    with pytest.raises(ValueError) as ei:
+        _load(f"[group]\n{key} = {value}\n")
+    msg = str(ei.value)
+    assert key in msg and "density cascade" in msg, msg
+
+
 def test_unknown_key_without_a_known_replacement_still_errors_plainly():
     """A genuine typo has no migration hint — keep the valid-key listing."""
     with pytest.raises(ValueError) as ei:

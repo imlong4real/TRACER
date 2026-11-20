@@ -64,6 +64,20 @@
       "stage": "Group"
     },
     {
+      "n_cells": 8,
+      "n_components": 0,
+      "n_partials": 4,
+      "n_unassigned_tx": 11,
+      "stage": "Cascade-Split"
+    },
+    {
+      "n_cells": 8,
+      "n_components": 0,
+      "n_partials": 4,
+      "n_unassigned_tx": 11,
+      "stage": "Cascade-QC"
+    },
+    {
       "n_cells": 7,
       "n_components": 0,
       "n_partials": 0,

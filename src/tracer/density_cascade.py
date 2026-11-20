@@ -62,6 +62,29 @@ def _greedy_prune_retained(uniq_g, uniq_c, W, threshold: float):
         threshold=threshold)
 
 
+def _csr_arrays_for_prune(W):
+    """(indptr, indices, data) of ``W`` for ``_cy_prune.seed_entity``.
+
+    Sparse ``W`` is used as stored (``aux["W"]`` is symmetric). A dense ``W``
+    (already NaN->0 filled above) becomes a CSR that stores EVERY entry,
+    zeros included, because the dense kernel treated every non-NaN pair as
+    observed; dropping zeros would turn them into skipped pairs.
+    """
+    import scipy.sparse as sp
+    if isinstance(W, np.ndarray):
+        G = W.shape[0]
+        rows = np.repeat(np.arange(G, dtype=np.int32), G)
+        cols = np.tile(np.arange(G, dtype=np.int32), G)
+        Wc = sp.csr_matrix((W.ravel().astype(np.float32), (rows, cols)), shape=W.shape)
+    else:
+        Wc = W.tocsr()
+        if not Wc.has_sorted_indices:
+            Wc = Wc.sorted_indices()
+    return (np.ascontiguousarray(Wc.indptr, dtype=np.int32),
+            np.ascontiguousarray(Wc.indices, dtype=np.int32),
+            np.ascontiguousarray(Wc.data, dtype=np.float32))
+
+
 # ============================================================================
 # Auto-floor selection (tx-coverage rule)
 # ============================================================================
@@ -288,12 +311,16 @@ def density_cascade_phase1(
         # with a long-DataFrame panel. Use the sparse builder so even
         # the standalone path doesn't materialize a (G,G) dense matrix.
         from tracer.pruning import build_sparse_pmi_matrix_from_long
+        from tracer._utils import symmetric_csr
         _, gene_to_idx, W = build_sparse_pmi_matrix_from_long(
             panel, metric_col="PMI")
+        W = symmetric_csr(W)  # builder emits the upper triangle only
     # NaN→0 fill only for dense W (sparse CSR has no NaNs by construction —
     # structurally-absent pairs are skipped by _wget).
     if isinstance(W, np.ndarray):
         np.nan_to_num(W, copy=False, nan=0.0)
+    from tracer import _cy_prune
+    W_ip, W_ix, W_dt = _csr_arrays_for_prune(W)
 
     coords = df[["x", "y"]].to_numpy(dtype=np.float32)
     gene_strs = df["feature_name"].to_numpy()
@@ -375,11 +402,13 @@ def density_cascade_phase1(
             if len(tentative) < min_anchor_tx:
                 continue
 
-            ten_genes = gene_idx[tentative]
-            uniq_g, uniq_c = np.unique(ten_genes, return_counts=True)
-            seed_genes = _greedy_prune_retained(
-                uniq_g, uniq_c, W, pmi_threshold).tolist()
-
+            # Shared seed core (same as Phase-1 1a/1c): tx-weighted greedy
+            # over the window's genes. One partial per window: transcripts
+            # of seed genes are committed, the rest go back to the pool.
+            ten_genes = gene_idx[tentative].astype(np.int32)
+            seed_arr = _cy_prune.seed_entity(
+                ten_genes, W_ip, W_ix, W_dt, float(pmi_threshold))
+            seed_genes = seed_arr.tolist()
             if len(seed_genes) < 2:
                 continue
             seed_set = set(seed_genes)
