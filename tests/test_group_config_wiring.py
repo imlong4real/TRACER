@@ -15,12 +15,52 @@ config value for ``split_phase1``, ``phase1_qc`` or (on the SEG path)
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 
+import numpy as np
 import pytest
 
 import tracer.pipeline as P
 from tracer.config import load_config
-from tests.test_stage_label_regression import _run, inputs  # noqa: F401
+from tests.segmentation_sim import simulate_dapi_voronoi_segmentation
+from tests.synthetic import (
+    make_synthetic_npmi_panel_for_transcripts,
+    make_synthetic_transcripts,
+)
+
+
+@pytest.fixture(scope="module")
+def inputs():
+    """~1,800 tx (30 cells x 60 tx, 24 genes / 4 types) with DAPI + Voronoi
+    segmentation and a PMI panel: big enough that Split-Phase1, Mid-QC and
+    the Group cascade all move."""
+    df, gt = make_synthetic_transcripts(
+        n_cells=30, voxels_per_cell_mean=120, tx_per_cell=60, n_genes=24,
+        n_types=4, domain_z_um=10.0, nuclear_layers=2, seed=7)
+    seg = simulate_dapi_voronoi_segmentation(df)
+    seg["overlaps_nucleus"] = seg["is_nuclear"].astype(int)
+    panel = make_synthetic_npmi_panel_for_transcripts(df, gt).rename(columns={"NPMI": "PMI"})
+    return seg, panel
+
+
+def _run(monkeypatch, runner, df, panel, cfg=None):
+    """Run ``runner``; return per-stage label hashes and raw labels by stage."""
+    stages, raw = [], {}
+    orig = P._record_stage
+
+    def capture(progression, stage_name, frame, col):
+        tid = frame["transcript_id"].astype(str).to_numpy()
+        lab = frame[col].astype(str).to_numpy()
+        et = frame["_etype"].astype(str).to_numpy() if "_etype" in frame.columns else np.full(len(lab), "")
+        order = np.argsort(tid, kind="stable")
+        key = "\n".join(f"{t}\t{l}\t{e}" for t, l, e in zip(tid[order], lab[order], et[order]))
+        stages.append({"stage": stage_name, "sha": hashlib.sha256(key.encode()).hexdigest()})
+        raw[stage_name] = lab
+        return orig(progression, stage_name, frame, col)
+
+    monkeypatch.setattr(P, "_record_stage", capture)
+    runner(df.copy(), panel, cfg)
+    return stages, raw
 
 SECTIONS = ("group", "split_phase1", "phase1_qc")
 RUNNERS = {"seg": P.run_segmented_pipeline, "noseg": P.run_noseg_pipeline}
