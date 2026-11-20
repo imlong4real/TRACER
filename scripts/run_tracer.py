@@ -41,6 +41,14 @@ EXAMPLE
       --platform xenium \\
       --outdir results/tracer/lung_xenium \\
       --sample-name lung_xenium --seed 1
+
+Coordinates are converted ONCE into microns at load, per the declared input
+units ([coordinates] / --xy-units ...; default: already microns). CosMx
+flat-file coordinates are pixels and z-plane indices; declare them with the
+calibration of YOUR run (the values below are placeholders)::
+
+    python scripts/run_tracer.py ... --platform cosmx \\
+      --xy-units px --um-per-px <um/px> --z-units plane --z-step-um <um>
 """
 from __future__ import annotations
 
@@ -131,6 +139,8 @@ def build_argparser() -> argparse.ArgumentParser:
                         "(strength-weighted ReLU; opt in deliberately).")
     p.add_argument("--overwrite", action="store_true",
                    help="If outdir exists, overwrite contents.")
+    from tracer.units import add_coordinate_args
+    add_coordinate_args(p)
     return p
 
 
@@ -221,7 +231,18 @@ def _rss_gb() -> float:
 # ---------------------------------------------------------------------------
 # Inputs
 # ---------------------------------------------------------------------------
-def load_transcripts(path: Path, log: logging.Logger) -> pd.DataFrame:
+def load_transcripts(path: Path, log: logging.Logger, *, coords=None,
+                     coords_source: str = "default"
+                     ) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Load the standardized table and convert x/y/z ONCE into microns.
+
+    Returns ``(df, coordinate_receipt)``. The conversion happens before the
+    float32 cast and before a missing z is synthesized, so 2D input stays 2D.
+    A parquet stamped by preprocess_xenium.py is already microns and accepts
+    only the default declaration (no double scaling).
+    """
+    from tracer.units import CalibrationError, read_parquet_stamp, to_microns
+
     log.info("Loading transcripts: %s", path)
     df = pd.read_parquet(path)
     required = {"x", "y", "feature_name", "cell_id"}
@@ -232,6 +253,18 @@ def load_transcripts(path: Path, log: logging.Logger) -> pd.DataFrame:
             f"Use scripts/preprocess_xenium.py to standardize first. "
             f"Present columns: {sorted(df.columns)}"
         )
+    try:
+        df, coord_receipt = to_microns(
+            df, coords, source=coords_source,
+            input_stamp=read_parquet_stamp(path), stamped_by="run_tracer.py")
+    except CalibrationError as e:
+        raise SystemExit(f"Coordinate calibration: {e}") from None
+    log.info("Coordinates: input xy=%s z=%s; calibration source=%s; "
+             "applied xy=%s, z=%s",
+             coord_receipt["input_units"]["xy"], coord_receipt["input_units"]["z"],
+             coord_receipt["calibration_source"],
+             coord_receipt["applied"]["xy"].get("formula", coord_receipt["applied"]["xy"]["op"]),
+             coord_receipt["applied"]["z"].get("formula", coord_receipt["applied"]["z"]["op"]))
     if "z" not in df.columns:
         df["z"] = np.float32(0.0)
     if "overlaps_nucleus" not in df.columns:
@@ -247,7 +280,7 @@ def load_transcripts(path: Path, log: logging.Logger) -> pd.DataFrame:
     log.info("Loaded: %d rows, %d genes, assigned=%d, unassigned=%d",
              len(df), df["feature_name"].nunique(),
              n_assigned, len(df) - n_assigned)
-    return df
+    return df, coord_receipt
 
 
 def load_npmi_panel(path: Path, log: logging.Logger) -> pd.DataFrame:
@@ -286,14 +319,23 @@ def run_tracer(df: pd.DataFrame, panel: pd.DataFrame, *,
                platform_name: str, user_config: Path | None,
                pmi_threshold_override: float | None,
                g_z_um_override: float | str | None,
-               log: logging.Logger):
-    """Apply config + invoke the canonical SEG pipeline."""
+               log: logging.Logger,
+               coordinates=None,
+               diagnostics: dict | None = None):
+    """Apply config + invoke the canonical SEG pipeline.
+
+    ``coordinates`` is the resolved [coordinates] declaration (CLI over
+    config) that load_transcripts applied; it is stored on cfg so the
+    receipt shows it. ``diagnostics`` collects the resolved z-bin.
+    """
     import dataclasses
     from tracer.config import load_config
     import tracer.pipeline as pipeline
 
     # Layering inside load_config: default < platform preset < user config.
     cfg = load_config(path=user_config, platform=platform_name)
+    if coordinates is not None:
+        cfg = dataclasses.replace(cfg, coordinates=coordinates)
     if g_z_um_override is not None:
         # Highest-precedence layer: explicit CLI override of stitch.g_z_um
         # (explicit CLI > user config > platform preset > default). The
@@ -316,8 +358,12 @@ def run_tracer(df: pd.DataFrame, panel: pd.DataFrame, *,
              len(df), len(panel))
     os.environ.setdefault("TRACER_STAGE_VERBOSE", "1")
     df_out, progression = pipeline.run_segmented_pipeline(
-        df=df, npmi_panel=panel, cfg=cfg,
+        df=df, npmi_panel=panel, cfg=cfg, diagnostics=diagnostics,
     )
+    if diagnostics is not None and "z_binning" in diagnostics:
+        log.info("Stitch z-bin: g_z_um=%s (%s)",
+                 diagnostics["z_binning"]["resolved_g_z_um"],
+                 diagnostics["z_binning"]["mode"])
     log.info("TRACER done — %d final stages; output rows=%d",
              len(progression), len(df_out))
     return df_out, progression, cfg
@@ -451,6 +497,8 @@ def write_outputs(
     outdir: Path, sample_name: str, args, cfg, panel_path: Path,
     transcripts_path: Path, progression: list[dict[str, Any]],
     timer: Timer, log: logging.Logger,
+    coordinates: dict[str, Any] | None = None,
+    z_binning: dict[str, Any] | None = None,
 ) -> None:
     outputs = outdir / "outputs"
     outputs.mkdir(parents=True, exist_ok=True)
@@ -470,6 +518,10 @@ def write_outputs(
         "sample_name": sample_name,
         "platform_name": args.platform,
         "config": cfg_to_dict(cfg),
+        # Input units, calibration + source, the conversion applied, and the
+        # Stitch z-bin actually used (cfg.stitch.g_z_um may say "auto").
+        "coordinates": coordinates,
+        "z_binning": z_binning,
         "inputs": {
             "transcripts": str(transcripts_path),
             "transcripts_sha1": file_sha1(transcripts_path),
@@ -510,6 +562,19 @@ def write_outputs(
         f"- PMI threshold override: {args.pmi_threshold}",
         f"- Transcripts: `{transcripts_path}` ({len(df_post):,} final rows)",
         f"- NPMI panel: `{panel_path}`",
+    ]
+    if coordinates:
+        md_lines.append(
+            f"- Coordinates: input xy={coordinates['input_units']['xy']}, "
+            f"z={coordinates['input_units']['z']}; calibration "
+            f"`{coordinates['calibration_source']}`; applied xy "
+            f"`{coordinates['applied']['xy'].get('formula', coordinates['applied']['xy']['op'])}`, "
+            f"z `{coordinates['applied']['z'].get('formula', coordinates['applied']['z']['op'])}`")
+    if z_binning:
+        md_lines.append(
+            f"- Stitch z-bin: g_z_um = {z_binning['resolved_g_z_um']:g} µm "
+            f"(requested {z_binning['requested_g_z_um']!r}; {z_binning['mode']})")
+    md_lines += [
         "",
         "## Stage progression",
         "",
@@ -566,8 +631,21 @@ def main() -> int:
 
     timer = Timer(log)
 
+    # Coordinate units: [coordinates] from defaults < platform < user config,
+    # then the CLI flags. Applied once, at load.
+    from tracer.config import load_config
+    from tracer.units import CalibrationError, coordinates_from_args
+    try:
+        coords, coords_source = coordinates_from_args(
+            args, load_config(path=args.user_config,
+                              platform=args.platform).coordinates)
+    except (CalibrationError, ValueError) as e:
+        raise SystemExit(f"Coordinate calibration: {e}") from None
+    diagnostics: dict[str, Any] = {}
+
     with timer.time("load_transcripts"):
-        df = load_transcripts(args.transcripts, log)
+        df, coord_receipt = load_transcripts(
+            args.transcripts, log, coords=coords, coords_source=coords_source)
     with timer.time("load_npmi"):
         panel = load_npmi_panel(args.npmi, log)
     with timer.time("run_pipeline"):
@@ -578,6 +656,8 @@ def main() -> int:
             pmi_threshold_override=args.pmi_threshold,
             g_z_um_override=args.g_z_um,
             log=log,
+            coordinates=coords,
+            diagnostics=diagnostics,
         )
     with timer.time("build_outputs"):
         scores, adata = build_outputs(
@@ -593,6 +673,8 @@ def main() -> int:
             args=args, cfg=cfg,
             panel_path=args.npmi, transcripts_path=args.transcripts,
             progression=progression, timer=timer, log=log,
+            coordinates=coord_receipt,
+            z_binning=diagnostics.get("z_binning"),
         )
 
     log.info("DONE. Total wall: %.1fs",

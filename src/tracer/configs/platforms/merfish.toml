@@ -3,21 +3,31 @@
 # Layered on top of `defaults.toml` via:
 #   load_config(platform="merfish")
 #
-# Why this preset exists
-# ----------------------
-# MERFISH images DISCRETE z-planes. On the mouse-ileum ROI used for
-# benchmarking the planes are spaced 1.5 µm apart (z ∈ {2.5, 4.0, 5.5,
-# ... 14.5}, 9 planes, all in µm). With the global default
-# `stitch.g_z_um = 1.0` µm and `z_neighbor_depth = 1`, adjacent planes
-# land up to TWO z-bins apart (floor(2.5/1)=2 vs floor(4.0/1)=4) and so
-# never connect — every z-plane becomes an island and within-cell z
-# structure is lost. Setting g_z_um to the 1.5 µm plane spacing makes
-# consecutive planes map to consecutive z-bins (one bin apart), so they
-# connect at `z_neighbor_depth = 1`.
+# Units: read before running a raw export
+# ---------------------------------------
+# MERSCOPE `global_x` / `global_y` are microns and need nothing. `global_z` is
+# a z-plane INDEX, not microns: declare it with the plane spacing of YOUR
+# acquisition,
+#   --z-units plane --z-step-um <um>
+# Coordinates in mosaic PIXELS (e.g. from an image-space segmentation) map
+# into microns with the vendor transform shipped with the run:
+#   --xy-units px --pixel-transform <run>/images/micron_to_mosaic_pixel_transform.csv
+# The same keys work under [coordinates] in a user TOML. This preset sets
+# none of them; TRACER never infers a calibration from the platform name.
+# Tables already in microns (e.g. the benchmark ROI) need no declaration.
 #
-# Set `g_z_um = "auto"` instead to derive this from the observed z
-# distribution at run time (recommended if plane spacing varies across
-# MERFISH panels / acquisitions).
+# z-bin
+# -----
+# MERFISH images DISCRETE z-planes. Once z is in microns, `g_z_um = "auto"`
+# sets the z-bin to the observed plane spacing, so consecutive planes sit
+# exactly one bin apart and connect at `z_neighbor_depth = 1`. On the
+# mouse-ileum benchmark ROI (9 planes, 1.5 µm apart) it resolves to 1.5 µm,
+# the value this preset used to hard-code. The default 1.0 µm would put
+# adjacent planes up to TWO bins apart (floor(2.5/1) = 2 vs floor(4.0/1) = 4)
+# so they never connect; a fixed 1.5 fails the same way on an acquisition
+# with a wider step. "auto" only MEASURES spacing in micron data; it does not
+# convert plane indices, which is why they must be declared above. An
+# explicit --g-z-um or user-config value still wins.
 
 [bootstrap]
 # Vizgen exports a nucleus-overlap flag; restrict the PMI panel to
@@ -26,5 +36,5 @@ nuclear_only = true
 nucleus_col = "overlaps_nucleus"
 
 [stitch]
-# z-plane spacing on MERFISH ≈ 1.5 µm. See header.
-g_z_um = 1.5
+# Discrete planes: bin at the measured plane spacing. See header.
+g_z_um = "auto"

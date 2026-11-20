@@ -42,7 +42,8 @@ _log = logging.getLogger("tracer.pipeline")
 
 
 def _resolve_stitch_g_z(df: pd.DataFrame, cfg, auto_Gz: float,
-                        coord_cols=("x", "y", "z")) -> tuple[float, int]:
+                        coord_cols=("x", "y", "z"),
+                        diagnostics: dict | None = None) -> tuple[float, int]:
     """Resolve the Stitch z-bin (``g_z_um``) and z-neighbor depth from the
     config request against the observed z distribution.
 
@@ -52,6 +53,11 @@ def _resolve_stitch_g_z(df: pd.DataFrame, cfg, auto_Gz: float,
     and the reason it was chosen are logged; any warnings (e.g. an explicit
     g_z_um smaller than the platform's z-plane spacing) are surfaced at
     WARNING level so misconfigured discrete-plane runs are not silent.
+
+    The z values must already be microns (``tracer.units.to_microns``):
+    "auto" measures plane spacing, it does not convert plane indices. When
+    ``diagnostics`` is given, the resolution is recorded under
+    ``diagnostics["z_binning"]`` for the run receipt.
     """
     z_col = coord_cols[2] if len(coord_cols) >= 3 else None
     z_vals = df[z_col].to_numpy() if (z_col and z_col in df.columns) else None
@@ -69,6 +75,19 @@ def _resolve_stitch_g_z(df: pd.DataFrame, cfg, auto_Gz: float,
         if res.z_neighbor_depth_override is not None
         else cfg.stitch.z_neighbor_depth
     )
+    if diagnostics is not None:
+        diagnostics["z_binning"] = {
+            "requested_g_z_um": cfg.stitch.g_z_um,
+            "resolved_g_z_um": float(g_z),
+            "z_neighbor_depth": int(z_depth),
+            "mode": res.mode,
+            "reason": res.reason,
+            "n_planes": int(res.n_planes),
+            "median_plane_spacing_um": (
+                float(res.median_spacing)
+                if np.isfinite(res.median_spacing) else None),
+            "warnings": list(res.warnings),
+        }
     return float(g_z), int(z_depth)
 
 
@@ -1578,6 +1597,7 @@ def _resolve_pipeline_cfg(cfg):
 def run_segmented_pipeline(df: pd.DataFrame,
                            npmi_panel: pd.DataFrame,
                            cfg=None,
+                           diagnostics: dict | None = None,
                            ) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
     """Run the segmented workflow on ``df`` (must have ``cell_id`` set).
 
@@ -1593,6 +1613,12 @@ def run_segmented_pipeline(df: pd.DataFrame,
         Stitch, Demote, and Final Rescue call sites. Knobs not yet in
         `PipelineConfig` (Phase-1 prune, Group, post-group-pass-count)
         continue to read from module globals.
+    diagnostics : dict | None, optional
+        When given, filled with run facts that are not stage counts, e.g.
+        ``diagnostics["z_binning"]`` (requested and resolved Stitch z-bin).
+
+    Coordinates are microns. Convert pixel or z-plane-index input with
+    ``tracer.units.to_microns`` first; this function never rescales.
 
     Returns
     -------
@@ -1902,7 +1928,8 @@ def run_segmented_pipeline(df: pd.DataFrame,
     # after Post-Group Rescue); previous code aliased this as
     # "post_stage4", a stale name from the numbered-stages era.
     _stitch_g_z, _stitch_z_depth = _resolve_stitch_g_z(
-        df_grouped, cfg, auto_Gz, coord_cols=("x", "y", "z"))
+        df_grouped, cfg, auto_Gz, coord_cols=("x", "y", "z"),
+        diagnostics=diagnostics)
     df_stitched, _ = apply_stitching_to_transcripts_memory_efficient(
         df_final=df_grouped, aux=aux,
         entity_col="tracer_id", gene_col="feature_name",
@@ -1990,6 +2017,7 @@ def run_segmented_pipeline(df: pd.DataFrame,
 
 def run_noseg_pipeline(df: pd.DataFrame, npmi_panel: pd.DataFrame,
                        cfg=None,
+                       diagnostics: dict | None = None,
                        ) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
     """Run the no-segmentation workflow on ``df``.
 
@@ -2012,6 +2040,8 @@ def run_noseg_pipeline(df: pd.DataFrame, npmi_panel: pd.DataFrame,
         Phase-B config. See `run_segmented_pipeline` for semantics —
         when ``None`` (default) a config is built from module globals
         to preserve today's behavior bit-exactly.
+    diagnostics : dict | None, optional
+        As for `run_segmented_pipeline`.
     """
     cfg = _resolve_pipeline_cfg(cfg)
     _set_admit_independent(True)  # reset toggle at entry: never inherit a leaked flag from a prior failed run (Copilot review)
@@ -2135,7 +2165,8 @@ def run_noseg_pipeline(df: pd.DataFrame, npmi_panel: pd.DataFrame,
     # NOSEG has no within-cell prior, so the legacy auto_Gz estimator is
     # unavailable; the resolver falls back to 1.0 µm when g_z_um is null.
     _stitch_g_z, _stitch_z_depth = _resolve_stitch_g_z(
-        df_grouped, cfg, auto_Gz=1.0, coord_cols=("x", "y", "z"))
+        df_grouped, cfg, auto_Gz=1.0, coord_cols=("x", "y", "z"),
+        diagnostics=diagnostics)
     df_stitched, _ = apply_stitching_to_transcripts_memory_efficient(
         df_final=df_grouped, aux=aux,
         entity_col="tracer_id", gene_col="feature_name",

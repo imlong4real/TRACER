@@ -602,10 +602,11 @@ class StitchConfig:
     # z bin size (µm). Accepts:
     #   - a positive float (explicit; the historical Xenium default 1.0),
     #   - the string "auto" → resolved from the observed z-plane spacing at
-    #     run time (see tracer.zscale.resolve_g_z_um); required for
-    #     discrete-plane platforms (CosMx 0.8 µm, MERFISH 1.5 µm),
+    #     run time (see tracer.zscale.resolve_g_z_um); what discrete-plane
+    #     platforms need. z must already be microns: "auto" sizes bins, it
+    #     does not convert plane indices (that is CoordinatesConfig's job),
     #   - None → legacy within-cell auto_Gz estimator.
-    # Platform presets set this (cosmx=0.8, merfish=1.5); Xenium/Atera keep 1.0.
+    # The cosmx and merfish presets use "auto"; Xenium/Atera keep 1.0.
     g_z_um: float | str | None = 1.0
     z_neighbor_depth: int = 1                   # ±depth z bins
     neighborhood: Literal["4", "8"] = "8"       # xy Moore reach
@@ -800,6 +801,94 @@ class BootstrapConfig:
         return (self.tau_low, self.tau_high)
 
 
+COORD_XY_UNITS = ("um", "mm", "nm", "px")
+COORD_Z_UNITS = ("um", "mm", "nm", "px", "plane")
+
+
+def _positive_finite(name: str, v: Any) -> float:
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must be a positive number; got {v!r}") from None
+    if not (math.isfinite(f) and f > 0.0):
+        raise ValueError(f"{name} must be a positive, finite number; got {v!r}")
+    return f
+
+
+@dataclass(frozen=True)
+class CoordinatesConfig:
+    """Units of the INPUT transcript coordinates, and their calibration.
+
+    Every spatial threshold in TRACER is in microns (``*_bin_size_um``,
+    ``stitch.dist_threshold_um``, ``split_phase1.dz_threshold_um``, ...). The
+    entry points convert the input ONCE into that micron frame before the
+    pipeline runs, using this declaration (``tracer.units.to_microns``). The
+    pipeline itself never rescales.
+
+    The default describes what TRACER has always assumed: x, y and z already
+    in microns. That holds for 10x Xenium/Atera, for MERSCOPE ``global_x`` /
+    ``global_y``, and for any table standardized by ``preprocess_xenium.py``.
+    Raw CosMx ``*_px`` coordinates and z-plane indices (CosMx ``z``, MERSCOPE
+    ``global_z``) are not microns and must be declared.
+
+    Calibration is never inferred from coordinate ranges or from the platform
+    name. Supply ``um_per_px`` from the instrument's documentation or run
+    metadata, or a vendor transform file. Completeness and contradictions are
+    checked when the declaration is resolved against an input
+    (``tracer.units.resolve_calibration``), not here, so a CLI flag can
+    complete a partial TOML declaration.
+    """
+
+    #: Units of x/y. "px" needs ``um_per_px`` or ``pixel_transform``.
+    xy_units: Literal["um", "mm", "nm", "px"] = "um"
+    #: Units of z. "plane" (integer z-plane index) needs ``z_step_um``;
+    #: "px" needs ``z_um_per_px``.
+    z_units: Literal["um", "mm", "nm", "px", "plane"] = "um"
+    #: Microns per pixel for xy: one number, or [x, y] for anisotropic pixels.
+    um_per_px: float | tuple[float, float] | None = None
+    #: Microns per pixel along z (voxel data with z in pixels).
+    z_um_per_px: float | None = None
+    #: Microns between consecutive z-planes (z given as a plane index).
+    z_step_um: float | None = None
+    #: Vendor 3x3 micron->pixel affine, e.g. MERSCOPE
+    #: ``images/micron_to_mosaic_pixel_transform.csv``. Inverted to map
+    #: pixel x/y into microns (scale, rotation and offset).
+    pixel_transform: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.xy_units not in COORD_XY_UNITS:
+            raise ValueError(
+                f"coordinates.xy_units must be one of {COORD_XY_UNITS}; "
+                f"got {self.xy_units!r}"
+            )
+        if self.z_units not in COORD_Z_UNITS:
+            raise ValueError(
+                f"coordinates.z_units must be one of {COORD_Z_UNITS}; "
+                f"got {self.z_units!r}"
+            )
+        if self.um_per_px is not None:
+            v = self.um_per_px
+            if isinstance(v, (list, tuple)):
+                if len(v) != 2:
+                    raise ValueError(
+                        "coordinates.um_per_px takes one number or [x, y]; "
+                        f"got {list(v)!r}"
+                    )
+                v = (_positive_finite("coordinates.um_per_px[0]", v[0]),
+                     _positive_finite("coordinates.um_per_px[1]", v[1]))
+            else:
+                f = _positive_finite("coordinates.um_per_px", v)
+                v = (f, f)
+            object.__setattr__(self, "um_per_px", v)
+        for name in ("z_um_per_px", "z_step_um"):
+            val = getattr(self, name)
+            if val is not None:
+                object.__setattr__(
+                    self, name, _positive_finite(f"coordinates.{name}", val))
+        if self.pixel_transform is not None and not str(self.pixel_transform).strip():
+            raise ValueError("coordinates.pixel_transform must be a file path")
+
+
 # ---------------------------------------------------------------------------
 # Top-level config
 # ---------------------------------------------------------------------------
@@ -929,6 +1018,7 @@ class PipelineConfig:
     )
     bootstrap: BootstrapConfig = field(default_factory=BootstrapConfig)
     panel: PanelConfig = field(default_factory=PanelConfig)
+    coordinates: CoordinatesConfig = field(default_factory=CoordinatesConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -952,6 +1042,7 @@ _SECTION_TO_CLS: dict[str, type] = {
     "final_rescue": RescueConfig,
     "bootstrap": BootstrapConfig,
     "panel": PanelConfig,
+    "coordinates": CoordinatesConfig,
 }
 
 
@@ -1174,6 +1265,7 @@ __all__ = [
     "GroupConfig",
     "DemoteConfig",
     "BootstrapConfig",
+    "CoordinatesConfig",
     "PipelineConfig",
     "load_config",
     "to_dict",

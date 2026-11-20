@@ -185,9 +185,12 @@ binning transcripts in z. Imaging platforms differ in how z is sampled:
 | Platform | z sampling | `g_z_um` |
 |---|---|---|
 | Xenium / Atera | near-continuous optical depth (~20 µm span) | `1.0` |
-| CosMx | discrete planes ~0.8 µm apart | `0.8` |
-| MERFISH | discrete planes ~1.5 µm apart | `1.5` |
+| CosMx | discrete planes (0.8 µm on the benchmark ROI) | `"auto"` → measured plane spacing |
+| MERFISH | discrete planes (1.5 µm on the benchmark ROI) | `"auto"` → measured plane spacing |
 | VisiumHD / 2D | no z | auto-degrades to 2D |
+
+`"auto"` measures the spacing of z that is already in microns; it does not
+convert plane indices (see *Coordinate units* below).
 
 Pick the right value three ways, in increasing precedence:
 
@@ -201,6 +204,39 @@ python scripts/run_tracer.py ... --g-z-um auto
 # 3. explicit override (wins over user config, preset, and default)
 python scripts/run_tracer.py ... --g-z-um 1.5
 ```
+
+#### Coordinate units
+
+Every spatial threshold in TRACER is in microns. Input already in microns
+(Xenium/Atera, MERSCOPE `global_x`/`global_y`, any table written by
+`preprocess_xenium.py`) needs nothing. Pixels and z-plane indices must be
+declared with a calibration from your instrument or run metadata. TRACER
+converts them once, at load, and never guesses a scale from coordinate ranges
+or the platform name.
+
+```bash
+# CosMx flat file: x/y in pixels, z a plane index (placeholders: use your run's values)
+python scripts/run_tracer.py ... --platform cosmx \
+  --xy-units px --um-per-px <um/px> --z-units plane --z-step-um <um>
+
+# MERSCOPE: global_z is a plane index; mosaic-pixel x/y take the vendor transform
+python scripts/run_tracer.py ... --platform merfish --z-units plane --z-step-um <um>
+python scripts/run_tracer.py ... --platform merfish --xy-units px \
+  --pixel-transform <run>/images/micron_to_mosaic_pixel_transform.csv
+
+# or convert once while standardizing; the output is stamped as microns
+python scripts/preprocess_xenium.py --input tx.parquet --out std.parquet \
+  --xy-units px --um-per-px <um/px> --z-units plane --z-step-um <um>
+```
+
+The same keys go under `[coordinates]` in a `--user-config` TOML: `xy_units`,
+`um_per_px` (one value or `[x, y]`), `z_units`, `z_step_um`, `z_um_per_px`,
+`pixel_transform`. Missing or contradictory calibration stops the run with the
+fix spelled out, and a table already stamped as microns refuses a second
+conversion. `config_receipt.json` and `preprocessing_summary.json` record the
+input units, the calibration and its source, the conversion applied, and the
+z-bin. In Python, call `tracer.units.to_microns(df, CoordinatesConfig(...))`
+before `run_segmented_pipeline`.
 
 ## Inputs
 

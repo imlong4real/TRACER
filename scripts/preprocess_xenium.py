@@ -7,6 +7,13 @@ standardized parquet whose columns are::
 
     x, y, z, feature_name, cell_id, transcript_id, qv, overlaps_nucleus
 
+Coordinates are written in microns. Input already in microns (Xenium
+``x_location``/``y_location``/``z_location``, canonical ``x/y/z``) passes
+through unchanged; pixel or z-plane-index input must be declared with its
+calibration (``--xy-units px --um-per-px ...``, ``--z-units plane
+--z-step-um ...``) and is converted once, here. The output parquet carries a
+``tracer.coordinates`` stamp so ``run_tracer.py`` will not convert it again.
+
 The script never drops unassigned transcripts unless ``--drop-unassigned`` is
 explicitly passed. ``cell_id`` is cast to ``str`` and sentinel labels
 ("UNASSIGNED", negative integers, blank, etc.) are mapped to the canonical
@@ -47,6 +54,10 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 from fastparquet import ParquetFile as FastParquetFile
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT / "src"))
 
 
 # ---------------------------------------------------------------------------
@@ -89,7 +100,7 @@ def log(msg: str, *, flush: bool = True) -> None:
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
-def parse_args() -> argparse.Namespace:
+def parse_args(argv=None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -120,7 +131,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--dry-run", action="store_true",
                    help="Inspect schema, run pass 1, print what would be "
                         "written. Do NOT write parquet/summaries.")
-    return p.parse_args()
+    from tracer.units import add_coordinate_args
+    add_coordinate_args(p)
+    return p.parse_args(argv)
 
 
 # ---------------------------------------------------------------------------
@@ -314,8 +327,14 @@ def _standardize_chunk(
     control_regex: re.Pattern,
     drop_unassigned: bool,
     next_transcript_id_start: int,
+    coords=None,
+    z_tracker: "_ZPlaneTracker | None" = None,
 ) -> tuple[pd.DataFrame, int]:
-    """Apply filters + rename + standardize one chunk."""
+    """Apply filters + rename + standardize one chunk.
+
+    ``coords`` is the input-unit declaration; every chunk gets the same
+    conversion, so the output is in microns throughout.
+    """
     keep = _qv_mask(chunk, qv_min) & _control_mask(
         chunk, remove_control=remove_control,
         control_regex=control_regex, has_is_gene=schema.has_is_gene,
@@ -328,6 +347,14 @@ def _standardize_chunk(
     coord_rename = {v: k for k, v in schema.coord_cols.items() if k != v}
     if coord_rename:
         chunk = chunk.rename(columns=coord_rename)
+
+    # Units: convert to microns once, before the float32 cast and before a
+    # missing z is synthesized (2D input stays 2D).
+    if coords is not None:
+        from tracer.units import to_microns
+        chunk, _ = to_microns(chunk, coords, stamped_by="preprocess_xenium.py")
+    if z_tracker is not None and "z" in chunk.columns:
+        z_tracker.update(chunk["z"].to_numpy())
 
     # Ensure canonical column set
     if "z" not in chunk.columns:
@@ -367,6 +394,52 @@ def _standardize_chunk(
     return chunk[out_cols].reset_index(drop=True), next_transcript_id_start
 
 
+class _ZPlaneTracker:
+    """Distinct z values (µm) seen while streaming, capped.
+
+    Enough to say what ``stitch.g_z_um = "auto"`` will resolve to without
+    holding the column: discrete-plane data has a handful of values, and
+    past the cap z is treated as continuous, exactly as ``tracer.zscale``
+    does.
+    """
+
+    def __init__(self, cap: int = 64):
+        self.cap = cap
+        self.values: set[float] = set()
+        self.overflow = False
+
+    def update(self, z) -> None:
+        if self.overflow:
+            return
+        u = np.unique(np.asarray(z, dtype=np.float32))
+        u = u[np.isfinite(u)]
+        if len(u) > self.cap:              # continuous: stop collecting
+            self.overflow = True
+            return
+        self.values.update(float(v) for v in u)
+        if len(self.values) > self.cap:
+            self.overflow = True
+
+    def report(self) -> dict[str, Any]:
+        from tracer.zscale import resolve_g_z_um
+        if not self.values and not self.overflow:
+            return {"n_planes": 0, "g_z_um_if_auto": None, "mode": "no z"}
+        # Past the cap any cap+1 distinct values resolve as continuous z, so
+        # zscale itself supplies the continuous default.
+        vals = (np.arange(self.cap + 1, dtype=np.float64) if self.overflow
+                else np.array(sorted(self.values)))
+        res = resolve_g_z_um(vals, "auto", max_discrete_planes=self.cap)
+        return {
+            "n_planes": (f">{self.cap} (continuous)" if self.overflow
+                         else res.n_planes),
+            "median_plane_spacing_um": (
+                None if self.overflow or not np.isfinite(res.median_spacing)
+                else float(res.median_spacing)),
+            "g_z_um_if_auto": res.g_z_um,
+            "mode": res.mode,
+        }
+
+
 def pass2_write(
     fp: FastParquetFile,
     out_path: Path,
@@ -377,6 +450,9 @@ def pass2_write(
     control_regex: re.Pattern,
     drop_unassigned: bool,
     progress_every: int,
+    coords=None,
+    stamp: dict | None = None,
+    z_tracker: _ZPlaneTracker | None = None,
 ) -> dict[str, int]:
     rg_seen = 0
     n_rg = len(fp.row_groups)
@@ -397,14 +473,20 @@ def pass2_write(
                 remove_control=remove_control, control_regex=control_regex,
                 drop_unassigned=drop_unassigned,
                 next_transcript_id_start=next_tid,
+                coords=coords, z_tracker=z_tracker,
             )
             if std.empty:
                 continue
+            std.attrs = {}
             tbl = pa.Table.from_pandas(std, preserve_index=False)
             if writer is None:
-                writer = pq.ParquetWriter(str(out_path), tbl.schema,
+                out_schema = tbl.schema
+                if stamp is not None:
+                    from tracer.units import schema_with_stamp
+                    out_schema = schema_with_stamp(out_schema, stamp)
+                writer = pq.ParquetWriter(str(out_path), out_schema,
                                           compression="snappy")
-            writer.write_table(tbl)
+            writer.write_table(tbl.replace_schema_metadata(writer.schema.metadata))
             total_written += len(std)
             total_assigned += int((std["cell_id"] != "-1").sum())
             if rg_seen % progress_every == 0:
@@ -433,6 +515,7 @@ def write_summaries(
     pass2_counts: dict[str, int] | None,
     gene_counts: dict[str, int],
     control_counts: dict[str, int],
+    coordinates: dict[str, Any] | None = None,
 ) -> None:
     summary_dir.mkdir(parents=True, exist_ok=True)
 
@@ -478,6 +561,9 @@ def write_summaries(
         "control_regex": args.control_regex,
         "drop_unassigned": bool(args.drop_unassigned),
         "schema": schema.report(),
+        # Input units, calibration + source, the conversion applied, and the
+        # z-plane spacing (µm) that stitch.g_z_um = "auto" will measure.
+        "coordinates": coordinates,
         "canonical_columns_written": [
             c for c in CANONICAL_COLUMNS
             if (c in ("x", "y", "feature_name", "cell_id"))
@@ -509,8 +595,49 @@ def write_summaries(
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
-def main() -> int:
-    args = parse_args()
+def _input_stamp(path: Path) -> dict | None:
+    """Coordinate stamp of an input that TRACER already standardized."""
+    from tracer.units import read_parquet_stamp
+    try:
+        return read_parquet_stamp(path)
+    except Exception:  # footer pyarrow cannot read: no stamp to honour
+        return None
+
+
+def _resolve_coordinates(args, schema: InputSchema):
+    """The input-unit declaration (CLI over defaults), validated now so a
+    missing or contradictory calibration fails before any streaming."""
+    from tracer.units import (CalibrationError, coordinates_from_args,
+                              resolve_calibration)
+    coords, source = coordinates_from_args(args)
+    try:
+        cal = resolve_calibration(coords, source=source)
+        prior = _input_stamp(args.input)
+        if prior and prior.get("frame") == "um" and not cal.is_identity:
+            raise CalibrationError(
+                f"{args.input} is already stamped as microns (by "
+                f"{prior.get('stamped_by', 'an earlier conversion')}); "
+                f"declaring xy_units = {cal.xy_units!r}, z_units = "
+                f"{cal.z_units!r} would convert it a second time.")
+        if cal.z_units != "um" and not schema.has_z:
+            raise CalibrationError(
+                f"z_units = {cal.z_units!r} was declared but the input has no "
+                f"z column. For 2D input leave z_units at its default.")
+    except CalibrationError as e:
+        raise SystemExit(f"Coordinate calibration: {e}") from None
+    stamp = {
+        "frame": "um",
+        "input_units": {"xy": cal.xy_units,
+                        "z": cal.z_units if schema.has_z else None},
+        "calibration_source": cal.source,
+        "applied": {"xy": cal.describe_xy(), "z": cal.describe_z(schema.has_z)},
+        "stamped_by": "preprocess_xenium.py",
+    }
+    return coords, cal, stamp
+
+
+def main(argv=None) -> int:
+    args = parse_args(argv)
 
     if not args.input.exists():
         raise SystemExit(f"Input not found: {args.input}")
@@ -526,6 +653,12 @@ def main() -> int:
     fp = FastParquetFile(str(args.input))
     schema = detect_schema(fp.columns)
     log(f"Schema : {schema.report()}")
+    coords, cal, stamp = _resolve_coordinates(args, schema)
+    log(f"Coords : input xy={stamp['input_units']['xy']} "
+        f"z={stamp['input_units']['z']}; calibration={cal.source}; "
+        f"xy {stamp['applied']['xy'].get('formula', stamp['applied']['xy']['op'])}; "
+        f"z {stamp['applied']['z'].get('formula', stamp['applied']['z']['op'])}")
+    z_tracker = _ZPlaneTracker()
 
     gene_counts, control_counts, pass1_counts = pass1_collect(
         fp,
@@ -554,8 +687,14 @@ def main() -> int:
             control_regex=control_regex,
             drop_unassigned=args.drop_unassigned,
             progress_every=args.row_group_progress,
+            coords=coords, stamp=stamp, z_tracker=z_tracker,
         )
 
+    coordinates = {
+        **stamp,
+        "calibration": cal.detail,
+        "z_planes_um": z_tracker.report() if pass2_counts is not None else None,
+    }
     write_summaries(
         summary_dir,
         args=args,
@@ -564,6 +703,7 @@ def main() -> int:
         pass2_counts=pass2_counts,
         gene_counts=gene_counts,
         control_counts=control_counts,
+        coordinates=coordinates,
     )
     log(f"Summaries → {summary_dir}/{{preprocessing_summary.json, "
         f"gene_counts.tsv, transcript_assignment_summary.tsv}}")
