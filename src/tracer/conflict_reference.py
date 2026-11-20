@@ -151,6 +151,14 @@ def build_depth_corrected_reference(
     -------
     ReferenceResult with ``edges`` (``gene_i, gene_j, O, E, z, PMI, cPMI, cNPMI``)
     and an ``meta`` audit dict.
+
+    ``edges["PMI"]`` is the NAIVE marginal-product estimator and the pipeline
+    reads the ``PMI`` column, so ``edges`` is not a TRACER panel as returned.
+    These defaults (count1 presence, total_counts covariate, every cell) are
+    the estimator's, not the reference recipe's; build reference panels with
+    ``tracer.panel_builder.build_reference_panels`` (CLI
+    ``scripts/build_panels.py``), which applies the recipe and promotes cPMI
+    into ``PMI``.
     """
     t0 = time.time()
     X, gene_names = _counts_and_genes(adata, counts, genes, layer=layer, var_symbol=var_symbol)

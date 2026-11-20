@@ -260,9 +260,13 @@ def _apply_global_post_tile_stitch(
     ).to_numpy()
     t_disambig = time.time() - t0
 
-    # 2. aux
+    # 2. aux -- the same column the per-tile pipeline reads: PMI when present
+    # (bootstrap and cPMI reference panels), NPMI only for legacy panels. The
+    # Stitch/Rescue calls below use the PMI-scale PMI_THR, so reading NPMI
+    # here mixed scales, and a cPMI panel (no NPMI column) raised KeyError.
     t = time.time()
-    aux = _build_aux_from_panel(npmi_panel, metric_col="NPMI")
+    metric_col = "PMI" if "PMI" in npmi_panel.columns else "NPMI"
+    aux = _build_aux_from_panel(npmi_panel, metric_col=metric_col)
     t_aux = time.time() - t
 
     # 3. Global Stitch
@@ -334,7 +338,8 @@ def run_segmented_pipeline_tiled(
         overlaps_nucleus, etc. — the same input run_segmented_pipeline
         expects.
     npmi_panel : DataFrame
-        PMI panel (gene_i, gene_j, NPMI). Shared across all tiles.
+        Gene-gene panel (gene_i, gene_j, PMI and/or NPMI). Shared across all
+        tiles; PMI is read when present, as in `run_segmented_pipeline`.
     n_tiles_xy : (int, int)
         Tile grid: n_x * n_y tiles.
     n_workers : int or None

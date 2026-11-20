@@ -54,41 +54,45 @@ panel files themselves):
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import sys
 from dataclasses import asdict
 from pathlib import Path
 
-import numpy as np
-import pandas as pd
-import scipy.sparse as sp
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from tracer.panel_builder import (  # noqa: E402
-    ARM_SPECS, EDGE_COLS, SUFFIX, balanced_draw, cp10k_log1p, grid_draw,
-    load_reference, load_transcripts_reference, log, read_panel_genes,
-    write_panel,
+    ARM_SPECS, build_reference_panels, load_reference,
+    load_transcripts_reference, log, read_panel_genes, _write_frame,
 )
 
-def _write_receipt(args, pcfg) -> None:
-    """Record the resolved recipe beside the panels.
 
-    A bare `.csv.gz` carries no provenance — which is how a panel built with
+def _write_receipt(args, pcfg, *, reference: dict, ps, files: list[Path]) -> Path:
+    """Record the resolved recipe and what was written, beside the panels.
+
+    A bare `.csv.gz` carries no provenance -- which is how a panel built with
     an off-by-2x top-k rule ended up mislabelled `topk1000`. This states the
-    recipe, which estimator sits in the `PMI` column, and the exact command.
+    recipe, which estimator sits in each file's `PMI` column (the only column
+    TRACER reads), which file is the TRACER input, the draw, the gene support,
+    the depth covariate, and the exact command. Rewritten on every run, so it
+    never describes an earlier build.
     """
-    import json, sys
-    from dataclasses import asdict
     out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
     rec = out / f"{args.prefix}panel_receipt.json"
-    if rec.exists():
-        return
+    tracer_inputs = set(ps.tracer_input.values())
     rec.write_text(json.dumps({
         "panel_preset": args._panel_preset,
         "effective_promote": args._effective_promote,
         "canonical_panel_substring":
             "_cpmi_" if args._effective_promote == "cPMI" else "_pmi_",
+        "outputs": [{"file": f.name, "pmi_column": ps.pmi_column[f.name[:-len(".csv.gz")]],
+                     "tracer_input": f.name[:-len(".csv.gz")] in tracer_inputs}
+                    for f in files],
+        "tracer_input": {arm: f"{name}.csv.gz" for arm, name in ps.tracer_input.items()},
         "counts_check": dict(_COUNTS_VERDICT) or None,
+        "reference": reference,
+        "recipe_facts": ps.facts,
         "resolved_panel_config": asdict(pcfg),
         "effective_args": {k: (str(v) if isinstance(v, Path) else v)
                            for k, v in vars(args).items()
@@ -96,7 +100,7 @@ def _write_receipt(args, pcfg) -> None:
         "command": " ".join(sys.argv),
     }, indent=2, default=str) + "\n")
     log(f"receipt -> {rec}")
-
+    return rec
 
 
 _COUNTS_VERDICT: dict = {}
@@ -185,6 +189,7 @@ def main():
                     help="X holds log1p(CP10k), not counts; invert it using "
                          "--depth-obs to recover integer counts.")
     args = ap.parse_args()
+    _COUNTS_VERDICT.clear()     # one verdict per run, even when called twice
 
     # ---- resolve the panel recipe -------------------------------------
     # The recipe lives in tracer/configs (defaults.toml [panel], plus
@@ -246,95 +251,43 @@ def main():
     if args.x_is_log1p_cp10k and not args.depth_obs:
         ap.error("--x-is-log1p-cp10k needs --depth-obs to invert the scaling")
 
-    from tracer.conflict_reference import build_depth_corrected_reference
     args.out.mkdir(parents=True, exist_ok=True)
 
     genes = read_panel_genes(args.panel_genes) if args.panel_genes else None
+    reference: dict = {}
     if args.transcripts:
         sub, keep, depth, obs = load_transcripts_reference(
             args.transcripts, nucleus_only=args.nucleus_only, panel_genes=genes)
+        reference = {"path": str(args.transcripts), "kind": "transcripts",
+                     "nucleus_only": bool(args.nucleus_only),
+                     "depth_source": "per-cell transcript count over the panel "
+                                     "genes (an in-situ panel has no off-panel "
+                                     "genes to sum)"}
     else:
         sub, keep, depth, obs = load_reference(
             args.h5ad, genes, depth_obs=args.depth_obs,
             x_is_log1p_cp10k=args.x_is_log1p_cp10k,
             exclude_obs=args.exclude_obs,
             allow_non_integral=args.allow_non_integral_counts,
-            verdict_out=_COUNTS_VERDICT)
+            verdict_out=_COUNTS_VERDICT, info_out=reference)
+        reference["kind"] = "h5ad"
 
-    if args.strategy == "vanilla":
-        # All cells, natural composition. Both estimators are written as
-        # separate files, each with its own value promoted into `PMI`.
-        # Honours --arms (it used to hardcode min_count=1 and ignore the
-        # flag). The count1 arm keeps the legacy `vanilla_spec_*` names so
-        # existing panels reproduce bit-identically; other arms are prefixed.
-        log(f"all {sub.shape[0]:,} cells, natural composition, {len(keep)} genes")
-        for arm in args.arms:
-            mc, use_log = ARM_SPECS[arm]
-            src = cp10k_log1p(sub, depth) if use_log else sub
-            if args.depth_metric == "n_genes":
-                cov = np.asarray((src >= (1 if use_log else mc)).sum(1)).ravel().astype(float)
-            else:
-                cov = depth
-            res = build_depth_corrected_reference(
-                counts=src, genes=np.asarray(keep, dtype=object), depth=cov,
-                min_count=1 if use_log else mc, min_det_cells=args.min_det_cells,
-                n_depth_bins=args.n_depth_bins, depth_metric=args.depth_metric,
-            top_k_per_gene=args.top_k_per_gene)
-            _write_receipt(args, pcfg)
-            tag = "" if arm == "count1" else f"{arm}_"
-            for name, est in (("vanilla_spec_cpmi", "cPMI"), ("vanilla_spec_pmi", "PMI")):
-                write_panel(res.edges, args.out, args.prefix + tag + name,
-                            promote=est, min_abs=args.min_abs_value)
-        return
+    # The CLI flags are folded into the recipe so the library runs exactly
+    # what the receipt records.
+    run_cfg = dataclasses.replace(
+        pcfg, strategy=args.strategy, arms=tuple(args.arms),
+        depth_metric=args.depth_metric, seed=args.seed,
+        min_det_cells=args.min_det_cells, n_depth_bins=args.n_depth_bins,
+        min_abs_value=args.min_abs_value, top_k_per_gene=args.top_k_per_gene)
+    ps = build_reference_panels(
+        sub, keep, depth, obs, cfg=run_cfg, celltype_col=args.celltype_col,
+        emit_cpmi=args.emit_cpmi, prefix=args.prefix)
 
-    if args.strategy.startswith("grid"):
-        ref = grid_draw(sub, depth, k=int(args.strategy[-1]), seed=args.seed)
-    else:
-        ct = obs[args.celltype_col].astype(str).to_numpy()
-        ref = balanced_draw(ct, strategy=args.strategy, seed=args.seed)
-    uniq = np.unique(ref)
-
-    for arm in args.arms:
-        mc, use_log = ARM_SPECS[arm]
-        src = cp10k_log1p(sub, depth) if use_log else sub
-        thr = 1 if use_log else mc
-
-        if args.strategy != "capped":
-            # Gene admission is decided on DISTINCT cells, then the builder is
-            # called with min_det_cells=1 so replication cannot manufacture
-            # support for a gene it would not otherwise clear.
-            det = np.asarray((src[uniq] >= thr).sum(0)).ravel()
-            ok = det >= args.min_det_cells
-            genes_ok = [g for g, k in zip(keep, ok) if k]
-            log(f"{arm}: {ok.sum()}/{len(keep)} genes clear "
-                f"min_det_cells={args.min_det_cells} on {len(uniq):,} unique cells")
-            counts, gene_names, min_det = src[ref][:, ok], genes_ok, 1
-        else:
-            counts, gene_names, min_det = src[ref], keep, args.min_det_cells
-
-        # `depth_metric` in the builder only fires when `depth` is None, and we
-        # always pass depth explicitly — so the covariate has to be built here
-        # or the flag is silently inert. n_genes = transcriptome complexity
-        # under THIS arm's presence rule; total_counts = true library size.
-        # After Xgt1 (a depth-RELATIVE presence threshold) the library-size
-        # null is largely redundant, which is what makes n_genes worth having.
-        if args.depth_metric == "n_genes":
-            cov = np.asarray((src >= thr).sum(1)).ravel().astype(float)
-        else:
-            cov = depth
-        res = build_depth_corrected_reference(
-            counts=counts, genes=np.asarray(gene_names, dtype=object),
-            depth=cov[ref], min_count=1 if use_log else mc,
-            min_det_cells=min_det, n_depth_bins=args.n_depth_bins,
-            depth_metric=args.depth_metric,
-            top_k_per_gene=args.top_k_per_gene)
-        _write_receipt(args, pcfg)
-        write_panel(res.edges, args.out, args.prefix + arm + SUFFIX[args.strategy],
-                    min_abs=args.min_abs_value)
-        if args.emit_cpmi:
-            cpmi_name = arm + SUFFIX[args.strategy].replace("_pmi_", "_cpmi_")
-            write_panel(res.edges, args.out, args.prefix + cpmi_name,
-                        promote="cPMI", min_abs=args.min_abs_value)
+    files = [_write_frame(frame, args.out, name) for name, frame in ps.panels.items()]
+    _write_receipt(args, run_cfg, reference=reference, ps=ps, files=files)
+    for arm, name in ps.tracer_input.items():
+        log(f"TRACER input ({arm}): {name}.csv.gz  [PMI column = "
+            f"{ps.pmi_column[name]}]")
 
 
 if __name__ == "__main__":

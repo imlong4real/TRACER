@@ -8,7 +8,9 @@ load inputs, run the canonical TRACER pipeline, write the standard outputs.
 
 What this script DOES:
     - Load a standardized transcripts parquet (produced by preprocess_xenium.py).
-    - Load an NPMI panel csv(.gz) (produced by build_npmi_from_scrna.py).
+    - Load a gene-gene panel csv(.gz). With an scRNA reference that is the
+      cPMI panel from build_panels.py (the ``*_cpmi_*`` file, cPMI promoted
+      into ``PMI``). The pipeline reads ``PMI``, else ``NPMI``.
     - Load + override platform config (tracer.config.load_config).
     - Run ``tracer.pipeline.run_segmented_pipeline``.
     - Compute per-cell purity/conflict via tracer.metrics.
@@ -21,7 +23,8 @@ What this script DOES:
         config_receipt.json
 
 What this script DOES NOT DO:
-    - Compute NPMI (use scripts/build_npmi_from_scrna.py).
+    - Build the panel (scripts/build_panels.py: depth-corrected cPMI reference
+      recipe; scripts/build_npmi_from_scrna.py: the bootstrap PMI/NPMI estimator).
     - Run ovrlpy (use scripts/run_ovrlpy.py).
     - Run RCTD (use scripts/run_rctd.R).
     - Label transfer (use scripts/label_transfer_spatial.py).
@@ -99,7 +102,9 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--transcripts", required=True, type=Path,
                    help="Standardized transcripts parquet from preprocess_xenium.py.")
     p.add_argument("--npmi", required=True, type=Path,
-                   help="NPMI panel csv(.gz) from build_npmi_from_scrna.py.")
+                   help="Gene-gene panel csv(.gz). From an scRNA reference: the "
+                        "*_cpmi_* panel written by build_panels.py (its PMI "
+                        "column holds cPMI). TRACER reads PMI, else NPMI.")
     p.add_argument("--pmi-threshold", type=float, default=None,
                    help="Override the in-pipeline PMI threshold (default: from "
                         "platform/user config).")
@@ -252,6 +257,16 @@ def load_transcripts(path: Path, log: logging.Logger) -> pd.DataFrame:
 
 def load_npmi_panel(path: Path, log: logging.Logger) -> pd.DataFrame:
     log.info("Loading NPMI panel: %s", path)
+    prov = panel_provenance(path)
+    if prov["receipt"] is not None:
+        log.info("Panel provenance: PMI column = %s (%s recipe, receipt %s)",
+                 prov["pmi_column"], prov["panel_preset"], prov["receipt"])
+        if not prov["tracer_input"]:
+            log.warning(
+                "This panel is NOT the TRACER input of its recipe: its PMI "
+                "column holds %s, while the recipe promotes %s (%s). TRACER "
+                "will consume %s.", prov["pmi_column"], prov["recipe_promote"],
+                prov["recipe_tracer_input"], prov["pmi_column"])
     df = pd.read_csv(path)
     if not {"gene_i", "gene_j"}.issubset(df.columns):
         raise SystemExit(
@@ -277,6 +292,26 @@ def load_npmi_panel(path: Path, log: logging.Logger) -> pd.DataFrame:
              "yes" if "PMI" in panel.columns else "no",
              "yes" if "NPMI" in panel.columns else "no")
     return panel
+
+
+def panel_provenance(path: Path) -> dict[str, Any]:
+    """Which estimator the panel's PMI column holds, per the build_panels.py
+    receipt beside it. The pipeline reads that column blindly, so this is the
+    only record of what a run actually consumed."""
+    for rec in sorted(Path(path).parent.glob("*panel_receipt.json")):
+        try:
+            r = json.loads(rec.read_text())
+        except (OSError, ValueError):
+            continue
+        for o in r.get("outputs", []):
+            if o.get("file") == Path(path).name:
+                return {"receipt": str(rec), "pmi_column": o.get("pmi_column"),
+                        "tracer_input": bool(o.get("tracer_input")),
+                        "recipe_promote": r.get("effective_promote"),
+                        "panel_preset": r.get("panel_preset"),
+                        "recipe_tracer_input": r.get("tracer_input")}
+    return {"receipt": None,
+            "pmi_column": "unknown (no build_panels.py receipt lists this file)"}
 
 
 # ---------------------------------------------------------------------------
@@ -476,6 +511,9 @@ def write_outputs(
             "transcripts_rows": int(len(df_post)),
             "npmi": str(panel_path),
             "npmi_sha1": file_sha1(panel_path),
+            # Which estimator the consumed PMI column holds (build_panels.py
+            # receipt), since the pipeline cannot tell.
+            "npmi_provenance": panel_provenance(panel_path),
         },
         "host": {
             "hostname": socket.gethostname(),
