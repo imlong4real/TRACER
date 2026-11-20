@@ -66,4 +66,9 @@ TRACER_UPDATE_REFERENCES=1 python -m pytest tests/test_pipeline_regression.py
 - [ ] Public-facing changes documented in the README where relevant.
 - [ ] Clear, descriptive commit messages and PR description.
 
+## License
+
+TRACER is released under the [MIT License](LICENSE). By contributing, you agree
+that your contributions are licensed under the same terms.
+
 Thank you for helping improve TRACER!
