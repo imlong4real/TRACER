@@ -220,9 +220,6 @@ def test_phase1_rerank_defaults():
     ({"cascade_territory_radius_bins": 0}, "cascade_territory_radius_bins"),
     ({"cascade_pmi_threshold": 2.0}, "cascade_pmi_threshold"),
     ({"cascade_min_anchor_tx": 0}, "cascade_min_anchor_tx"),
-    ({"legacy_bin_size_um": 0.0}, "legacy_bin_size_um"),
-    ({"legacy_neighborhood": "diagonal"}, "legacy_neighborhood"),
-    ({"legacy_min_comp_size": 0}, "legacy_min_comp_size"),
 ])
 def test_group_invariants(kwargs, match):
     with pytest.raises(ValueError, match=match):

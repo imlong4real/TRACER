@@ -118,3 +118,82 @@ def relu_symmetric(x, tau):
     out[x > tau] = x[x > tau] - tau
     out[x < -tau] = x[x < -tau] + tau
     return out
+
+
+def deprecated_legacy_group(fn):
+    """Mark a function of the retired spatial-CC Group backend.
+
+    Unified-prune step 7 removed that backend from the pipeline (Group is
+    always the density cascade). The function still works, for one
+    release, and warns on every call.
+    """
+    import functools
+    import warnings
+
+    msg = (f"tracer.{fn.__name__} belongs to the retired spatial-CC Group "
+           "backend (unified-prune step 7) and will be removed in a future "
+           "release; the pipeline's Group is the density cascade "
+           "(tracer.density_cascade.cascade_as_residual_handler).")
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        warnings.warn(msg, DeprecationWarning, stacklevel=2)
+        return fn(*args, **kwargs)
+
+    return wrapper
+
+
+def symmetric_csr(W):
+    """Return ``W`` as a symmetric CSR PMI matrix. Idempotent.
+
+    The single contract for the gene x gene panel ``aux["W"]``: every
+    stored pair ``(i, j)`` is also stored as ``(j, i)`` with the same value.
+    Panel builders produce the upper triangle only (``i < j``); this fills
+    in the mirror entry wherever it is missing, so it accepts an upper-
+    triangle, lower-triangle or already-symmetric matrix and never doubles
+    a value (unlike ``W + W.T``, which doubles every pair of a symmetric
+    input). On an upper-triangle input it is value-identical to
+    ``W + W.T``.
+
+    Explicit zeros are kept as stored entries (an observed PMI of exactly
+    0.0 is evidence, unlike a structurally absent pair); ``W + W.T`` would
+    drop them. Indices are sorted within each row. Dense input is returned
+    as a float32 ndarray with missing mirror entries filled from the other
+    triangle (NaN and 0 count as missing).
+    """
+    import scipy.sparse as sp
+
+    if not sp.issparse(W):
+        A = np.asarray(W, dtype=np.float32)
+        missing = (A == 0) | np.isnan(A)
+        return np.where(missing, A.T, A).astype(np.float32, copy=False)
+
+    C = W.tocoo()
+    G = C.shape[0]
+    row = C.row.astype(np.int64)
+    col = C.col.astype(np.int64)
+    key = row * G + col
+    mirror = col * G + row
+    add = ~np.isin(mirror, key) & (row != col)
+    S = sp.csr_matrix(
+        (
+            np.concatenate([C.data, C.data[add]]).astype(np.float32),
+            (np.concatenate([row, col[add]]), np.concatenate([col, row[add]])),
+        ),
+        shape=C.shape,
+        dtype=np.float32,
+    )
+    S.sort_indices()
+    return S
+
+
+def fold_symmetric_dense(A):
+    """Symmetric view of a dense per-entity PMI block. Idempotent.
+
+    ``A`` is a block sliced from ``aux["W"]`` in arbitrary gene order. If
+    ``W`` was triangular, each pair is stored on exactly one side; if it
+    was symmetric, on both. Taking the stored side (``A`` where nonzero,
+    else ``A.T``) is correct for both, and equals ``A + A.T`` on a
+    triangular input.
+    """
+    return np.where(A != 0, A, A.T)

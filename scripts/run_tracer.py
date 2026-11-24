@@ -310,6 +310,14 @@ def run_tracer(df: pd.DataFrame, panel: pd.DataFrame, *,
         # legacy reasons; mirror it onto the config so the receipt reflects
         # the override.
         pipeline.PMI_THR = float(pmi_threshold_override)
+        # The Group cascade reads its threshold from cfg.group.
+        cfg = dataclasses.replace(
+            cfg,
+            phase1=dataclasses.replace(
+                cfg.phase1, pmi_threshold=float(pmi_threshold_override)),
+            group=dataclasses.replace(
+                cfg.group, cascade_pmi_threshold=float(pmi_threshold_override)),
+        )
         log.info("PMI threshold override: pipeline.PMI_THR = %.4f",
                  pipeline.PMI_THR)
     log.info("Calling run_segmented_pipeline (df=%d rows, panel=%d pairs)",

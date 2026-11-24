@@ -16,14 +16,15 @@ import logging
 import math
 from typing import Any
 
+import dataclasses
+
 import numpy as np
 import pandas as pd
 
-from tracer.graph import build_grid_graph_xy, build_grid_graph_xyz
+from tracer.graph import build_grid_graph_xyz
 from tracer.zscale import resolve_g_z_um
-from tracer.pruning import prune_transcripts_fast, prune_genes_by_pmi_greedy
+from tracer.pruning import prune_transcripts_fast
 from tracer.spatial import (
-    annotate_unassigned_components_fast,
     enforce_spatial_coherence_fast,
     guarded_rescue,
     reassign_unassigned_grid_pool,
@@ -83,8 +84,8 @@ def _resolve_stitch_g_z(df: pd.DataFrame, cfg, auto_Gz: float,
 # 2026-05-13: PMI_THR raised 0.05 → 0.2 (= 1.22× chance, real enrichment
 # cutoff in natural-log PMI space). Validated on PDAC + lung full-tissue:
 # small retention cost (−0.3 pp) for major coherence gains (cell C
-# mean 0.80→0.93, p10 0.57→0.82). RESCUE_NEG_THR / ANNOTATE_NEG_THR
-# scale with this. See benchmarks/pdac_pmi_sweep/ and
+# mean 0.80→0.93, p10 0.57→0.82). RESCUE_NEG_THR
+# scales with this. See benchmarks/pdac_pmi_sweep/ and
 # benchmarks/pdac_full_seq{,_thr0}_strict/ for the validation suite.
 PMI_THR = 0.2
 TX_WEIGHTED_PRUNE = True   # tx-weighted greedy bad-edge prune (1a/1c)
@@ -95,6 +96,8 @@ SPLIT_PHASE1_MIN_TX = 1     # min tx per sub-group during the split itself
                             #     handles the actual demotion).
 SPLIT_PHASE1_MIN_ENTITY = 2 # minimum entity size to consider (2 = bare
                             #     minimum to compute a diff).
+# The Group cascade's z-split and size QC (Cascade-Split / Cascade-QC) are
+# set in config only: `group.cascade_split_dz_um`, `group.cascade_qc_min_tx`.
 PHASE1_QC_MIN_TX = 3        # post-split QC: any Phase 1 entity (main or
                             #     partial) with < this tx → unassigned.
                             #     Prevents 1- and 2-tx degenerate seeds
@@ -104,11 +107,14 @@ PHASE1_QC_MIN_TX = 3        # post-split QC: any Phase 1 entity (main or
 def _qc_demote_small_phase1_entities(df_in: pd.DataFrame, *,
                                        entity_col: str,
                                        min_size: int = PHASE1_QC_MIN_TX,
-                                       unassigned_id: str = "-1"
+                                       unassigned_id: str = "-1",
+                                       label_prefix: str | None = None,
                                        ) -> tuple[pd.DataFrame, dict]:
     """Demote any Phase 1 entity (main `{cell}` or partial) with < min_size tx
     to unassigned. Skips already-unassigned labels (`-1`, `UNASSIGNED`,
-    `UNASSIGNED_*`) — these are not seeded entities."""
+    `UNASSIGNED_*`) — these are not seeded entities. With ``label_prefix``,
+    only labels starting with it are considered (the Group cascade's
+    ``cascade_`` partials)."""
     df_out = df_in.copy()
     df_out[entity_col] = df_out[entity_col].astype(str)
     counts = df_out[entity_col].value_counts()
@@ -117,6 +123,8 @@ def _qc_demote_small_phase1_entities(df_in: pd.DataFrame, *,
         if n >= min_size:
             continue
         if ent == unassigned_id or ent == "UNASSIGNED" or ent.startswith("UNASSIGNED_"):
+            continue
+        if label_prefix is not None and not ent.startswith(label_prefix):
             continue
         bad.append(ent)
     n_demoted = 0
@@ -319,10 +327,15 @@ def _spatial_split_phase1_entities(df_in: pd.DataFrame, *,
                                      dz_threshold: float = SPLIT_PHASE1_DZ,
                                      min_size: int = SPLIT_PHASE1_MIN_TX,
                                      min_entity_size: int = SPLIT_PHASE1_MIN_ENTITY,
-                                     unassigned_id: str = "-1") -> tuple[pd.DataFrame, dict]:
+                                     unassigned_id: str = "-1",
+                                     label_prefix: str | None = None,
+                                     ) -> tuple[pd.DataFrame, dict]:
     """Sort tx by z within each entity; split where Δz > dz_threshold.
 
-    Applies to all main cells and partials (≥ min_entity_size tx).
+    Applies to all main cells and partials (≥ min_entity_size tx), or, with
+    ``label_prefix``, only to entities whose label starts with it (the
+    Group cascade's ``cascade_`` partials, so Phase-1 entities enlarged by
+    Rescue are not re-split).
     Largest sub-group keeps the original label; smaller groups get a
     fresh appended suffix; groups < min_size demoted to unassigned_id.
 
@@ -379,6 +392,8 @@ def _spatial_split_phase1_entities(df_in: pd.DataFrame, *,
 
     for ent, group in df_out.groupby(entity_col, sort=False):
         if ent == unassigned_id or ent == "UNASSIGNED" or ent.startswith("UNASSIGNED_"):
+            continue
+        if label_prefix is not None and not ent.startswith(label_prefix):
             continue
         if has_etype:
             if str(group["_etype"].iloc[0]) not in ("cell", "partial"):
@@ -528,23 +543,10 @@ def _reassign_nuclear_post_1c_etype(df_in: pd.DataFrame, *,
     import scipy.sparse as _sp
     W_is_sparse = _sp.issparse(W)
     if W_is_sparse:
-        # Symmetrize the upper-triangle CSR via COO-stacking. NOT `W + W.T`:
-        # scipy's sparse add eliminates explicit zeros, which would drop an
-        # observed PMI of exactly 0.0. Never call eliminate_zeros() here for
-        # the same reason.
-        Wu = W.tocoo()
-        Wsym = _sp.csr_matrix(
-            (
-                np.concatenate([Wu.data, Wu.data]).astype(np.float32),
-                (
-                    np.concatenate([Wu.row, Wu.col]),
-                    np.concatenate([Wu.col, Wu.row]),
-                ),
-            ),
-            shape=W.shape,
-            dtype=np.float32,
-        )
-        Wsym.sort_indices()
+        # Idempotent symmetrize (keeps explicit zeros; never doubles a
+        # symmetric W). See tracer._utils.symmetric_csr.
+        from ._utils import symmetric_csr
+        Wsym = symmetric_csr(W)
         W_sp_indptr = Wsym.indptr.astype(np.int32)
         W_sp_indices = Wsym.indices.astype(np.int32)
         W_sp_data = Wsym.data.astype(np.float32)
@@ -847,108 +849,6 @@ def _reassign_nuclear_post_1c_etype(df_in: pd.DataFrame, *,
     }
 
 
-def _split_unassigned_components(df_in: pd.DataFrame, *,
-                                   entity_col: str,
-                                   coord_cols=("x", "y", "z"),
-                                   dz_threshold: float,
-                                   min_size: int = 1,
-                                   min_entity_size: int = 2,
-                                   unassigned_id: str = "-1"
-                                   ) -> tuple[pd.DataFrame, dict]:
-    """Sort tx by z within each UNASSIGNED_* component; split where
-    consecutive Δz > dz_threshold.
-
-    Mirrors `_spatial_split_phase1_entities` but operates on
-    UNASSIGNED_<base> labels emitted by Group. Group's spatial graph
-    is essentially 2D (xy bins + d ≤ 1.5 µm in xy), so its components
-    can span large z gaps; this stage catches that.
-
-    Largest sub-cluster keeps the original label; smaller ones get a
-    fresh suffix `UNASSIGNED_<base>-<k>` for k = 1, 2, ...
-    Sub-clusters smaller than ``min_size`` demote to ``unassigned_id``.
-    """
-    import re as _re
-
-    df_out = df_in.copy()
-    df_out[entity_col] = df_out[entity_col].astype(str)
-    out_labels = df_out[entity_col].to_numpy().copy()
-    z_arr = df_out[coord_cols[2]].to_numpy(dtype=np.float64)
-
-    stats = {
-        "components_examined": 0,
-        "components_split": 0,
-        "subcomps_minted": 0,
-        "tx_demoted_singletons": 0,
-        "tx_total_relabelled": 0,
-    }
-
-    # Track existing UNASSIGNED_<base>-<k> suffixes to avoid collisions
-    next_subidx: dict[str, int] = {}
-    for lab in df_out[entity_col].unique():
-        m = _re.match(r"^(UNASSIGNED_\d+)-(\d+)$", str(lab))
-        if m:
-            base, k = m.group(1), int(m.group(2))
-            next_subidx[base] = max(next_subidx.get(base, 0), k)
-
-    for ent, group in df_out.groupby(entity_col, sort=False):
-        if not isinstance(ent, str) or not ent.startswith("UNASSIGNED_"):
-            continue
-        # Only base labels — already-suffixed labels (e.g. UNASSIGNED_42-1)
-        # were emitted by a prior split; skip to avoid recursion.
-        if "-" in ent.replace("UNASSIGNED_", "", 1):
-            continue
-        rows = group.index.to_numpy()
-        if len(rows) < min_entity_size:
-            continue
-        stats["components_examined"] += 1
-
-        z_vals = z_arr[rows]
-        sort_order = np.argsort(z_vals, kind="stable")
-        rows_sorted = rows[sort_order]
-        z_sorted = z_vals[sort_order]
-        diffs = np.diff(z_sorted)
-        split_positions = np.where(diffs > dz_threshold)[0]
-        if split_positions.size == 0:
-            continue
-
-        groups_rows = []
-        prev = 0
-        for sp in split_positions:
-            groups_rows.append(rows_sorted[prev: sp + 1])
-            prev = sp + 1
-        groups_rows.append(rows_sorted[prev:])
-
-        # Sort by size desc — largest keeps the original label
-        groups_rows.sort(key=lambda a: -len(a))
-        stats["components_split"] += 1
-
-        demoted_rows_local: list[np.ndarray] = []
-        for k, gr in enumerate(groups_rows):
-            sz = len(gr)
-            if sz < min_size:
-                out_labels[gr] = unassigned_id
-                stats["tx_demoted_singletons"] += sz
-                demoted_rows_local.append(gr)
-                continue
-            if k == 0:
-                continue  # largest keeps original label
-            next_subidx[ent] = next_subidx.get(ent, 0) + 1
-            new_label = f"{ent}-{next_subidx[ent]}"
-            out_labels[gr] = new_label
-            stats["subcomps_minted"] += 1
-            stats["tx_total_relabelled"] += sz
-            # New sub-component label is still a Group component; _etype
-            # stays "component" — no update needed.
-        if demoted_rows_local and "_etype" in df_out.columns:
-            rows_concat = np.concatenate(demoted_rows_local)
-            mask = np.zeros(len(df_out), dtype=bool)
-            mask[rows_concat] = True
-            df_out.loc[mask, "_etype"] = "unknown"
-
-    df_out[entity_col] = out_labels
-    return df_out, stats
-
-
 def _qc_demote_low_coherence(df_in: pd.DataFrame, *,
                                entity_col: str,
                                aux: dict,
@@ -1182,7 +1082,6 @@ FALLBACK_WHOLE_CELL_ADMIT = True
 # 2026-05-13: RESCUE_NEG_THR paired with PMI_THR (both 0.2 in PMI scale).
 # Symmetric ± 0.2 dead zone around chance.
 RESCUE_NEG_THR = -0.2
-ANNOTATE_NEG_THR = -0.1 * (PMI_THR / 0.05)  # scales with PMI_THR; -0.4 at PMI_THR=0.2
 # Iterative Rescue caps: 3 passes captures ≥98 % of asymptotic gain at
 # any scale (per /tmp/iterative_rescue_*.png diagnostic). Early-stop
 # fires when a pass adds zero tx — covers tight crops in 1–2 passes.
@@ -1236,28 +1135,24 @@ STITCH_C_UNION_BYPASS_MAX_N_TX: int | None = 50
 # already reached the cap. Balanced N-entity merges cost log2(N) depth;
 # chain merges cost N-1 — so the cap rewards balanced consolidations
 # and penalises chain growth (one component repeatedly absorbing
-# neighbours, the over-merge failure mode). None = off. Recommended 3.
-STITCH_MAX_MERGER_DEPTH: int | None = 3
+# neighbours, the over-merge failure mode). None = off.
+STITCH_MAX_MERGER_DEPTH: int | None = 5   # 2026-11-19: 3 -> 5 (SEG); NOSEG keeps 3
 
-# Mid-pipeline QC (after Group, before Stitch). Two opt-in controls;
-# both default off so current production behavior is unchanged.
-#
-#   MID_SPLIT_UNASSIGNED_DZ  None = off (current). Float (e.g. 2.0)
-#                            applies sorted-Δz fragmentation to
-#                            UNASSIGNED_<base> components from Group,
-#                            mirroring Split-Phase1's logic. Group's
-#                            spatial graph is essentially 2D, so its
-#                            components routinely span > 2 µm in z.
-#                            ROI data: 57 % of components have max-gap
-#                            > 2 µm without this stage.
-#
-#   MID_QC_C_FLOOR           0.0 = off (current). Float (e.g. 0.05)
-#                            demotes any entity (cell / partial /
-#                            component) with coherence ≤ floor OR
-#                            n_genes < 2. Catches incoherent Phase-1
-#                            entities that survived size QC and any
-#                            low-C Group components.
-MID_SPLIT_UNASSIGNED_DZ: float | None = 2.0
+# NOSEG keeps the pre-2026-11-19 Stitch settings (same values as the bundled
+# noseg platform preset): ΔC 0.03 is what stopped NOSEG supercells, and the
+# looser SEG defaults (ΔC -0.3, depth 5, merge-time guards, re-queueing)
+# have not been measured there. Applied by run_noseg_pipeline when cfg=None.
+NOSEG_STITCH_OVERRIDES: dict = dict(
+    deltaC_min=0.03, neighborhood="8", max_merger_depth=3,
+    merged_c_min=None, cell_delta_c_min=None, cumulative_delta_c_min=None,
+    requeue_neighbours=False,
+)
+
+# Mid-pipeline QC (after Group, before Stitch).
+#   MID_QC_C_FLOOR  0.0 = off. Float (e.g. 0.05) demotes any entity
+#                   (cell / partial) with coherence <= floor OR
+#                   n_genes < 2. Catches incoherent Phase-1 entities
+#                   that survived size QC and low-C cascade partials.
 MID_QC_C_FLOOR: float = 0.05
 
 # "Real players" gate for Mid-QC coherence + Rescue veto.
@@ -1321,29 +1216,9 @@ PHASE1_RERANK_MARGIN_TX: int = 1
 # called by run_segmented_pipeline anymore.
 
 
-# Opt-in: replace Group's `annotate_unassigned_components_fast` (G=8 self,
-# spatial-only connected components) with the density-cascade Phase 1 on
-# the same post-Rescue residual. Cascade emits `cascade_<n>` synthetic
-# anchors, classified as 'cell' (``_etype == "cell"``). Floor is selected at runtime
-# from runtime tx-coverage in the residual pool — no hand-tuned thresholds.
-#
-# On 500 µm Xenium ROI, head-to-head:
-#   default Group (G=8 self):     1,826 components,  ARI vs raw +0.6808
-#   cascade-residual ('auto'):     ~602 components,  ARI vs raw +0.6877
-#       (3x fewer components, ~99 % of default's assignment, equal-or-better ARI)
-#
-# See density-cascade-handoff.md for full design and bench results.
-#
-#   False = off (legacy: spatial-only annotate_unassigned_components_fast).
-#   True  = on (default 2026-05-07 onward): cascade as Group replacement.
-#
-# Default flip rationale (full-tissue Xenium, /tmp/bench_cascade_step6.py):
-#   default Group  : V_β=2 +0.9410, ARI +0.6896, 62,980 entities
-#   cascade partial: V_β=2 +0.9435, ARI +0.6987, 59,207 entities (closest
-#                    to input cell_id's 58,405).
-# Cascade emits `cascade_<n>-1` labels; downstream Stitch merges fragments
-# of the same biological cell via the existing two-dash partial-merger logic.
-PHASE1_SEG_RESIDUAL_CASCADE: bool = True
+# Group is the density cascade (unified-prune step 7 retired the legacy
+# spatial-CC backend). Its settings live in `cfg.group`; with cfg=None
+# the auto-floor constants below are used.
 # Cascade auto-floor target: fraction of residual tx mass to capture in
 # the R=1 Moore-dilated anchor mask. 0.65 was reverse-engineered from the
 # empirical NOSEG winner (66.5 % cov at floor=4 on full Xenium tissue) and
@@ -1353,23 +1228,8 @@ PHASE1_SEG_RESIDUAL_CASCADE_TARGET_COV: float = 0.65
 PHASE1_SEG_RESIDUAL_CASCADE_HARD_MIN: int = 2
 
 
-# Replace the NOSEG path's Group call (de-facto cell-finder, not
-# residual handler) with the density-cascade. NOSEG runs at higher density
-# than SEG-residual since the entire pool is the input — auto-floor will
-# typically pick floor=4 (~66 % tx coverage) on Xenium full pool.
-#
-# See density-cascade-handoff.md for ROI ARI improvements (+0.085 over
-# baseline NOSEG) and full-tissue homogeneity bench results.
-#
-#   False = off (legacy: G=8 self spatial-only annotate_unassigned_
-#           components_fast; bin restriction acts as a crude
-#           anchoring substitute).
-#   True  = on (default 2026-05-09 onward): cascade as Phase-1
-#           replacement in the NOSEG path. Promotes cascade to default
-#           symmetrically with PHASE1_SEG_RESIDUAL_CASCADE (flipped
-#           2026-05-07). Test references that pinned legacy NOSEG
-#           entity counts will need refresh.
-PHASE1_NOSEG_CASCADE: bool = True
+# NOSEG runs at higher density than SEG-residual since the entire pool
+# is the input; auto-floor typically picks floor=4 on a Xenium pool.
 PHASE1_NOSEG_CASCADE_TARGET_COV: float = 0.65
 PHASE1_NOSEG_CASCADE_HARD_MIN: int = 2
 
@@ -1494,15 +1354,7 @@ def _grid_3d_graph_fn(df_in, *, k=None, dist_threshold=None,
     )
 
 
-def _grid_self_graph_fn(df_in, *, k=None, dist_threshold=None,
-                        coord_cols=("x", "y", "z")):
-    return build_grid_graph_xy(
-        df_in, k=k, dist_threshold=dist_threshold or 1.5, coord_cols=coord_cols,
-        G=8.0, neighborhood="self", exact_distance_filter=False,
-    )
-
-
-def _resolve_pipeline_cfg(cfg):
+def _resolve_pipeline_cfg(cfg, *, noseg: bool = False):
     """Resolve a `PipelineConfig` for the runner — Phase B of config
     migration.
 
@@ -1525,8 +1377,11 @@ def _resolve_pipeline_cfg(cfg):
         return cfg
     from tracer.config import (
         DemoteConfig,
+        GroupConfig,
+        Phase1QcConfig,
         PipelineConfig,
         RescueConfig,
+        SplitPhase1Config,
         StitchConfig,
     )
     rescue_kwargs = dict(
@@ -1554,7 +1409,8 @@ def _resolve_pipeline_cfg(cfg):
     final_rescue_cfg = RescueConfig(**final_rescue_kwargs)
     stitch_cfg = StitchConfig(
         mode="count", metric="pmi", penalize_simplicity=True,
-        deltaC_min=0.03,
+        # deltaC_min, neighborhood and the merge-time guards: StitchConfig
+        # defaults (the SEG values); NOSEG_STITCH_OVERRIDES for NOSEG.
         c_union_bypass=STITCH_C_UNION_BYPASS,
         c_union_bypass_max_n_tx=STITCH_C_UNION_BYPASS_MAX_N_TX,
         max_merger_depth=STITCH_MAX_MERGER_DEPTH,
@@ -1562,17 +1418,83 @@ def _resolve_pipeline_cfg(cfg):
         bin_size_um=2.0,
         g_z_um=STITCH_GZ_UM,
         z_neighbor_depth=1,
-        neighborhood="8",
         dist_threshold_um=5.0,
         min_local_tx_per_entity=STITCH_MIN_LOCAL_TX,
     )
     demote_cfg = DemoteConfig(min_size=5)
+    split_cfg = SplitPhase1Config(
+        dz_threshold_um=SPLIT_PHASE1_DZ,
+        min_tx=SPLIT_PHASE1_MIN_TX,
+        min_entity_size=SPLIT_PHASE1_MIN_ENTITY,
+    )
+    qc_cfg = Phase1QcConfig(min_tx=PHASE1_QC_MIN_TX)
+    group_cfg = GroupConfig(
+        seg_cascade_target_cov=PHASE1_SEG_RESIDUAL_CASCADE_TARGET_COV,
+        seg_cascade_hard_min=PHASE1_SEG_RESIDUAL_CASCADE_HARD_MIN,
+        noseg_cascade_target_cov=PHASE1_NOSEG_CASCADE_TARGET_COV,
+        noseg_cascade_hard_min=PHASE1_NOSEG_CASCADE_HARD_MIN,
+        cascade_pmi_threshold=PMI_THR,
+    )
+    if noseg:
+        stitch_cfg = dataclasses.replace(stitch_cfg, **NOSEG_STITCH_OVERRIDES)
     return PipelineConfig(
+        split_phase1=split_cfg,
+        phase1_qc=qc_cfg,
         rescue=rescue_cfg,
+        group=group_cfg,
         stitch=stitch_cfg,
         demote=demote_cfg,
         final_rescue=final_rescue_cfg,
     )
+
+
+def _group_stage(df_in: pd.DataFrame, aux: dict, cfg, progression: list, *,
+                 seg: bool) -> pd.DataFrame:
+    """Group, shared by the SEG (residual) and NOSEG (whole pool) runners.
+
+    Group is the density cascade: each window's densest 3x3 bins of
+    unassigned transcripts give one partial (the shared seed core), the rest
+    go back to the pool. Every setting comes from ``cfg.group``; the two
+    runners differ only in which auto-floor fields they read. The partials
+    then get the post-steps, each switchable on its own: Cascade-Split
+    (z-split, same rule as Split-Phase1, sub-group settings from
+    ``cfg.split_phase1``) and Cascade-QC (size floor). Records "Group" and,
+    when they run, "Cascade-Split" / "Cascade-QC".
+    """
+    g = cfg.group
+    df_out = cascade_as_residual_handler(
+        df_pruned=df_in, aux=aux,
+        entity_col="tracer_id",
+        G=g.cascade_bin_size_um, thresholds="auto",
+        territory_radius_bins=g.cascade_territory_radius_bins,
+        pmi_threshold=g.cascade_pmi_threshold,
+        min_anchor_tx=g.cascade_min_anchor_tx,
+        auto_target_cov=(g.seg_cascade_target_cov if seg
+                         else g.noseg_cascade_target_cov),
+        auto_hard_min=(g.seg_cascade_hard_min if seg
+                       else g.noseg_cascade_hard_min),
+    )
+    _record_stage(progression, "Group", df_out, "tracer_id")
+
+    if g.cascade_split_dz_um:
+        df_out, _ = _spatial_split_phase1_entities(
+            df_out, entity_col="tracer_id",
+            coord_cols=("x", "y", "z"),
+            dz_threshold=float(g.cascade_split_dz_um),
+            min_size=cfg.split_phase1.min_tx,
+            min_entity_size=cfg.split_phase1.min_entity_size,
+            unassigned_id="-1",
+            label_prefix="cascade_",
+        )
+        _record_stage(progression, "Cascade-Split", df_out, "tracer_id")
+    if g.cascade_qc_min_tx:
+        df_out, _ = _qc_demote_small_phase1_entities(
+            df_out, entity_col="tracer_id",
+            min_size=int(g.cascade_qc_min_tx), unassigned_id="-1",
+            label_prefix="cascade_",
+        )
+        _record_stage(progression, "Cascade-QC", df_out, "tracer_id")
+    return df_out
 
 
 def run_segmented_pipeline(df: pd.DataFrame,
@@ -1708,9 +1630,9 @@ def run_segmented_pipeline(df: pd.DataFrame,
     df_pruned, _split_stats = _spatial_split_phase1_entities(
         df_pruned, entity_col="tracer_id",
         coord_cols=("x", "y", "z"),
-        dz_threshold=SPLIT_PHASE1_DZ,
-        min_size=SPLIT_PHASE1_MIN_TX,
-        min_entity_size=SPLIT_PHASE1_MIN_ENTITY,
+        dz_threshold=cfg.split_phase1.dz_threshold_um,
+        min_size=cfg.split_phase1.min_tx,
+        min_entity_size=cfg.split_phase1.min_entity_size,
         unassigned_id="-1",
     )
     _record_stage(progression, "Split-Phase1", df_pruned, "tracer_id")
@@ -1732,7 +1654,7 @@ def run_segmented_pipeline(df: pd.DataFrame,
     # don't act as degenerate routing anchors in Rescue.
     df_pruned, _qc_stats = _qc_demote_small_phase1_entities(
         df_pruned, entity_col="tracer_id",
-        min_size=PHASE1_QC_MIN_TX,
+        min_size=cfg.phase1_qc.min_tx,
         unassigned_id="-1",
     )
     _record_stage(progression, "Phase1-QC", df_pruned, "tracer_id")
@@ -1814,40 +1736,10 @@ def run_segmented_pipeline(df: pd.DataFrame,
     _set_admit_independent(True)
     _record_stage(progression, "Rescue", df_rescued, "tracer_id")
 
-    if PHASE1_SEG_RESIDUAL_CASCADE:
-        df_grouped = cascade_as_residual_handler(
-            df_pruned=df_rescued, aux=aux,
-            entity_col="tracer_id",
-            G=2.0, thresholds="auto",
-            territory_radius_bins=1,
-            pmi_threshold=PMI_THR,
-            min_anchor_tx=3,
-            auto_target_cov=PHASE1_SEG_RESIDUAL_CASCADE_TARGET_COV,
-            auto_hard_min=PHASE1_SEG_RESIDUAL_CASCADE_HARD_MIN,
-        )
-    else:
-        df_grouped = annotate_unassigned_components_fast(
-            df_pruned=df_rescued, aux=aux,
-            build_graph_fn=_grid_self_graph_fn, prune_fn=prune_genes_by_pmi_greedy,
-            coord_cols=("x", "y", "z"),
-            k=8, dist_threshold=1.5, min_comp_size=4,
-            npmi_threshold=ANNOTATE_NEG_THR,
-            entity_col="tracer_id", out_col="tracer_id",
-            cell_id_col="cell_id", gene_col="feature_name",
-            transcript_id_col="transcript_id", show_progress=False,
-        )
-    _record_stage(progression, "Group", df_grouped, "tracer_id")
+    df_grouped = _group_stage(df_rescued, aux, cfg, progression, seg=True)
 
-    # Mid-pipeline QC (after Group, before Stitch). Both stages are
-    # opt-in via constants at the top of this module.
+    # Mid-pipeline QC (after Group, before Stitch): coherence floor.
     mid_did_anything = False
-    if MID_SPLIT_UNASSIGNED_DZ is not None:
-        df_grouped, _ = _split_unassigned_components(
-            df_grouped, entity_col="tracer_id", coord_cols=("x", "y", "z"),
-            dz_threshold=float(MID_SPLIT_UNASSIGNED_DZ),
-            min_size=1, min_entity_size=2, unassigned_id="-1",
-        )
-        mid_did_anything = True
     if MID_QC_C_FLOOR > 0:
         df_grouped, _ = _qc_demote_low_coherence(
             df_grouped, entity_col="tracer_id", aux=aux,
@@ -1923,6 +1815,10 @@ def run_segmented_pipeline(df: pd.DataFrame,
         min_local_tx_per_entity=cfg.stitch.min_local_tx_per_entity,
         mahalanobis_d_rescue=cfg.stitch.mahalanobis_d_rescue,
         rescue_delta_c_floor=cfg.stitch.rescue_delta_c_floor,
+        merged_c_min=cfg.stitch.merged_c_min,
+        cell_delta_c_min=cfg.stitch.cell_delta_c_min,
+        cumulative_delta_c_min=cfg.stitch.cumulative_delta_c_min,
+        requeue_neighbours=cfg.stitch.requeue_neighbours,
     )
     _record_stage(progression, "Stitch", df_stitched, "stitched")
 
@@ -2013,7 +1909,7 @@ def run_noseg_pipeline(df: pd.DataFrame, npmi_panel: pd.DataFrame,
         when ``None`` (default) a config is built from module globals
         to preserve today's behavior bit-exactly.
     """
-    cfg = _resolve_pipeline_cfg(cfg)
+    cfg = _resolve_pipeline_cfg(cfg, noseg=True)
     _set_admit_independent(True)  # reset toggle at entry: never inherit a leaked flag from a prior failed run (Copilot review)
     df = df.copy()
     _input_cell_id = pd.Series(
@@ -2046,47 +1942,10 @@ def run_noseg_pipeline(df: pd.DataFrame, npmi_panel: pd.DataFrame,
     _record_stage(progression, "after init", df, "tracer_id")
 
     # Group (or cascade replacement for cell-finding in NOSEG).
-    # Cascade grid/threshold params come from cfg.group when present
-    # (so the grouping grid can scale to the input bin pitch — e.g. 8 um
-    # VisiumHD bins need an 8 um grid, not the 2 um default). The cfg
-    # defaults equal the historical literals below, so the cfg=None /
-    # bundled-defaults path is byte-for-byte unchanged.
-    grp = getattr(cfg, "group", None)
-    if PHASE1_NOSEG_CASCADE:
-        df_grouped = cascade_as_residual_handler(
-            df_pruned=df, aux=aux,
-            entity_col="tracer_id",
-            G=(grp.cascade_bin_size_um if grp is not None else 2.0),
-            thresholds="auto",
-            territory_radius_bins=(grp.cascade_territory_radius_bins if grp is not None else 1),
-            pmi_threshold=(grp.cascade_pmi_threshold if grp is not None else PMI_THR),
-            min_anchor_tx=(grp.cascade_min_anchor_tx if grp is not None else 3),
-            auto_target_cov=(grp.noseg_cascade_target_cov if grp is not None else PHASE1_NOSEG_CASCADE_TARGET_COV),
-            auto_hard_min=(grp.noseg_cascade_hard_min if grp is not None else PHASE1_NOSEG_CASCADE_HARD_MIN),
-        )
-    else:
-        df_grouped = annotate_unassigned_components_fast(
-            df_pruned=df, aux=aux,
-            build_graph_fn=_grid_self_graph_fn, prune_fn=prune_genes_by_pmi_greedy,
-            coord_cols=("x", "y", "z"),
-            k=8, dist_threshold=1.5, min_comp_size=5,
-            npmi_threshold=ANNOTATE_NEG_THR,
-            entity_col="tracer_id", out_col="tracer_id",
-            cell_id_col="cell_id", gene_col="feature_name",
-            transcript_id_col="transcript_id", show_progress=False,
-        )
-    _record_stage(progression, "Group", df_grouped, "tracer_id")
+    df_grouped = _group_stage(df, aux, cfg, progression, seg=False)
 
-    # Mid-pipeline QC (after Group, before Stitch). Same opt-in
-    # knobs as the segmented path.
+    # Mid-pipeline QC (after Group, before Stitch): coherence floor.
     mid_did_anything = False
-    if MID_SPLIT_UNASSIGNED_DZ is not None:
-        df_grouped, _ = _split_unassigned_components(
-            df_grouped, entity_col="tracer_id", coord_cols=("x", "y", "z"),
-            dz_threshold=float(MID_SPLIT_UNASSIGNED_DZ),
-            min_size=1, min_entity_size=2, unassigned_id="-1",
-        )
-        mid_did_anything = True
     if MID_QC_C_FLOOR > 0:
         df_grouped, _ = _qc_demote_low_coherence(
             df_grouped, entity_col="tracer_id", aux=aux,
@@ -2156,6 +2015,10 @@ def run_noseg_pipeline(df: pd.DataFrame, npmi_panel: pd.DataFrame,
         min_local_tx_per_entity=cfg.stitch.min_local_tx_per_entity,
         mahalanobis_d_rescue=cfg.stitch.mahalanobis_d_rescue,
         rescue_delta_c_floor=cfg.stitch.rescue_delta_c_floor,
+        merged_c_min=cfg.stitch.merged_c_min,
+        cell_delta_c_min=cfg.stitch.cell_delta_c_min,
+        cumulative_delta_c_min=cfg.stitch.cumulative_delta_c_min,
+        requeue_neighbours=cfg.stitch.requeue_neighbours,
     )
     _record_stage(progression, "Stitch", df_stitched, "stitched")
 

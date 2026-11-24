@@ -233,17 +233,10 @@ admit_independent = true
 
 
 # ---------------------------------------------------------------------
-# Group — entity grouping. Two backends, selected per-pipeline by
-# `seg_residual_cascade` / `noseg_cascade`:
-#
-#   Cascade (default since 2026-05-07/2026-05-09): density-anchor +
-#   Phase-1a/b purity prune. Auto-floor selects density-threshold floor
-#   from runtime tx-coverage. Emits `cascade_<n>-1` partials.
-#
-#   Legacy spatial-CC (when *_cascade=false): annotate_unassigned_
-#   components_fast with G=8 µm self-bin connectivity. Emits
-#   UNASSIGNED_<n> components. Retained as fallback for parity with
-#   pre-cascade pipeline state.
+# Group — entity grouping: the density cascade. Density-anchor +
+# shared seed core; auto-floor selects the density-threshold floor
+# from runtime tx-coverage. Emits `cascade_<n>-1` partials. (The
+# legacy spatial-CC backend was retired in unified-prune step 7.)
 #
 # Cascade internals (bin size, territory radius, PMI threshold,
 # min anchor tx) are shared between SEG and NOSEG paths. Auto-floor
@@ -252,10 +245,6 @@ admit_independent = true
 # floors in those regimes.
 # ---------------------------------------------------------------------
 [group]
-# Backend selection (per pipeline)
-seg_residual_cascade = true
-noseg_cascade = true
-
 # Cascade auto-floor — per pipeline (different residual density regimes)
 seg_cascade_target_cov = 0.65
 seg_cascade_hard_min = 2
@@ -268,13 +257,11 @@ cascade_territory_radius_bins = 1    # Moore radius (3×3 = 9 bins)
 cascade_pmi_threshold = 0.2          # mirrors phase1.pmi_threshold
 cascade_min_anchor_tx = 3
 
-# Legacy spatial-CC fallback — used when *_cascade=false
-legacy_bin_size_um = 8.0             # G in build_grid_graph_xy
-legacy_neighborhood = "self"
-legacy_k = 8
-legacy_dist_threshold = 1.5
-legacy_min_comp_size = 5
-legacy_npmi_threshold = -0.1         # post-prune negative cutoff
+# Post-steps on the cascade's partials, right after Group; 0 = off.
+# z-split at a gap > this (µm), same rule as [split_phase1]:
+cascade_split_dz_um = 2.0
+# then send any cascade partial with fewer tx back to unassigned:
+cascade_qc_min_tx = 5
 
 
 # ---------------------------------------------------------------------
@@ -308,8 +295,21 @@ metric = "pmi"
 penalize_simplicity = true
 
 # Primary acceptance gate. 2026-05-09: raised 0.0 → 0.03 to prevent
-# NOSEG supercell formation; SEG insensitive.
-deltaC_min = 0.03
+# NOSEG supercell formation (the noseg preset keeps 0.03). 2026-11-19:
+# SEG loosened to -0.3, paired with the merge-time guards below.
+deltaC_min = -0.3
+
+# Merge-time guards, checked on every merge Stitch is about to make
+# (-inf = off; the noseg preset turns all three off):
+# merged coherence C(union) must be >= this
+merged_c_min = 0.0
+# a merge involving a whole cell needs ΔC >= this ("defends against
+# catastrophes": stricter than deltaC_min for cells)
+cell_delta_c_min = -0.1
+# ΔC summed over a group's whole merge tree must stay >= this
+cumulative_delta_c_min = -0.3
+# re-score a new group against its neighbours after each merge
+requeue_neighbours = true
 
 # C(union) bypass for ΔC-failing pairs. 0.9 is the recommended setting
 # from the 2026-05-14 stitch-dist-threshold-fix bench. Use null to
@@ -323,7 +323,7 @@ c_union_bypass_max_n_tx = 50
 
 # Post-acceptance merger-tree depth cap. Blocks chain-style growth.
 # Set to null to disable.
-max_merger_depth = 3
+max_merger_depth = 5
 
 # Spatial gate — candidate pair enumeration.
 candidate_source = "grid"
@@ -335,6 +335,8 @@ bin_size_um = 2.0
 # fall back to the legacy within-cell auto_Gz estimator.
 g_z_um = 1.0
 z_neighbor_depth = 1
+# "8" = Moore-1. "R2" (Moore-2) lets partials attach across an empty bin and,
+# with deltaC_min -0.3, chain into long thin entities.
 neighborhood = "8"
 dist_threshold_um = 5.0
 

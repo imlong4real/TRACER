@@ -55,18 +55,16 @@ class Phase1Config:
     admits to the main cell via gene-fit to the seed. ``veto_mode``
     selects the gate:
 
-    - ``"mean"`` (default; back-compat): admit when mean PMI(gene,seed)
+    - ``"mean"``: admit when mean PMI(gene,seed)
       >= ``pmi_threshold``. Permissive — at lineage interfaces a few
       housekeeping/IFN positives can dilute strong opposing-lineage
       signal (see the EPCAM-vs-macrophage case study in the hybrid
       admission spec).
-    - ``"hybrid"``: real-signal filter + unanimous-min fast-pass +
-      percentile-aggregator gate. Mirrors the Rescue hybrid kernel
-      (see `_cy_prune._admission_test`). Recommended for lineage-aware
-      panels; rejects cross-lineage candidates that the mean gate
-      admits. Note: switching the default to ``"hybrid"`` will
-      regenerate the Phase-1 partition. Regression refs will need
-      deliberate regeneration before flipping the default.
+    - ``"hybrid"`` (default): real-signal filter + unanimous-min
+      fast-pass + percentile-aggregator gate (``aggregator_percentile``,
+      25 by default). Mirrors the Rescue hybrid kernel (see
+      `_cy_prune._admission_test`); rejects cross-lineage candidates that
+      the mean gate admits.
     - ``"min"``: veto on any seed pair with PMI < ``neg_npmi_threshold``.
       Strictest, rarely used outside diagnostic runs.
     """
@@ -459,34 +457,24 @@ class RescueConfig:
 
 @dataclass(frozen=True)
 class GroupConfig:
-    """Phase 2 — entity grouping.
+    """Phase 2 — entity grouping: the density cascade.
 
-    Two backends, selected per-pipeline by ``seg_residual_cascade`` /
-    ``noseg_cascade``:
+    Density-anchor + shared seed core: each window's densest 3x3 bins of
+    unassigned tx give one partial, the rest go back to the pool. Emits
+    ``cascade_<n>-1`` partial labels. Auto-floor selects the
+    density-threshold floor at runtime by walking down candidate
+    thresholds until ``target_cov`` of residual tx is captured (with a
+    ``hard_min`` lower bound).
 
-    * **Cascade** (default since 2026-05-07 for SEG-residual,
-      2026-05-09 for NOSEG): density-anchor + Phase-1a/b purity prune.
-      Emits ``cascade_<n>-1`` partial labels. Auto-floor selects the
-      density-threshold floor at runtime by walking down candidate
-      thresholds until ``target_cov`` of residual tx is captured (with
-      a ``hard_min`` lower bound).
+    The cascade's internal params (bin size, territory radius, per-pair
+    PMI threshold, min anchor tx) are shared between the SEG and NOSEG
+    paths; the auto-floor params (target_cov, hard_min) are per-pipeline
+    because SEG-residual is sparser than the full NOSEG pool.
 
-    * **Legacy spatial-CC** (when ``*_cascade=False``): the original
-      ``annotate_unassigned_components_fast`` with G=8 µm self-bin
-      connectivity + post-hoc gene-set prune. Emits ``UNASSIGNED_<n>``
-      component labels. Retained as a fallback for parity with
-      pre-cascade pipeline state.
-
-    The cascade backend's internal params (bin size, territory radius,
-    per-pair PMI threshold, min anchor tx) are shared between the SEG
-    and NOSEG paths; the auto-floor params (target_cov, hard_min) are
-    per-pipeline because SEG-residual is sparser than the full NOSEG
-    pool — auto-floor selects different floors in those regimes.
+    The legacy spatial-CC backend (``annotate_unassigned_components_fast``,
+    ``UNASSIGNED_<n>`` components) and its switches were retired in
+    unified-prune step 7; see ``_RETIRED_KEYS``.
     """
-    # Backend selection (per pipeline)
-    seg_residual_cascade: bool = True
-    noseg_cascade: bool = True
-
     # Cascade auto-floor — per pipeline (different residual density regimes)
     seg_cascade_target_cov: float = 0.65
     seg_cascade_hard_min: int = 2
@@ -499,13 +487,13 @@ class GroupConfig:
     cascade_pmi_threshold: float = 0.2          # mirrors phase1.pmi_threshold
     cascade_min_anchor_tx: int = 3
 
-    # Legacy spatial-CC fallback — used when *_cascade=False
-    legacy_bin_size_um: float = 8.0             # G in build_grid_graph_xy
-    legacy_neighborhood: Literal["self", "moore"] = "self"
-    legacy_k: int = 8
-    legacy_dist_threshold: float = 1.5
-    legacy_min_comp_size: int = 5
-    legacy_npmi_threshold: float = -0.1         # post-prune negative cutoff
+    # Post-steps on the cascade's partials, right after Group (each one
+    # separately switchable; 0 or None = off, 0 being the TOML spelling).
+    # Only `cascade_` labels are touched.
+    # z-split: same rule as Split-Phase1 (a window spans all z, so stacked
+    # fragments can fuse); size QC: like Phase1-QC, at Demote's minimum.
+    cascade_split_dz_um: float | None = 2.0
+    cascade_qc_min_tx: int | None = 5
 
     def __post_init__(self) -> None:
         # Cascade params
@@ -541,18 +529,13 @@ class GroupConfig:
             raise ValueError(
                 f"group.cascade_min_anchor_tx must be >= 1; got {self.cascade_min_anchor_tx}"
             )
-        # Legacy params
-        if self.legacy_bin_size_um <= 0:
+        if self.cascade_split_dz_um is not None and self.cascade_split_dz_um < 0:
             raise ValueError(
-                f"group.legacy_bin_size_um must be > 0; got {self.legacy_bin_size_um}"
+                f"group.cascade_split_dz_um must be >= 0 (0 = off); got {self.cascade_split_dz_um}"
             )
-        if self.legacy_neighborhood not in ("self", "moore"):
+        if self.cascade_qc_min_tx is not None and self.cascade_qc_min_tx < 0:
             raise ValueError(
-                f"group.legacy_neighborhood must be 'self' or 'moore'; got {self.legacy_neighborhood!r}"
-            )
-        if self.legacy_min_comp_size < 1:
-            raise ValueError(
-                f"group.legacy_min_comp_size must be >= 1; got {self.legacy_min_comp_size}"
+                f"group.cascade_qc_min_tx must be >= 0 (0 = off); got {self.cascade_qc_min_tx}"
             )
 
 
@@ -587,14 +570,30 @@ class StitchConfig:
     mode: Literal["count", "primitives"] = "count"
     metric: Literal["pmi", "npmi"] = "pmi"
     penalize_simplicity: bool = True
-    deltaC_min: float = 0.03
+    # 2026-11-19: SEG default loosened 0.03 -> -0.3 together with the
+    # merge-time guards below (whole-cell guard, merged-C floor, cumulative
+    # ΔC budget), as chosen on GBM. NOSEG keeps 0.03 (platform preset), the
+    # value that stopped supercells there.
+    deltaC_min: float = -0.3
 
     # C(union) bypass for ΔC-failing pairs
     c_union_bypass: float | None = 0.9
     c_union_bypass_max_n_tx: int | None = 50
 
-    # Merger-tree depth cap
-    max_merger_depth: int | None = 3
+    # Merger-tree depth cap (NOSEG preset keeps 3)
+    max_merger_depth: int | None = 5
+
+    # Merge-time guards, checked on every merge Stitch is about to make.
+    # None (Python) or -inf (TOML) = off. NOSEG preset turns all three off.
+    #   merged_c_min           C(union) >= this.
+    #   cell_delta_c_min       a merge involving a whole cell needs ΔC >= this.
+    #   cumulative_delta_c_min ΔC summed over a group's merge tree >= this.
+    merged_c_min: float | None = 0.0
+    cell_delta_c_min: float | None = -0.1
+    cumulative_delta_c_min: float | None = -0.3
+    # After each merge, re-score the new group against its neighbours
+    # (grid candidates only). NOSEG preset: off.
+    requeue_neighbours: bool = True
 
     # Spatial gate
     candidate_source: Literal["grid", "delaunay"] = "grid"
@@ -608,7 +607,10 @@ class StitchConfig:
     # Platform presets set this (cosmx=0.8, merfish=1.5); Xenium/Atera keep 1.0.
     g_z_um: float | str | None = 1.0
     z_neighbor_depth: int = 1                   # ±depth z bins
-    neighborhood: Literal["4", "8"] = "8"       # xy Moore reach
+    # xy reach between bins: "4", "8" (Moore-1) or "R<N>" (Moore-N).
+    # Default "8" for SEG and NOSEG. Moore-2 ("R2") lets partials attach across
+    # an empty bin and, with deltaC_min -0.3, chain into long thin entities.
+    neighborhood: str = "8"
     dist_threshold_um: float = 5.0              # max 3D distance for candidate pairs
 
     # Witness floor (per-entity tx count in shared bin neighborhood)
@@ -641,6 +643,22 @@ class StitchConfig:
             raise ValueError(
                 f"stitch.deltaC_min out of range: {self.deltaC_min}"
             )
+        nb = str(self.neighborhood)
+        if not (nb in ("0", "4", "8")
+                or (nb.startswith("R") and nb[1:].isdigit() and int(nb[1:]) >= 1)):
+            raise ValueError(
+                f"stitch.neighborhood must be '0', '4', '8' or 'R<N>' (N >= 1); "
+                f"got {self.neighborhood!r}"
+            )
+        for _name in ("merged_c_min", "cell_delta_c_min", "cumulative_delta_c_min"):
+            _v = getattr(self, _name)
+            if _v is not None and _v == float("-inf"):
+                # TOML has no null; -inf (no floor) is its spelling of off.
+                object.__setattr__(self, _name, None)
+            elif _v is not None and not (-1.0 <= _v <= 1.0):
+                raise ValueError(
+                    f"stitch.{_name} must be in [-1, 1], -inf (off) or None; got {_v}"
+                )
         if self.c_union_bypass is not None and not (0.0 <= self.c_union_bypass <= 1.0):
             raise ValueError(
                 f"stitch.c_union_bypass out of range: {self.c_union_bypass}"
@@ -1050,6 +1068,46 @@ _RETIRED_KEYS: dict[tuple[str, str], Any] = {
         'removed -- it was never wired (the pipeline used a module constant) '
         'and fired 0-1 times per ROI. Coherence is gated at Mid-QC instead; '
         'delete this key'
+    ),
+    ("group", "seg_residual_cascade"): lambda v: (
+        'removed -- the legacy spatial-CC Group backend was retired '
+        '(unified-prune step 7); Group is always the density cascade. '
+        'Delete this key'
+    ),
+    ("group", "noseg_cascade"): lambda v: (
+        'removed -- the legacy spatial-CC Group backend was retired '
+        '(unified-prune step 7); Group is always the density cascade. '
+        'Delete this key'
+    ),
+    ("group", "legacy_bin_size_um"): lambda v: (
+        'removed -- the legacy spatial-CC Group backend was retired '
+        '(unified-prune step 7); Group is always the density cascade. '
+        'Delete this key'
+    ),
+    ("group", "legacy_neighborhood"): lambda v: (
+        'removed -- the legacy spatial-CC Group backend was retired '
+        '(unified-prune step 7); Group is always the density cascade. '
+        'Delete this key'
+    ),
+    ("group", "legacy_k"): lambda v: (
+        'removed -- the legacy spatial-CC Group backend was retired '
+        '(unified-prune step 7); Group is always the density cascade. '
+        'Delete this key'
+    ),
+    ("group", "legacy_dist_threshold"): lambda v: (
+        'removed -- the legacy spatial-CC Group backend was retired '
+        '(unified-prune step 7); Group is always the density cascade. '
+        'Delete this key'
+    ),
+    ("group", "legacy_min_comp_size"): lambda v: (
+        'removed -- the legacy spatial-CC Group backend was retired '
+        '(unified-prune step 7); Group is always the density cascade. '
+        'Delete this key'
+    ),
+    ("group", "legacy_npmi_threshold"): lambda v: (
+        'removed -- the legacy spatial-CC Group backend was retired '
+        '(unified-prune step 7); Group is always the density cascade. '
+        'Delete this key'
     ),
 }
 
