@@ -702,6 +702,46 @@ _LAST_GATE_STATS: dict[str, int] = {}
 _LAST_STITCH_PHASE_TIMINGS: dict[str, float] = {}
 
 
+def _maha_d(ca: np.ndarray, cb: np.ndarray) -> float:
+    """Mahalanobis D between two tx clouds:
+    D = sqrt((μ_A − μ_B)^T Σ_pooled^-1 (μ_A − μ_B)),
+    Σ_pooled = ((n_A − 1)·Cov_A + (n_B − 1)·Cov_B) / (n_A + n_B − 2).
+
+    Axes with no spread in either cloud are dropped first (e.g. z on
+    Visium HD, where every bin sits at z = 0); otherwise Σ_pooled is
+    singular and D is never defined. Returns NaN when n < 2 on either
+    side, when no axis varies, or when Σ_pooled is ill-conditioned
+    (callers treat NaN as "no rescue").
+    """
+    if ca is None or cb is None or ca.size == 0 or cb.size == 0:
+        return float("nan")
+    n_a = int(ca.shape[0])
+    n_b = int(cb.shape[0])
+    if n_a < 2 or n_b < 2:
+        return float("nan")
+    keep = (np.ptp(ca, axis=0) > 0) | (np.ptp(cb, axis=0) > 0)
+    if not keep.any():
+        return float("nan")
+    ca = ca[:, keep]
+    cb = cb[:, keep]
+    mu_a = ca.mean(axis=0)
+    mu_b = cb.mean(axis=0)
+    cov_a = np.atleast_2d(np.cov(ca, rowvar=False, ddof=1))
+    cov_b = np.atleast_2d(np.cov(cb, rowvar=False, ddof=1))
+    cov_pooled = ((n_a - 1) * cov_a + (n_b - 1) * cov_b) / float(n_a + n_b - 2)
+    try:
+        cond = np.linalg.cond(cov_pooled)
+        if not np.isfinite(cond) or cond > 1e12:
+            return float("nan")
+        diff = (mu_a - mu_b).reshape(-1, 1)
+        d2 = float((diff.T @ np.linalg.solve(cov_pooled, diff)).item())
+    except np.linalg.LinAlgError:
+        return float("nan")
+    if not np.isfinite(d2) or d2 < 0.0:
+        return float("nan")
+    return float(np.sqrt(d2))
+
+
 def _stitch_entities_hierarchical_decomposable(
     summary_df: pd.DataFrame,
     aux: dict,
@@ -1699,45 +1739,10 @@ def stitch_entities_hierarchical(
                 mahalanobis_d_rescue = None  # graceful no-op
 
     def _mahalanobis_distance(ra: int, rb: int) -> float:
-        """Mahalanobis-D between the two roots' tx clouds.
-
-        D = sqrt( (μ_A − μ_B)^T  Σ_pooled^-1  (μ_A − μ_B) ),
-        Σ_pooled = ((n_A − 1)·Cov_A + (n_B − 1)·Cov_B) / (n_A + n_B − 2)
-
-        Returns NaN when n<2 in either side, when tx coords are
-        unavailable, or when Σ_pooled is singular / numerically
-        ill-conditioned (callers treat NaN as "no rescue").
-        """
+        """Mahalanobis D between the two roots' tx clouds (see `_maha_d`)."""
         if root_tx_coords is None:
             return float("nan")
-        ca = root_tx_coords[ra]
-        cb = root_tx_coords[rb]
-        if ca is None or cb is None or ca.size == 0 or cb.size == 0:
-            return float("nan")
-        n_a = int(ca.shape[0])
-        n_b = int(cb.shape[0])
-        if n_a < 2 or n_b < 2:
-            return float("nan")
-        mu_a = ca.mean(axis=0)
-        mu_b = cb.mean(axis=0)
-        cov_a = np.atleast_2d(np.cov(ca, rowvar=False, ddof=1))
-        cov_b = np.atleast_2d(np.cov(cb, rowvar=False, ddof=1))
-        denom = float(n_a + n_b - 2)
-        if denom <= 0.0:
-            return float("nan")
-        cov_pooled = ((n_a - 1) * cov_a + (n_b - 1) * cov_b) / denom
-        try:
-            cond = np.linalg.cond(cov_pooled)
-            if not np.isfinite(cond) or cond > 1e12:
-                return float("nan")
-            diff = (mu_a - mu_b).reshape(-1, 1)
-            sol = np.linalg.solve(cov_pooled, diff)
-            d2 = float((diff.T @ sol).item())
-        except np.linalg.LinAlgError:
-            return float("nan")
-        if not np.isfinite(d2) or d2 < 0.0:
-            return float("nan")
-        return float(np.sqrt(d2))
+        return _maha_d(root_tx_coords[ra], root_tx_coords[rb])
 
     def _spatial_overlap(ra: int, rb: int) -> bool:
         """Default rule: smaller's centroid inside larger's tx cloud.
