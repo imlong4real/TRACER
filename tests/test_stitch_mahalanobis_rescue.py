@@ -98,7 +98,7 @@ def test_config_default_ships_on():
     """Default Stitch Mahalanobis-D rescue ships at D=1.0."""
     cfg = StitchConfig()
     assert cfg.mahalanobis_d_rescue == 1.0
-    assert cfg.rescue_delta_c_floor == -0.2
+    assert cfg.rescue_delta_c_floor == -0.5
 
 
 def test_config_can_disable():

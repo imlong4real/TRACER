@@ -1622,6 +1622,7 @@ def stitch_entities_hierarchical(
         "merges_total": 0,        # all unions
         "mahalanobis_rescue_checks": 0,  # ΔC-borderline pairs evaluated for rescue
         "mahalanobis_rescues": 0,        # actual ΔC rejects overridden by Maha rescue
+        "merges_via_maha": 0,            # rescues that merged
         "blocked_merged_c": 0,           # merges stopped by merged_c_min
         "blocked_cell_guard": 0,         # merges stopped by cell_delta_c_min
         "blocked_cumulative_dc": 0,      # merges stopped by cumulative_delta_c_min
@@ -2101,11 +2102,14 @@ def stitch_entities_hierarchical(
                 post_override = True
             elif (
                 mahalanobis_d_rescue is not None
+                and merger_depth[ra] == 0 and merger_depth[rb] == 0
                 and np.isfinite(dc_now)
                 and rescue_delta_c_floor < dc_now < 0.0
             ):
                 # Mahalanobis RESCUE — override the ΔC reject when the
-                # two tx clouds are geometrically enmeshed.
+                # two tx clouds are geometrically enmeshed. Only between
+                # two pre-stitch entities: once a group has merged, its tx
+                # cloud spans several pieces and D no longer says "one body".
                 _LAST_GATE_STATS["mahalanobis_rescue_checks"] += 1
                 d = _mahalanobis_distance(ra, rb)
                 if np.isfinite(d) and d <= float(mahalanobis_d_rescue):
@@ -2120,12 +2124,18 @@ def stitch_entities_hierarchical(
         if _merged_c_on and not (np.isfinite(cu_now) and cu_now >= merged_c_min):
             _LAST_GATE_STATS["blocked_merged_c"] += 1
             continue
-        if (_cell_guard_on and (has_cell[ra] or has_cell[rb])
+        # A Mahalanobis-rescued merge skips the whole-cell guard and is not
+        # charged to the cumulative budget: the rescue exists for cells whose
+        # programs are anti-correlated on the panel (e.g. EMT), so its ΔC is
+        # negative by construction. merged_c_min still applies.
+        if (_cell_guard_on and not maha_rescued and (has_cell[ra] or has_cell[rb])
                 and not (np.isfinite(dc_now) and dc_now >= cell_delta_c_min)):
             _LAST_GATE_STATS["blocked_cell_guard"] += 1
             continue
         _dc_real = (dc_now if np.isfinite(dc_now)
                     and dc_now < _SPATIAL_OVERLAP_DC * 0.5 else 0.0)
+        if maha_rescued:
+            _dc_real = 0.0   # a group already over budget still stops
         if _cum_on and (cum_dc[ra] + cum_dc[rb] + _dc_real) < cumulative_delta_c_min:
             _LAST_GATE_STATS["blocked_cumulative_dc"] += 1
             continue
@@ -2134,6 +2144,8 @@ def stitch_entities_hierarchical(
         rnew = dsu.union(ra, rb)
         rold = rb if rnew == ra else ra
         _LAST_GATE_STATS["merges_total"] += 1
+        if maha_rescued:
+            _LAST_GATE_STATS["merges_via_maha"] += 1
         # Update merger-tree depth: new root carries 1 + max of children.
         merger_depth[rnew] = max(int(merger_depth[ra]),
                                   int(merger_depth[rb])) + 1
@@ -2261,10 +2273,8 @@ def stitch_entities_hierarchical(
                     if not can_merge(rr, rn):
                         continue
                     dtry, ctry = compute_deltaC_roots(rr, rn)
-                    if _pair_passes_gate(dtry, ctry, rr, rn) or (
-                        mahalanobis_d_rescue is not None and np.isfinite(dtry)
-                        and rescue_delta_c_floor < dtry < 0.0
-                    ):
+                    # rr has merged, so only gate-passing pairs can still merge.
+                    if _pair_passes_gate(dtry, ctry, rr, rn):
                         heapq.heappush(heap, _heap_item(dtry, rr, rn))
                         _LAST_GATE_STATS["requeued_pairs"] += 1
 

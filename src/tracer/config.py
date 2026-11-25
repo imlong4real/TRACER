@@ -628,15 +628,21 @@ class StitchConfig:
     # (PDAC 2 mm: ~1.8 k cell-consolidations that ΔC alone misses);
     # set to ``None`` to disable.
     #
-    # The `rescue_delta_c_floor` (default -0.2, must be ≤ 0) protects
-    # against fusing engulfment doublets (jikammne-like: ΔC = -0.49,
-    # D ≈ 0.5 — D is low, but ΔC is well below the floor → no rescue).
+    # The `rescue_delta_c_floor` (must be ≤ 0) bounds how strongly
+    # composition may reject before geometry can override it. A rescued
+    # merge skips cell_delta_c_min and is not charged to
+    # cumulative_delta_c_min (merged_c_min still applies). Note the
+    # engulfment doublet jikammne (ΔC = -0.49, D ≈ 0.5) was kept split by
+    # the old -0.2 floor and falls inside the -0.5 band.
     # An earlier veto-direction Maha implementation was superseded —
     # the witness floor `min_local_tx_per_entity` already gates the
     # accept path adequately; geometry's useful contribution is the
     # rescue, not a veto.
     mahalanobis_d_rescue: float | None = 1.0
-    rescue_delta_c_floor: float = -0.2
+    # 2026-11-24: SEG floor -0.2 -> -0.5. With deltaC_min -0.3 every pair
+    # above -0.3 already passes, so the rescue only acts in (floor, -0.3).
+    # NOSEG preset keeps -0.2 (its deltaC_min is 0.03).
+    rescue_delta_c_floor: float = -0.5
 
     def __post_init__(self) -> None:
         if not (-1.0 <= self.deltaC_min <= 1.0):

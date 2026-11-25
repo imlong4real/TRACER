@@ -352,9 +352,11 @@ min_local_tx_per_entity = 3
 # geometrically enmeshed (low Mahalanobis D relative to the pooled
 # covariance structure). Recovers EMT-like cells where the panel's
 # epi/mes anti-correlation makes ΔC reject a legitimate single-cell
-# merge. The ΔC floor protects against fusing engulfment doublets
-# where composition rejects strongly (e.g. jikammne ΔC = -0.49 with
-# D ≈ 0.5 stays split because -0.49 < -0.2 floor).
+# merge. The ΔC floor bounds how strongly composition may reject before
+# geometry can override it. A rescued merge skips cell_delta_c_min and is
+# not charged to cumulative_delta_c_min (merged_c_min still applies). The
+# engulfment doublet jikammne (ΔC = -0.49, D ≈ 0.5) was kept split by the
+# old -0.2 floor and falls inside the -0.5 band.
 #
 # An earlier veto-direction Maha implementation was superseded — the
 # witness floor `min_local_tx_per_entity` already gates the accept
@@ -365,7 +367,9 @@ min_local_tx_per_entity = 3
 # cell-consolidations that ΔC alone misses). Comment out the line
 # below (or set to "off" via code) to disable.
 mahalanobis_d_rescue = 1.0
-rescue_delta_c_floor = -0.2
+# 2026-11-24: SEG floor -0.2 -> -0.5. With deltaC_min = -0.3 a pair above
+# -0.3 already passes, so the rescue only acts in (floor, -0.3).
+rescue_delta_c_floor = -0.5
 
 
 # ---------------------------------------------------------------------

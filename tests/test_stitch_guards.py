@@ -114,6 +114,42 @@ def test_cumulative_budget_stops_a_chain():
     assert _LAST_GATE_STATS["blocked_cumulative_dc"] >= 1
 
 
+def test_rescued_merge_skips_cell_guard_and_budget():
+    """A ΔC-rejected cell + partial pair (ΔC ≈ -0.18) that the Mahalanobis
+    rescue admits is merged despite the -0.1 whole-cell guard and a -0.1
+    budget; without the rescue the same guards keep it split."""
+    aux, df = _pair(etype_a="cell")
+    strict = dict(deltaC_min=0.03, cell_delta_c_min=-0.1, cumulative_delta_c_min=-0.1)
+    assert _n(df, aux, **strict) == 2                  # gate rejects, no rescue
+    assert _n(df, aux, **strict, mahalanobis_d_rescue=1.0, rescue_delta_c_floor=-0.5) == 1
+    assert _LAST_GATE_STATS["mahalanobis_rescues"] >= 1
+    assert _LAST_GATE_STATS["merges_via_maha"] == 1
+    assert _LAST_GATE_STATS["blocked_cell_guard"] == 0
+    assert _LAST_GATE_STATS["blocked_cumulative_dc"] == 0
+
+
+def test_rescue_only_between_unmerged_entities():
+    """The rescue joins two pre-stitch entities, never a group that has
+    already merged. a1 + a2 (same program) merge through the gate; b sits
+    on them with ΔC ≈ -0.18, which only the rescue could admit."""
+    rng = np.random.default_rng(7)
+    aux, pool_a, pool_b = _build_aux_and_pools(prog_size=10, overlap_frac=0.70, cross=-0.3)
+    a1 = _gauss_entity("a-1-1", 60, (0.0, 0.0, 0.0), 2.0, pool_a, rng)
+    b = _gauss_entity("b-1-1", 60, (0.5, 0.0, 0.0), 2.0, pool_b, rng)
+    rescue = dict(deltaC_min=0.03, mahalanobis_d_rescue=1.0, rescue_delta_c_floor=-0.5)
+    assert _n(pd.concat([a1, b], ignore_index=True), aux, **rescue) == 1     # depth 0: rescued
+    a2 = _gauss_entity("a-2-1", 60, (1.0, 0.0, 0.0), 2.0, pool_a, rng)
+    assert _n(pd.concat([a1, a2, b], ignore_index=True), aux, **rescue) == 2  # a1+a2 merge first
+    assert _LAST_GATE_STATS["merges_via_maha"] == 0
+
+
+def test_rescued_merge_still_needs_merged_c():
+    aux, df = _pair(etype_a="cell")
+    assert _n(df, aux, deltaC_min=0.03, merged_c_min=0.999,
+              mahalanobis_d_rescue=1.0, rescue_delta_c_floor=-0.5) == 2
+    assert _LAST_GATE_STATS["blocked_merged_c"] >= 1
+
+
 @pytest.mark.parametrize("off", [None, float("-inf")])
 def test_guards_off_spellings_change_nothing(off):
     aux, df = _pair(etype_a="cell")
@@ -156,7 +192,7 @@ def test_seg_defaults_are_the_chosen_set():
     assert (s.deltaC_min, s.neighborhood, s.max_merger_depth) == (-0.3, "8", 5)
     assert (s.merged_c_min, s.cell_delta_c_min, s.cumulative_delta_c_min) == (0.0, -0.1, -0.3)
     assert s.requeue_neighbours is True
-    assert s.rescue_delta_c_floor == -0.2
+    assert s.rescue_delta_c_floor == -0.5
     assert StitchConfig() == s
 
 
@@ -165,6 +201,7 @@ def test_noseg_keeps_previous_stitch():
     assert (s.deltaC_min, s.neighborhood, s.max_merger_depth) == (0.03, "8", 3)
     assert (s.merged_c_min, s.cell_delta_c_min, s.cumulative_delta_c_min) == (None, None, None)
     assert s.requeue_neighbours is False
+    assert s.rescue_delta_c_floor == -0.2
     assert P._resolve_pipeline_cfg(None, noseg=True).stitch == s
 
 
