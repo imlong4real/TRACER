@@ -37,3 +37,4 @@ merged_c_min = -inf
 cell_delta_c_min = -inf
 cumulative_delta_c_min = -inf
 requeue_neighbours = false
+rescue_delta_c_floor = -0.2

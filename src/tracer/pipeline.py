@@ -1145,7 +1145,7 @@ STITCH_MAX_MERGER_DEPTH: int | None = 5   # 2026-11-19: 3 -> 5 (SEG); NOSEG keep
 NOSEG_STITCH_OVERRIDES: dict = dict(
     deltaC_min=0.03, neighborhood="8", max_merger_depth=3,
     merged_c_min=None, cell_delta_c_min=None, cumulative_delta_c_min=None,
-    requeue_neighbours=False,
+    requeue_neighbours=False, rescue_delta_c_floor=-0.2,
 )
 
 # Mid-pipeline QC (after Group, before Stitch).

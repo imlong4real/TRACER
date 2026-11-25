@@ -98,7 +98,7 @@ def test_config_default_ships_on():
     """Default Stitch Mahalanobis-D rescue ships at D=1.0."""
     cfg = StitchConfig()
     assert cfg.mahalanobis_d_rescue == 1.0
-    assert cfg.rescue_delta_c_floor == -0.2
+    assert cfg.rescue_delta_c_floor == -0.5
 
 
 def test_config_can_disable():
@@ -389,3 +389,37 @@ def test_stitch_homogenizes_merged_etype():
     assert per_label.iloc[0] == {"cell"}, (
         f"merged _etype not homogenized: {per_label.iloc[0]}"
     )
+
+
+# ---------------------------------------------------------------------
+# Flat data (Visium HD: every bin at z = 0). A constant axis is dropped
+# before the covariance is inverted; otherwise D is undefined and the
+# rescue silently never fires.
+# ---------------------------------------------------------------------
+
+def test_maha_d_drops_constant_axes():
+    from tracer.stitching import _maha_d
+    rng = np.random.default_rng(0)
+    a2, b2 = rng.normal(0, 1, (40, 2)), rng.normal(0.5, 1, (40, 2))
+    a3 = np.column_stack([a2, np.zeros(40)])
+    b3 = np.column_stack([b2, np.zeros(40)])
+    assert np.isfinite(_maha_d(a3, b3))
+    assert _maha_d(a3, b3) == pytest.approx(_maha_d(a2, b2))
+    assert np.isnan(_maha_d(np.zeros((5, 3)), np.zeros((5, 3))))   # nothing varies
+
+
+def test_rescue_fires_on_flat_data():
+    """The concentric EMT-like pair from test_emt_concentric_rescue_fires,
+    flattened to z = 0, is still rescued."""
+    rng = np.random.default_rng(0)
+    aux, pool_A, pool_B = _build_aux_and_pools(prog_size=10, overlap_frac=0.70, cross=-0.3)
+    a = _gauss_entity("a-1-1", 60, (0.0, 0.0, 0.0), 2.0, pool_A, rng)
+    b = _gauss_entity("b-1-1", 60, (0.0, 0.0, 0.0), 2.0, pool_B, rng)
+    df = pd.concat([a, b], ignore_index=True).assign(z=0.0)
+    out, _ = apply_stitching_to_transcripts_memory_efficient(
+        df, aux=aux, candidate_source="grid", G=2.0, G_z=2.0, z_neighbor_depth=1,
+        dist_threshold=10.0, deltaC_min=0.03, max_merger_depth=None, c_union_bypass=None,
+        show_progress=False, mahalanobis_d_rescue=1.0, rescue_delta_c_floor=-0.5,
+    )
+    assert out["tracer_id"].astype(str).nunique() == 1
+    assert _LAST_GATE_STATS["merges_via_maha"] == 1

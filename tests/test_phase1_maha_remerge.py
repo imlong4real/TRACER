@@ -314,3 +314,17 @@ def test_maha_remerge_homogenizes_merged_etype():
         f"merged _etype not homogenized to the priority winner: "
         f"{per_label.iloc[0]}"
     )
+
+
+def test_rescue_fires_on_flat_data():
+    """Visium HD bins all sit at z = 0. The constant axis is dropped
+    before inverting the covariance, so the concentric EMT pair is still
+    re-merged."""
+    rng = np.random.default_rng(0)
+    aux, pool_A, pool_B = _build_aux_and_pools(prog_size=10, overlap_frac=0.70, cross=-0.3)
+    a = _entity("a-1-1", 60, center=(0.0, 0.0, 0.0), sigma=2.0, gene_pool=pool_A, rng=rng)
+    b = _entity("b-1-1", 60, center=(0.0, 0.0, 0.0), sigma=2.0, gene_pool=pool_B, rng=rng)
+    df = pd.concat([a, b], ignore_index=True).assign(z=0.0)
+    df_out, stats = phase1_maha_remerge(df, aux, threshold=1.0, floor=-0.2)
+    assert stats["n_rescues"] >= 1
+    assert df_out.tracer_id.astype(str).nunique() == 1
